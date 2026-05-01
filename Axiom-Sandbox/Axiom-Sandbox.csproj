@@ -65,7 +65,7 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\Axiom-ScriptCore\Axiom-ScriptCore.csproj">
-      <Project>{C1A72EAF-2D33-9C73-3644-1F68A24EF873}</Project>
+      <Project>{4EEE5892-3AE7-77E4-6319-5D694F7157F0}</Project>
       <Name>Axiom-ScriptCore</Name>
     </ProjectReference>
   </ItemGroup>

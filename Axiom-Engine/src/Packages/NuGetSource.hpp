@@ -1,10 +1,11 @@
 #pragma once
 #include "Packages/PackageSource.hpp"
+#include "Core/Export.hpp"
 #include <string>
 
 namespace Axiom {
 
-	class NuGetSource : public PackageSource {
+	class AXIOM_API NuGetSource : public PackageSource {
 	public:
 		explicit NuGetSource(const std::string& toolExePath);
 

@@ -42,7 +42,8 @@ function MergeDependencySets(...)
         IncludeDirs = {},
         LibDirs = {},
         DependsOn = {},
-        Links = {}
+        Links = {},
+        Defines = {}
     }
 
     for index = 1, select("#", ...) do
@@ -52,6 +53,7 @@ function MergeDependencySets(...)
             AppendUnique(merged.LibDirs, dependency.LibDirs)
             AppendUnique(merged.DependsOn, dependency.DependsOn)
             AppendUnique(merged.Links, dependency.Links)
+            AppendUnique(merged.Defines, dependency.Defines)
         end
     end
 
@@ -138,6 +140,15 @@ Dependency["EngineCoreRender"] =
     },
 
     LibDirs = {},
+
+    -- GLFW + Glad are SharedLibs to avoid duplicating their global state across
+    -- engine.dll and each consumer .exe. Consumers must define the import-side
+    -- macros (the libs themselves define the *_BUILD variants in their own premake).
+    Defines =
+    {
+        "GLFW_DLL",
+        "GLAD_GLAPI_EXPORT"
+    },
 
     DependsOn =
     {

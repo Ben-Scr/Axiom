@@ -20,7 +20,7 @@
 
 namespace Axiom {
 
-	void ReportAssertionFailure(
+	AXIOM_API void ReportAssertionFailure(
 		const char* kind,
 		const char* expression,
 		std::string_view message,

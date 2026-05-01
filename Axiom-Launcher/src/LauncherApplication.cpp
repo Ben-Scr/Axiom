@@ -3,6 +3,7 @@
 #include "Core/Application.hpp"
 #include "Scene/SceneDefinition.hpp"
 #include "Scene/SceneManager.hpp"
+#include <Gui/ImGuiContextLayer.hpp>
 #include <Systems/LauncherLayer.hpp>
 #include <Core/Version.hpp>
 
@@ -31,6 +32,9 @@ public:
 	}
 
 	void ConfigureLayers() override {
+		// ImGuiContextLayer must be pushed first — its OnPreRender / OnPostRender wrap
+		// ImGui::NewFrame and ImGui::Render around the launcher's UI work.
+		PushLayer<ImGuiContextLayer>();
 		PushLayer<LauncherLayer>();
 	}
 

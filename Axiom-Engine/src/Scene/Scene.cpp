@@ -527,8 +527,8 @@ namespace Axiom {
 		ForeachEnabledSystem("FixedUpdate", [this](ISystem& s) { s.FixedUpdate(*this); });
 	}
 
-	void Scene::OnGuiSystems() {
-		ForeachEnabledSystem("OnGui", [this](ISystem& s) { s.OnGui(*this); });
+	void Scene::OnPreRenderSystems() {
+		ForeachEnabledSystem("OnPreRender", [this](ISystem& s) { s.OnPreRender(*this); });
 	}
 
 	void Scene::ForeachEnabledSystem(std::string_view phase, const std::function<void(ISystem&)>& func) {

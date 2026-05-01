@@ -89,7 +89,7 @@ namespace Axiom {
 		DestroyFBO(m_EditorViewFBO);
 	}
 
-	void ImGuiEditorLayer::OnImGuiRender(Application& app) {
+	void ImGuiEditorLayer::OnPreRender(Application& app) {
 		(void)app;
 		Scene* activeScene = SceneManager::Get().GetActiveScene();
 		if (!activeScene) {
@@ -337,6 +337,31 @@ namespace Axiom {
 				std::chrono::steady_clock::now() - m_BuildStartTime).count();
 			ImGui::ProgressBar(fmodf(elapsed * 0.4f, 1.0f), ImVec2(-1, 0), "");
 			ImGui::End();
+		}
+
+		// Script rebuild overlay — rendered editor-side so the engine has no ImGui dep.
+		if (scene.HasSystem<ScriptSystem>()) {
+			auto* scriptSys = scene.GetSystem<ScriptSystem>();
+			if (scriptSys && (scriptSys->IsScriptRebuildRunning() || scriptSys->IsNativeRebuildRunning())) {
+				ImGuiViewport* viewport = ImGui::GetMainViewport();
+				ImVec2 center(viewport->Pos.x + viewport->Size.x * 0.5f,
+					viewport->Pos.y + viewport->Size.y * 0.5f);
+
+				ImGui::SetNextWindowPos(center, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+				ImGui::SetNextWindowSize(ImVec2(320, 80));
+				ImGui::SetNextWindowBgAlpha(0.92f);
+
+				ImGuiWindowFlags overlayFlags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize
+					| ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar
+					| ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoNav;
+
+				ImGui::Begin("##ScriptBuildOverlay", nullptr, overlayFlags);
+				ImGui::TextUnformatted(scriptSys->IsNativeRebuildRunning() ? "Compiling Native Scripts..." : "Compiling Scripts...");
+				ImGui::Spacing();
+				const float elapsed = scriptSys->GetActiveRebuildElapsedSeconds();
+				ImGui::ProgressBar(fmodf(elapsed * 0.4f, 1.0f), ImVec2(-1, 0), "");
+				ImGui::End();
+			}
 		}
 
 		ImGui::End();

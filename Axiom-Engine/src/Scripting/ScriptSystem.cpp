@@ -11,7 +11,6 @@
 #include "Serialization/Path.hpp"
 #include "Project/ProjectManager.hpp"
 
-#include <imgui.h>
 #include <algorithm>
 #include <cstdlib>
 #include <cctype>
@@ -1050,7 +1049,7 @@ namespace Axiom {
 		return m_RebuildTask != nullptr || m_NativeRebuildTask != nullptr;
 	}
 
-	// ── OnGui: hot-reload polling + build overlay ──────────────────────
+	// ── OnPreRender: hot-reload polling + build overlay ──────────────────────
 
 	void ScriptSystem::TeardownManagedScripts(Scene& scene)
 	{
@@ -1226,7 +1225,7 @@ namespace Axiom {
 		DispatchCollision2D(scene, collision, CollisionDispatchPhase::Exit);
 	}
 
-	void ScriptSystem::OnGui(Scene& scene)
+	void ScriptSystem::OnPreRender(Scene& scene)
 	{
 		(void)scene;
 		if (m_PollingOwner == nullptr) {
@@ -1321,34 +1320,31 @@ namespace Axiom {
 			}
 		}
 
-		anyRebuilding = IsTaskRunning(m_RebuildTask) || IsTaskRunning(m_NativeRebuildTask);
+		// Overlay rendering is the editor's responsibility — IsScriptRebuildRunning() /
+		// IsNativeRebuildRunning() / GetActiveRebuildElapsedSeconds() expose the state.
+		(void)anyRebuilding;
+	}
 
-		// Build overlay
-		if (anyRebuilding)
-		{
-			ImGuiViewport* viewport = ImGui::GetMainViewport();
-			ImVec2 center(viewport->Pos.x + viewport->Size.x * 0.5f,
-			              viewport->Pos.y + viewport->Size.y * 0.5f);
+	bool ScriptSystem::IsScriptRebuildRunning() const
+	{
+		return IsTaskRunning(m_RebuildTask);
+	}
 
-			ImGui::SetNextWindowPos(center, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-			ImGui::SetNextWindowSize(ImVec2(320, 80));
-			ImGui::SetNextWindowBgAlpha(0.92f);
+	bool ScriptSystem::IsNativeRebuildRunning() const
+	{
+		return IsTaskRunning(m_NativeRebuildTask);
+	}
 
-			ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize
-				| ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar
-				| ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoNav;
-
-			ImGui::Begin("##ScriptBuildOverlay", nullptr, flags);
-			const bool nativeRebuildRunning = IsTaskRunning(m_NativeRebuildTask);
-			ImGui::TextUnformatted(nativeRebuildRunning ? "Compiling Native Scripts..." : "Compiling Scripts...");
-			ImGui::Spacing();
-
-			const auto startTime = nativeRebuildRunning ? m_NativeRebuildTask->StartedAt : m_RebuildTask->StartedAt;
-			float elapsed = std::chrono::duration<float>(std::chrono::steady_clock::now() - startTime).count();
-			ImGui::ProgressBar(fmodf(elapsed * 0.4f, 1.0f), ImVec2(-1, 0), "");
-
-			ImGui::End();
+	float ScriptSystem::GetActiveRebuildElapsedSeconds() const
+	{
+		const bool nativeRunning = IsTaskRunning(m_NativeRebuildTask);
+		const bool managedRunning = IsTaskRunning(m_RebuildTask);
+		if (!nativeRunning && !managedRunning) {
+			return 0.0f;
 		}
+
+		const auto startTime = nativeRunning ? m_NativeRebuildTask->StartedAt : m_RebuildTask->StartedAt;
+		return std::chrono::duration<float>(std::chrono::steady_clock::now() - startTime).count();
 	}
 
 	// ── Update: dual dispatch (Managed + Native) ───────────────────────

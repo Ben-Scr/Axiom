@@ -8,7 +8,7 @@
 namespace Axiom {
 
 	/// Detects and manages the external code editor used for opening scripts.
-	class AXIOM_API ExternalEditor {
+	class ExternalEditor {
 	public:
 		/// Detect all available editors on the system.
 		static void DetectEditors();

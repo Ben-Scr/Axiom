@@ -5,7 +5,11 @@ namespace Axiom {
 	std::unordered_map<std::string, EditorIcons::IconEntry> EditorIcons::s_Icons;
 	bool EditorIcons::s_Initialized = false;
 
-	static constexpr int k_AvailableSizes[] = { 16, 24, 32, 48, 64, 128, 256, 512 };
+	// Must mirror the actual sizes shipped under
+	// AxiomAssets/Textures/Editor/<name>/<name>_<size>.png. Listing a size here
+	// that isn't on disk causes `Editor icon not found` warnings every frame for
+	// any callsite whose snap-up lands on the missing size.
+	static constexpr int k_AvailableSizes[] = { 16, 32, 64, 128 };
 
 	void EditorIcons::Initialize() {
 		if (s_Initialized) return;

@@ -2,6 +2,7 @@
 
 #include "Base.hpp"
 #include "Base.hpp"
+#include "Core/Export.hpp"
 #include "Core/UUID32.hpp"
 
 namespace Axiom {
@@ -11,7 +12,7 @@ namespace Axiom {
 	// GUID and UUID, at the moment we're simply using a randomly generated 64-bit
 	// integer, as the possibility of a clash is low enough for now.
 	// This may change in the future.
-	class UUID
+	class AXIOM_API UUID
 	{
 	public:
 		UUID();

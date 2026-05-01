@@ -258,7 +258,7 @@ namespace Axiom {
 		void StartSystems(size_t* enteredSystemCount = nullptr);
 		void UpdateSystems();
 		void FixedUpdateSystems();
-		void OnGuiSystems();
+		void OnPreRenderSystems();
 		void DestroyScene();
 		void DestroyScene(size_t enabledSystemCount);
 		void ForeachEnabledSystem(std::string_view phase, const std::function<void(ISystem&)>& func);

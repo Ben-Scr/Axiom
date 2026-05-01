@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Core/Base.hpp"
+#include "Core/Export.hpp"
 #include "Utils/Event.hpp"
 
 #include <spdlog/fmt/fmt.h>
@@ -14,7 +15,7 @@
 
 namespace Axiom {
 
-	class Log {
+	class AXIOM_API Log {
 	public:
 		enum class Type : uint8_t {
 			Core = 0,

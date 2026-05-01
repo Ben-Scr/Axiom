@@ -1,10 +1,11 @@
 #pragma once
 #include "Packages/PackageSource.hpp"
+#include "Core/Export.hpp"
 #include <string>
 
 namespace Axiom {
 
-	class GitHubSource : public PackageSource {
+	class AXIOM_API GitHubSource : public PackageSource {
 	public:
 		GitHubSource(const std::string& toolExePath, const std::string& indexUrl,
 			const std::string& displayName = "Engine Packages");

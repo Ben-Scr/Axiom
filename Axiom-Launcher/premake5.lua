@@ -21,7 +21,9 @@ project "Axiom-Launcher"
 
     UseDependencySet(Dependency.EditorRuntimeCommon)
     defines(GetAxiomModuleDefines())
-    postbuildcommands { CopyAxiomAssets }
+    defines { "AIM_IMPORT_DLL" }
+    includedirs { "src" }
+    postbuildcommands { CopyAxiomAssets, CopyAxiomEngineDll, CopyGlfwDll, CopyGladDll }
 
     filter "system:windows"
         buildoptions { "/utf-8" }

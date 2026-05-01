@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Export.hpp"
+
 #include <cstddef>
 #include <cstdlib>
 #include <limits>
@@ -25,7 +27,7 @@ namespace Axiom {
 
 	namespace Memory
 	{
-		const AllocationStats& GetAllocationStats();
+		AXIOM_API const AllocationStats& GetAllocationStats();
 	}
 
 	template <class T>

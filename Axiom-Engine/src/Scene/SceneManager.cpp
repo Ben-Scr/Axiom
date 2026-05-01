@@ -450,9 +450,9 @@ namespace Axiom {
 		for (auto& scene : scenes) if (scene && scene->IsLoaded()) scene->UpdateSystems();
 	}
 
-	void SceneManager::OnGuiScenes() {
+	void SceneManager::OnPreRenderScenes() {
 		LoadedSceneList scenes = m_LoadedScenes;
-		for (auto& scene : scenes) if (scene && scene->IsLoaded()) scene->OnGuiSystems();
+		for (auto& scene : scenes) if (scene && scene->IsLoaded()) scene->OnPreRenderSystems();
 	}
 
 	void SceneManager::FixedUpdateScenes() {

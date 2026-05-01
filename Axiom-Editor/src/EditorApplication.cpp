@@ -5,6 +5,7 @@
 #include "Scene/EntityHelper.hpp"
 #include "Scene/SceneDefinition.hpp"
 #include "Scene/SceneManager.hpp"
+#include <Gui/ImGuiContextLayer.hpp>
 #include <Systems/ImGuiEditorLayer.hpp>
 #include <Systems/ImGuiDebugSystem.hpp>
 #include <Systems/GizmosDebugSystem.hpp>
@@ -57,6 +58,9 @@ public:
 	}
 
 	void ConfigureLayers() override {
+		// ImGuiContextLayer must be pushed first — its OnPreRender / OnPostRender wrap
+		// ImGui::NewFrame and ImGui::Render around the other layers' UI work.
+		PushLayer<ImGuiContextLayer>();
 		PushLayer<ImGuiEditorLayer>();
 		PushOverlay<ImGuiDebugSystem>();
 		PushOverlay<GizmosDebugSystem>();

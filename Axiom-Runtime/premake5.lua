@@ -20,10 +20,14 @@ project "Axiom-Runtime"
 
     UseDependencySet(Dependency.EditorRuntimeCommon)
     defines(GetAxiomModuleDefines())
+    defines { "AIM_IMPORT_DLL" }
 
     postbuildcommands
     {
-        CopyAxiomAssets
+        CopyAxiomAssets,
+        CopyAxiomEngineDll,
+        CopyGlfwDll,
+        CopyGladDll
     }
 
     filter "system:windows"

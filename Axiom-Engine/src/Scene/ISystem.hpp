@@ -32,8 +32,9 @@ namespace Axiom {
 		// Info: Gets called when system is destroyed
 		virtual void OnDestroy(Scene&) {}
 
-		// Info: Gets called on imgui frame start (every frame)
-		virtual void OnGui(Scene&) {}
+		// Info: Gets called once per frame after Update, before main renderer begin.
+		// Use for any per-frame work that needs to happen after gameplay update but before rendering.
+		virtual void OnPreRender(Scene&) {}
 
 		bool IsEnabled() const { return m_Enabled; }
 

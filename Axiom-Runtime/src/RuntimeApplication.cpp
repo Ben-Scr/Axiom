@@ -3,7 +3,6 @@
 #include "Scene/SceneDefinition.hpp"
 #include "Scene/SceneManager.hpp"
 
-#include "Systems/ImGuiDebugSystem.hpp"
 #include <Scene/EntityHelper.hpp>
 #include <Serialization/SceneSerializer.hpp>
 #include <Serialization/Path.hpp>

@@ -23,7 +23,6 @@
 namespace Axiom {
 	class GuiRenderer;
 	class GizmoRenderer2D;
-	class ImGuiRenderer;
 	class PhysicsSystem2D;
 	class Renderer2D;
 	class SceneManager;
@@ -154,7 +153,6 @@ namespace Axiom {
 	private:
 		std::unique_ptr<Window> m_Window;
 		std::unique_ptr<Renderer2D> m_Renderer2D;
-		std::unique_ptr<ImGuiRenderer> m_ImGuiRenderer;
 		std::unique_ptr<GuiRenderer> m_GuiRenderer;
 		std::unique_ptr<GizmoRenderer2D> m_GizmoRenderer2D;
 		std::unique_ptr<PhysicsSystem2D> m_PhysicsSystem2D;

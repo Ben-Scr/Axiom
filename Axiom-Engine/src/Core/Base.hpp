@@ -2,6 +2,8 @@
 
 //#include "Ref.h"
 
+#include "Core/Export.hpp"
+
 #include <magic_enum/magic_enum.hpp>
 
 #include <functional>
@@ -9,8 +11,8 @@
 
 namespace Axiom {
 
-	void InitializeCore();
-	void ShutdownCore();
+	AXIOM_API void InitializeCore();
+	AXIOM_API void ShutdownCore();
 
 }
 

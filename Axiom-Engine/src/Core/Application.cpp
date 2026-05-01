@@ -5,8 +5,8 @@
 #include "Graphics/Renderer2D.hpp"
 #include "Graphics/GizmoRenderer.hpp"
 #include "Graphics/TextureManager.hpp"
+#include "Core/PackageHost.hpp"
 #include "Graphics/OpenGL.hpp"
-#include "Gui/ImGuiRenderer.hpp"
 #include "Gui/GuiRenderer.hpp"
 #include "Math/Math.hpp"
 #include "Core/SingleInstance.hpp"
@@ -191,13 +191,6 @@ namespace Axiom {
 			AIM_INFO_TAG("GizmoRenderer", "Initialization took " + StringHelper::ToString(timer));
 		}
 
-		if (m_Configuration.EnableImGui) {
-			timer.Reset();
-			m_ImGuiRenderer = std::make_unique<ImGuiRenderer>();
-			m_ImGuiRenderer->Initialize(m_Window->GetGLFWWindow());
-			AIM_INFO_TAG("ImGuiRenderer", "Initialization took " + StringHelper::ToString(timer));
-		}
-
 		if (m_Configuration.EnableGuiRenderer) {
 			timer.Reset();
 			m_GuiRenderer = std::make_unique<GuiRenderer>();
@@ -247,6 +240,11 @@ namespace Axiom {
 			}
 		}
 
+		// Load Axiom packages discovered next to the running executable. Each package's
+		// AxiomPackage_OnLoad runs once here so packages can register with engine
+		// subsystems (script bindings, component types, etc.) before Start().
+		PackageHost::LoadAll();
+
 		ScriptEngine::RaiseApplicationStart();
 	}
 
@@ -278,12 +276,9 @@ namespace Axiom {
 
 			if (gameplayActive && m_SceneManager) m_SceneManager->UpdateScenes();
 
-			if (m_ImGuiRenderer) {
-				AXIOM_TRY_CATCH_LOG(m_ImGuiRenderer->BeginFrame());
-				if (m_SceneManager) m_SceneManager->OnGuiScenes();
-				for (const auto& layer : m_LayerStack) {
-					layer->OnImGuiRender(*this);
-				}
+			if (m_SceneManager) m_SceneManager->OnPreRenderScenes();
+			for (const auto& layer : m_LayerStack) {
+				AXIOM_TRY_CATCH_LOG(layer->OnPreRender(*this));
 			}
 
 			if (m_Renderer2D)
@@ -398,8 +393,9 @@ namespace Axiom {
 		if (m_Renderer2D)
 			AXIOM_TRY_CATCH_LOG(m_Renderer2D->EndFrame());
 
-		if (m_ImGuiRenderer)
-			AXIOM_TRY_CATCH_LOG(m_ImGuiRenderer->EndFrame());
+		for (const auto& layer : m_LayerStack) {
+			AXIOM_TRY_CATCH_LOG(layer->OnPostRender(*this));
+		}
 
 		if (m_GuiRenderer)
 			AXIOM_TRY_CATCH_LOG(m_GuiRenderer->EndFrame());
@@ -431,12 +427,9 @@ namespace Axiom {
 
 		RefreshRenderGuard guard(*this);
 
-		if (m_ImGuiRenderer) {
-			AXIOM_TRY_CATCH_LOG(m_ImGuiRenderer->BeginFrame());
-			if (m_SceneManager) AXIOM_TRY_CATCH_LOG(m_SceneManager->OnGuiScenes());
-			for (const auto& layer : m_LayerStack) {
-				layer->OnImGuiRender(*this);
-			}
+		if (m_SceneManager) AXIOM_TRY_CATCH_LOG(m_SceneManager->OnPreRenderScenes());
+		for (const auto& layer : m_LayerStack) {
+			AXIOM_TRY_CATCH_LOG(layer->OnPreRender(*this));
 		}
 
 		if (m_Renderer2D) {
@@ -444,8 +437,8 @@ namespace Axiom {
 			AXIOM_TRY_CATCH_LOG(m_Renderer2D->EndFrame());
 		}
 
-		if (m_ImGuiRenderer) {
-			AXIOM_TRY_CATCH_LOG(m_ImGuiRenderer->EndFrame());
+		for (const auto& layer : m_LayerStack) {
+			AXIOM_TRY_CATCH_LOG(layer->OnPostRender(*this));
 		}
 
 		if (m_GuiRenderer && m_SceneManager) {
@@ -511,13 +504,13 @@ namespace Axiom {
 
 		if (m_SceneManager) m_SceneManager->Shutdown();
 		if (ScriptEngine::IsInitialized()) ScriptEngine::Shutdown();
+		PackageHost::UnloadAll();
 		TextureManager::Shutdown();
 
 		if (m_PhysicsSystem2D) m_PhysicsSystem2D->Shutdown();
 		if (m_GuiRenderer) m_GuiRenderer->Shutdown();
 		if (m_GizmoRenderer2D) m_GizmoRenderer2D->Shutdown();
 		if (m_Renderer2D) m_Renderer2D->Shutdown();
-		if (m_ImGuiRenderer) m_ImGuiRenderer->Shutdown();
 
 		if (AudioManager::IsInitialized())
 			AudioManager::Shutdown();
@@ -530,7 +523,6 @@ namespace Axiom {
 			Window::Shutdown();
 		}
 
-		m_ImGuiRenderer.reset();
 		m_GuiRenderer.reset();
 		m_GizmoRenderer2D.reset();
 		m_Renderer2D.reset();

@@ -18,7 +18,7 @@ namespace Axiom {
 	public:
 		void Awake(Scene& scene) override;
 		void Update(Scene& scene) override;
-		void OnGui(Scene& scene) override;
+		void OnPreRender(Scene& scene) override;
 		void OnDestroy(Scene& scene) override;
 		static bool RemoveScript(Entity entity, size_t index);
 		static void RemoveAllScripts(Entity entity);
@@ -37,6 +37,12 @@ namespace Axiom {
 		bool RequestRebuildAndReloadAll();
 		bool IsRebuilding() const;
 		bool DidLastRebuildSucceed() const { return !m_LastRebuildFailed; }
+
+		// Editor overlay introspection — exposed so editor UI can render a
+		// "compiling..." overlay without the engine pulling in ImGui itself.
+		bool IsScriptRebuildRunning() const;
+		bool IsNativeRebuildRunning() const;
+		float GetActiveRebuildElapsedSeconds() const;
 
 	private:
 		void RebuildAndReloadScripts();

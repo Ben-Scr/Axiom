@@ -1,5 +1,6 @@
 #pragma once
 #include "Collections/Vec2.hpp"
+#include "Core/Export.hpp"
 #include <box2d/types.h>
 
 namespace Axiom {
@@ -9,7 +10,7 @@ namespace Axiom {
 }
 
 namespace Axiom {
-	class Rigidbody2DComponent {
+	class AXIOM_API Rigidbody2DComponent {
 	public:
 		Rigidbody2DComponent() = default;
 

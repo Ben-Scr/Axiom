@@ -4,6 +4,7 @@
 #include "TextureHandle.hpp"
 #include "Instance44.hpp"
 #include "Collections/AABB.hpp"
+#include "Core/Export.hpp"
 
 #include <glm/glm.hpp>
 #include <vector>
@@ -12,7 +13,7 @@
 namespace Axiom {
 	class Scene;
 
-	class Renderer2D {
+	class AXIOM_API Renderer2D {
 	public:
 		void Initialize();
 		void BeginFrame();

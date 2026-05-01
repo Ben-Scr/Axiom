@@ -1,8 +1,14 @@
 project "GLFW"
     location (path.join(ROOT_DIR, "premake/generated/GLFW"))
-    kind "StaticLib"
+    -- SharedLib so engine.dll and the consumer executable share one copy of GLFW's
+    -- global state (otherwise ImGui's GLFW backend reads an uninitialised _glfw struct
+    -- and asserts on PrevWndProc).
+    kind "SharedLib"
     language "C"
     staticruntime "off"
+
+    -- _GLFW_BUILD_DLL flips GLFWAPI to __declspec(dllexport); consumers define GLFW_DLL.
+    defines { "_GLFW_BUILD_DLL" }
 
     targetdir (path.join(ROOT_DIR, "bin/" .. outputdir .. "/%{prj.name}"))
     objdir (path.join(ROOT_DIR, "bin-int/" .. outputdir .. "/%{prj.name}"))

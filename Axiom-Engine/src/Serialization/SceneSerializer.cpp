@@ -330,18 +330,14 @@ namespace Axiom {
 					}
 				}
 
-				const std::string textureName = TextureManager::GetTextureName(spriteRenderer.TextureHandle);
-				if (!textureName.empty()) {
-					spriteValue.AddMember("texture", Value(textureName));
+				if (textureAssetId != 0) {
+					spriteValue.AddMember("textureAsset", Value(std::to_string(textureAssetId)));
 					Texture2D* texture = TextureManager::GetTexture(spriteRenderer.TextureHandle);
 					if (texture) {
 						spriteValue.AddMember("filter", Value(static_cast<int>(texture->GetFilter())));
 						spriteValue.AddMember("wrapU", Value(static_cast<int>(texture->GetWrapU())));
 						spriteValue.AddMember("wrapV", Value(static_cast<int>(texture->GetWrapV())));
 					}
-				}
-				if (textureAssetId != 0) {
-					spriteValue.AddMember("textureAsset", Value(std::to_string(textureAssetId)));
 				}
 
 				entityValue.AddMember("SpriteRenderer", std::move(spriteValue));
@@ -389,10 +385,6 @@ namespace Axiom {
 					}
 				}
 
-				const std::string audioPath = AudioManager::GetAudioName(audioSource.GetAudioHandle());
-				if (!audioPath.empty()) {
-					audioValue.AddMember("clip", Value(audioPath));
-				}
 				if (audioAssetId != 0) {
 					audioValue.AddMember("clipAsset", Value(std::to_string(audioAssetId)));
 				}
@@ -500,10 +492,6 @@ namespace Axiom {
 					}
 				}
 
-				const std::string textureName = TextureManager::GetTextureName(particleSystem.GetTextureHandle());
-				if (!textureName.empty()) {
-					particleValue.AddMember("texture", Value(textureName));
-				}
 				if (textureAssetId != 0) {
 					particleValue.AddMember("textureAsset", Value(std::to_string(textureAssetId)));
 				}
@@ -542,10 +530,6 @@ namespace Axiom {
 					}
 				}
 
-				const std::string textureName = TextureManager::GetTextureName(image.TextureHandle);
-				if (!textureName.empty()) {
-					imageValue.AddMember("texture", Value(textureName));
-				}
 				if (textureAssetId != 0) {
 					imageValue.AddMember("textureAsset", Value(std::to_string(textureAssetId)));
 				}

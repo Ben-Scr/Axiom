@@ -1,6 +1,7 @@
 #pragma once
 
 #include "AudioHandle.hpp"
+#include "Core/Export.hpp"
 
 #include <miniaudio.h>
 #include <glm/vec3.hpp>
@@ -16,7 +17,7 @@ namespace Axiom {
 	class AudioSourceComponent;
 	class Audio;
 
-	class AudioManager {
+	class AXIOM_API AudioManager {
 	public:
 		static constexpr uint32_t MAX_CONCURRENT_SOUNDS = 64;
 		static constexpr uint32_t MAX_SOUNDS_PER_FRAME = 8;

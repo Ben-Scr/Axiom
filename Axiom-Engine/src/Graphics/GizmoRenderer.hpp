@@ -1,6 +1,7 @@
 #pragma once
 #include "Graphics/PosColorVertex.hpp"
 #include "Graphics/Gizmo.hpp"
+#include "Core/Export.hpp"
 
 #include <glm/glm.hpp>
 
@@ -12,7 +13,7 @@ namespace Axiom {
     class Camera2DComponent;
     class Shader;
 
-    class GizmoRenderer2D {
+    class AXIOM_API GizmoRenderer2D {
     public:
         static bool Initialize();
         static void Shutdown();

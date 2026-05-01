@@ -42,6 +42,13 @@ newoption { trigger = "with-physics", description = "Enable the Axiom physics mo
 newoption { trigger = "with-scripting", description = "Enable the Axiom scripting module dependencies and AXIOM_WITH_SCRIPTING." }
 newoption { trigger = "with-editor", description = "Enable the Axiom editor module dependencies and AXIOM_WITH_EDITOR. This also enables render dependencies." }
 
+newoption
+{
+    trigger = "axiom-project",
+    value = "PATH",
+    description = "Absolute path to an Axiom project. Adds <PATH>/Packages/<Name>/axiom-package.lua manifests to the package loader so project-local packages get built into the same solution."
+}
+
 require("premake/fix_csharp_platforms")
 include "Dependencies.lua"
 
@@ -96,13 +103,15 @@ end
 
 AxiomModules = ResolveAxiomModules()
 
+-- The engine itself no longer depends on ImGui (the editor application owns its own
+-- ImGui context as a Layer). EngineCoreEditor is therefore consumed only by the
+-- editor and launcher executables, not by the engine static library.
 Dependency.EngineSelectedModules = MergeDependencySets(
     Dependency.EngineCore,
     AxiomModules.Render and Dependency.EngineCoreRender or nil,
     AxiomModules.Audio and Dependency.EngineCoreAudio or nil,
     AxiomModules.Physics and Dependency.EngineCorePhysics or nil,
-    AxiomModules.Scripting and Dependency.EngineCoreScripting or nil,
-    AxiomModules.Editor and Dependency.EngineCoreEditor or nil
+    AxiomModules.Scripting and Dependency.EngineCoreScripting or nil
 )
 
 Dependency.EditorRuntimeCommon = MergeDependencySets(
@@ -110,7 +119,8 @@ Dependency.EditorRuntimeCommon = MergeDependencySets(
         DependsOn = { "Axiom-Engine" },
         Links = { "Axiom-Engine" }
     },
-    Dependency.EngineSelectedModules
+    Dependency.EngineSelectedModules,
+    AxiomModules.Editor and Dependency.EngineCoreEditor or nil
 )
 
 function GetAxiomModuleDefines()
@@ -143,6 +153,22 @@ end
 
 -- Shared postbuild command: copy AxiomAssets into each target output directory.
 CopyAxiomAssets = '{COPYDIR} "' .. path.join(ROOT_DIR, "Axiom-Runtime/AxiomAssets") .. '" "%{cfg.targetdir}/AxiomAssets"'
+
+-- Shared postbuild command: copy the engine SharedLib next to each consumer executable
+-- so it resolves at runtime without depending on PATH.
+CopyAxiomEngineDll = '{COPYFILE} "' ..
+    path.join(ROOT_DIR, "bin/" .. outputdir, "Axiom-Engine", "Axiom-Engine.dll") ..
+    '" "%{cfg.targetdir}/Axiom-Engine.dll"'
+
+-- GLFW and Glad are SharedLibs so all consumers (engine.dll + consumer .exes) share
+-- one copy of their global state. Each consumer ships the DLLs alongside its binary.
+CopyGlfwDll = '{COPYFILE} "' ..
+    path.join(ROOT_DIR, "bin/" .. outputdir, "GLFW", "GLFW.dll") ..
+    '" "%{cfg.targetdir}/GLFW.dll"'
+
+CopyGladDll = '{COPYFILE} "' ..
+    path.join(ROOT_DIR, "bin/" .. outputdir, "Glad", "Glad.dll") ..
+    '" "%{cfg.targetdir}/Glad.dll"'
 
 local function NormalizeRootPath(pathValue)
     if path.isabsolute(pathValue) then
@@ -177,6 +203,10 @@ function UseDependencySet(dep)
 
     if dep.Links then
         links(dep.Links)
+    end
+
+    if dep.Defines then
+        defines(dep.Defines)
     end
 end
 
@@ -296,3 +326,7 @@ if AxiomModules.FullCompatibility then
 end
 
 group ""
+
+-- Load any axiom-package.lua manifests under packages/ and register their projects.
+local AxiomPackageLoader = dofile(path.join(ROOT_DIR, "premake/package-loader.lua"))
+AxiomPackageLoader.LoadAll()

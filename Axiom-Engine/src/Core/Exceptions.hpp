@@ -1,5 +1,6 @@
 #pragma once
 #include "Core/AxiomErrorCode.hpp"
+#include "Core/Export.hpp"
 
 #include <exception>
 #include <source_location>
@@ -10,9 +11,9 @@
 #include "Core/Log.hpp"
 
 namespace Axiom {
-	const char* ErrorCodeToString(AxiomErrorCode code);
+	AXIOM_API const char* ErrorCodeToString(AxiomErrorCode code);
 
-	class AxiomException : public std::runtime_error {
+	class AXIOM_API AxiomException : public std::runtime_error {
 	public:
 		AxiomException(AxiomErrorCode code, std::string message, std::source_location location = std::source_location::current());
 
@@ -30,8 +31,8 @@ namespace Axiom {
 
 	using AxiomError = AxiomException;
 
-	[[noreturn]] void ThrowError(AxiomErrorCode code, std::string_view message, std::source_location location = std::source_location::current());
-	[[noreturn]] void RethrowWithContext(AxiomErrorCode code, std::string message, std::source_location location = std::source_location::current());
+	[[noreturn]] AXIOM_API void ThrowError(AxiomErrorCode code, std::string_view message, std::source_location location = std::source_location::current());
+	[[noreturn]] AXIOM_API void RethrowWithContext(AxiomErrorCode code, std::string message, std::source_location location = std::source_location::current());
 
 } // namespace Axiom
 

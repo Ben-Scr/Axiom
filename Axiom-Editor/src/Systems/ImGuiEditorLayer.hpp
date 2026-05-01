@@ -23,13 +23,13 @@
 #include <chrono>
 
 namespace Axiom {
-	class AXIOM_API ImGuiEditorLayer : public Layer {
+	class ImGuiEditorLayer : public Layer {
 	public:
 		using Layer::Layer;
 
 		void OnAttach(Application& app) override;
 		void OnDetach(Application& app) override;
-		void OnImGuiRender(Application& app) override;
+		void OnPreRender(Application& app) override;
 		void OnUpdate(Application& app, float dt) override;
 	private:
 		struct LogEntry {

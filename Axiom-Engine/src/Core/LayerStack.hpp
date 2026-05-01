@@ -10,7 +10,12 @@
 
 namespace Axiom {
 
-	class AXIOM_API LayerStack {
+	// Implementation detail of Application — intentionally NOT AXIOM_API.
+	// Exporting a class with a `vector<unique_ptr<...>>` member triggers MSVC's
+	// well-known dllexport-instantiates-deleted-copy-op error. Consumers reach
+	// LayerStack only via Application's public methods, so direct DLL export
+	// isn't needed.
+	class LayerStack {
 	public:
 		using Storage = std::vector<std::unique_ptr<Layer>>;
 		using iterator = Storage::iterator;

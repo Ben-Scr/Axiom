@@ -1,4 +1,5 @@
 #pragma once
+#include "Core/Export.hpp"
 #include "Core/Log.hpp"
 #include <array>
 #include <cstdint>
@@ -8,7 +9,7 @@
 #include <vector>
 
 namespace Axiom {
-	class File {
+	class AXIOM_API File {
 	public:
 		File() = delete;
 

@@ -97,7 +97,7 @@ namespace Axiom {
 		void Shutdown();
 
 		void UpdateScenes();
-		void OnGuiScenes();
+		void OnPreRenderScenes();
 		void FixedUpdateScenes();
 		void InitializeStartupScenes();
 		std::shared_ptr<Scene> LoadSceneInternal(const std::string& name,

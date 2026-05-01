@@ -6,7 +6,7 @@
 #include <unordered_map>
 
 namespace Axiom {
-	class AXIOM_API EditorIcons {
+	class EditorIcons {
 	public:
 		static void Initialize();
 		static void Shutdown();

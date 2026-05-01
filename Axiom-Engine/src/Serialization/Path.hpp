@@ -1,11 +1,12 @@
 #pragma once
+#include "Core/Export.hpp"
 #include "Serialization/SpecialFolder.hpp"
 
 #include <filesystem>
 #include <string>
 
 namespace Axiom {
-	class Path {
+	class AXIOM_API Path {
 	public:
 		static std::string GetSpecialFolderPath(SpecialFolder folder);
 

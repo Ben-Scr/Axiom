@@ -1,7 +1,7 @@
 group "Core"
 project "Axiom-Engine"
     location "."
-    kind "StaticLib"
+    kind "SharedLib"
     language "C++"
     cppdialect "C++20"
     cdialect "C17"
@@ -10,6 +10,10 @@ project "Axiom-Engine"
 
     targetdir ("../bin/" .. outputdir .. "/%{prj.name}")
     objdir ("../bin-int/" .. outputdir .. "/%{prj.name}")
+
+    -- AIM_BUILD_DLL flips AXIOM_API to __declspec(dllexport) inside the engine TUs.
+    -- Consumers (Editor / Launcher / Runtime / engine_core packages) define AIM_IMPORT_DLL.
+    defines { "AIM_BUILD_DLL" }
 
     pchheader "pch.hpp"
     pchsource "src/pch.cpp"
@@ -101,13 +105,6 @@ project "Axiom-Engine"
         }
     )
 
-    RemoveFilesIfModuleDisabled(AxiomModules.Editor,
-        {
-            "src/Gui/ImGuiRenderer.*",
-            "src/Systems/ImGuiDebugSystem.*",
-            "src/Systems/LauncherLayer.*"
-        }
-    )
 
     UseAxiomEngineModuleDependencies()
     defines(GetAxiomModuleDefines())
@@ -143,12 +140,6 @@ project "Axiom-Engine"
         "../External/dotnet"
     }
 
-    local editorIncludes =
-    {
-        "../External/imgui",
-        "../External/imgui/backends"
-    }
-
     if AxiomModules.Render then
         AddPrivateIncludes(
             {
@@ -159,9 +150,7 @@ project "Axiom-Engine"
                 "src/Core/Window.hpp",
                 "src/Graphics/**",
                 "src/Gui/**",
-                "src/Systems/GizmosDebugSystem.cpp",
-                "src/Systems/ImGuiDebugSystem.cpp",
-                "src/Systems/LauncherLayer.cpp"
+                "src/Systems/GizmosDebugSystem.cpp"
             },
             renderIncludes
         )
@@ -210,20 +199,6 @@ project "Axiom-Engine"
                 "src/Serialization/SceneSerializerDeserialize.cpp"
             },
             scriptingIncludes
-        )
-    end
-
-    if AxiomModules.Editor then
-        AddPrivateIncludes(
-            {
-                "src/Core/Application.cpp",
-                "src/Core/Application.hpp",
-                "src/Gui/**",
-                "src/Scripting/ScriptSystem.cpp",
-                "src/Systems/ImGuiDebugSystem.cpp",
-                "src/Systems/LauncherLayer.cpp"
-            },
-            editorIncludes
         )
     end
 

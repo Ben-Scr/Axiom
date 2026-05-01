@@ -19,7 +19,10 @@ namespace Axiom {
 
 	/// Engine-level wrapper around the Axiom-Physics PhysicsWorld.
 	/// Manages Body/Collider ownership and provides per-entity contact callbacks.
-	class AXIOM_API AxiomPhysicsWorld2D {
+	// Owns `unordered_map<uint32_t, unique_ptr<Body|Collider>>` members; not AXIOM_API
+	// for the same reason as LayerStack — would trigger MSVC's dllexport copy-op
+	// instantiation error. Consumers access it via PhysicsSystem2D's API.
+	class AxiomPhysicsWorld2D {
 	public:
 		AxiomPhysicsWorld2D();
 		explicit AxiomPhysicsWorld2D(const AxiomPhys::WorldSettings& settings);

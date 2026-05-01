@@ -1,11 +1,12 @@
 #pragma once
+#include "Core/Export.hpp"
 #include "Serialization/DirectoryEntry.hpp"
 
 #include <string>
 #include <vector>
 
 namespace Axiom {
-	class Directory {
+	class AXIOM_API Directory {
 	public:
 		static void Create(const std::string& dir, bool recursive = true);
 		static bool Exists(const std::string& dir);
