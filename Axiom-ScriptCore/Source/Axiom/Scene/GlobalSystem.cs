@@ -4,6 +4,7 @@ public abstract class GlobalSystem
 {
     public virtual void OnInitialize() { }
     public virtual void OnUpdate() { }
+    public virtual void OnFixedUpdate() { }
     public virtual void OnEnable() { }
     public virtual void OnDisable() { }
 

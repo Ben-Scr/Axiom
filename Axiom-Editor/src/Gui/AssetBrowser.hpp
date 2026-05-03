@@ -51,12 +51,20 @@ namespace Axiom {
 
 		void HandleDragSource(const DirectoryEntry& entry);
 		void HandleDropTarget(const DirectoryEntry& entry);
+
+		// Decode a HIERARCHY_ENTITY payload, save the entity as a `.prefab` in
+		// `targetDirectory`, and convert the source entity into a prefab
+		// instance linked to the new asset. Returns true on success. Single
+		// source of truth for both the empty-space drop and the per-folder
+		// drop, so the two paths stay in sync.
+		bool TryCreatePrefabFromHierarchyDrop(const struct ImGuiPayload* payload, const std::string& targetDirectory);
 		void OpenAssetExternal(const DirectoryEntry& entry);
 		void OpenAssetPath(const std::string& path);
 		void RevealAssetInExplorer(const std::string& path);
 
 		void ClearAssetSelection();
 		bool IsPathSelected(const std::string& path) const;
+		bool IsPathInCutClipboard(const std::string& path) const;
 		std::vector<std::string> GetSelectedPaths() const;
 		void SetSingleSelection(const std::string& path, int index);
 		void ToggleSelection(const std::string& path, int index);
@@ -78,6 +86,12 @@ namespace Axiom {
 		void CreateNativeComponent(const std::string& parentDir);
 		void CreateScene(const std::string& parentDir);
 		void CreateEntityPrefab(const std::string& parentDir, EntityHandle sourceEntity = entt::null);
+		// Generic file creator used by the Create > File submenu (Text, JSON,
+		// Binary, ...). Writes `defaultContent` (may be empty) to a file named
+		// `<baseName><extension>` in `parentDir`, suffixed " (N)" on collision,
+		// then drops the user into inline rename — same UX as CreateScene.
+		void CreateFile(const std::string& parentDir, const std::string& baseName,
+			const std::string& extension, const std::string& defaultContent);
 
 		void BeginRename(const std::string& path, const std::string& currentName);
 		void CommitRename();

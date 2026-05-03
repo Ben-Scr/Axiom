@@ -9,6 +9,8 @@
 #include "Core/Log.hpp"
 #include "Gui/AssetBrowser.hpp"
 #include "Gui/PackageManagerPanel.hpp"
+#include "Gui/PrefabInspector.hpp"
+#include "Gui/ProfilerPanel.hpp"
 #include "Packages/PackageManager.hpp"
 #include "Editor/EditorCamera.hpp"
 #include "Graphics/Texture2D.hpp"
@@ -95,6 +97,10 @@ namespace Axiom {
 		void DuplicateSelectedEntity(Scene& scene);
 		void DeleteSelectedEntity(Scene& scene);
 		void BeginRenameSelectedEntity(Scene& scene);
+		// Convert every selected entity that's a prefab instance back into a
+		// regular scene entity (drops PrefabInstanceComponent + clears the
+		// prefab GUID via SetEntityMetaData).
+		void UnpackSelectedPrefabs(Scene& scene);
 		void CopySelectedEntities(Scene& scene);
 		void PasteEntities(Scene& scene);
 		bool HasEntityShortcutFocus() const;
@@ -161,6 +167,18 @@ namespace Axiom {
 		AssetBrowser m_AssetBrowser;
 		bool m_AssetBrowserInitialized = false;
 
+		// Editor-side inspector for `.prefab` assets. Owns a detached editor-preview
+		// scene (Scene::CreateDetachedEditorScene) where the prefab is unpacked
+		// for editing. RenderAssetInspector dispatches to it when the selected
+		// asset's extension is `.prefab`.
+		PrefabInspector m_PrefabInspector;
+		// Tracks the path the prefab inspector has currently loaded; used to
+		// detect selection changes and drive the dirty-prompt dialog.
+		std::string m_PrefabInspectorPath;
+		// Save/discard prompt state for switching away from a dirty prefab.
+		bool m_ShowPrefabSavePrompt = false;
+		std::string m_PendingPrefabSwitchPath;
+
 		std::string m_PendingSceneFileDrop;
 		std::string m_PendingSceneSwitch;
 		std::string m_ConfirmDialogPendingPath;
@@ -181,6 +199,8 @@ namespace Axiom {
 		bool m_ShowBuildPanel = false;
 		bool m_ShowPlayerSettings = false;
 		bool m_ShowPackageManager = false;
+		bool m_ShowProfiler = false;
+		ProfilerPanel m_ProfilerPanel;
 
 		// Scene list for build
 		std::vector<std::string> m_BuildSceneList;

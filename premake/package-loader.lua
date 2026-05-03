@@ -32,12 +32,38 @@ end
 
 local k_AllowedLayers = { engine_core = true, standalone_cpp = true, csharp = true }
 
+-- PascalCase.PascalCase[.PascalCase…]. Same shape as scripts/NewPackage.py's
+-- regex. Anything outside this character set breaks downstream as a project
+-- name, folder name, or DllImport library name — fail loudly at validation
+-- time rather than silently mid-build.
+local function IsValidPackageName(name)
+    if type(name) ~= "string" or #name == 0 then return false end
+    -- Lua patterns don't have alternation, so structure the check by hand:
+    -- must start with [A-Z], contain only [A-Za-z0-9.], and have at least
+    -- one '.' separator with non-empty segments either side.
+    if not name:match("^[A-Z]") then return false end
+    if name:match("[^A-Za-z0-9%.]") then return false end
+    if name:match("%.%.") then return false end             -- no empty segment
+    if name:sub(-1) == "." then return false end            -- no trailing dot
+    if not name:find(".", 1, true) then return false end    -- need at least one dot
+    -- Every segment must start with an uppercase letter.
+    for segment in name:gmatch("[^%.]+") do
+        if not segment:match("^[A-Z]") then return false end
+    end
+    return true
+end
+
 local function ValidateManifest(manifest, manifestPath)
     if type(manifest) ~= "table" then
         PackageError("Manifest at '" .. manifestPath .. "' did not return a table.")
     end
     if type(manifest.name) ~= "string" or manifest.name == "" then
         PackageError("Manifest at '" .. manifestPath .. "' is missing required string field 'name'.")
+    end
+    if not IsValidPackageName(manifest.name) then
+        PackageError("Manifest at '" .. manifestPath ..
+            "' has invalid 'name' = '" .. tostring(manifest.name) ..
+            "'. Expected PascalCase.PascalCase[.PascalCase…] with only [A-Za-z0-9.] (e.g. 'Axiom.Foo', 'MyGame.Loot').")
     end
     if type(manifest.version) ~= "string" then
         PackageError("Package '" .. manifest.name .. "' is missing required string field 'version'.")
@@ -64,6 +90,17 @@ local function ValidateManifest(manifest, manifestPath)
 
     if layerCount == 0 then
         PackageError("Package '" .. manifest.name .. "' declares zero layers; at least one is required.")
+    end
+
+    -- engine_core links the engine via EditorRuntimeCommon; standalone_cpp
+    -- explicitly does not. Combining both into the same Pkg.<Name>.Native
+    -- silently links the engine into the "standalone" sources, breaking
+    -- the layer's whole reason to exist. scripts/NewPackage.py already
+    -- rejects this combo; mirror that here so hand-written manifests fail
+    -- the same way.
+    if manifest.layers.engine_core and manifest.layers.standalone_cpp then
+        PackageError("Package '" .. manifest.name ..
+            "' declares both 'engine_core' and 'standalone_cpp' layers. They merge into a single Pkg.<Name>.Native and cannot coexist — engine_core links the engine while standalone_cpp must not. Pick one.")
     end
 
     if manifest.layers.csharp and manifest.layers.csharp.pinvoke_dll then
@@ -212,7 +249,7 @@ local function RegisterNativeProject(manifest)
 
         filter "system:windows"
             systemversion "latest"
-            buildoptions { "/utf-8" }
+            buildoptions { "/utf-8", "/FS" }
             defines { "AIM_PLATFORM_WINDOWS" }
 
         filter "system:linux"
@@ -271,6 +308,16 @@ local function RegisterCSharpProject(manifest)
         }
 
         files(ResolvePaths(manifest.PackageDir, layer.sources))
+
+        -- Axiom-ScriptCore is the default reference for every csharp
+        -- package: it provides the managed `Component`, `Entity`, `Texture`,
+        -- `Vector2Int`, math types, etc. that any package wanting to bind
+        -- to live scene state must subclass / construct. Pure-managed
+        -- packages that don't touch scene state (e.g. Pkg.Axiom.Serialization)
+        -- pay nothing for the unused reference. Keeping this implicit means
+        -- package authors don't have to plumb the dependency themselves.
+        links { "Axiom-ScriptCore" }
+        dependson { "Axiom-ScriptCore" }
 
         if manifest.dependencies then
             for _, depName in ipairs(manifest.dependencies) do
@@ -352,6 +399,27 @@ local function FilterManifestsByAllowList(manifests, byName, allowList)
     local allowed = {}
     for _, name in ipairs(allowList) do
         allowed[name] = true
+    end
+
+    -- A user listing package "B" that depends on "A" almost always intends to
+    -- pull "A" along too. Auto-include transitive deps before filtering so
+    -- TopoSort doesn't later raise "B depends on missing package A" while
+    -- A is actually sitting on disk, just filtered out.
+    local function MarkTransitive(name, seen)
+        if seen[name] then return end
+        seen[name] = true
+        local manifest = byName[name]
+        if not manifest or not manifest.dependencies then return end
+        for _, depName in ipairs(manifest.dependencies) do
+            allowed[depName] = true
+            MarkTransitive(depName, seen)
+        end
+    end
+    do
+        local seen = {}
+        for _, name in ipairs(allowList) do
+            MarkTransitive(name, seen)
+        end
     end
 
     local filtered = {}

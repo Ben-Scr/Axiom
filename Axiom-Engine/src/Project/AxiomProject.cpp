@@ -494,6 +494,31 @@ endforeach()
 			root.AddMember("packages", std::move(packages));
 		}
 
+		// Profiler block — only written when at least one field deviates from
+		// the defaults, so virgin projects don't gain a noisy "profiler" key.
+		const auto& prof = project.Profiler;
+		const bool profilerNonDefault =
+			prof.EnableInRuntime ||
+			prof.TrackInBackground ||
+			prof.SamplingHz != 60 ||
+			prof.TrackingSpan != 200 ||
+			!prof.ModuleEnabled.empty();
+		if (profilerNonDefault) {
+			Json::Value profilerJson = Json::Value::MakeObject();
+			profilerJson.AddMember("enableInRuntime", prof.EnableInRuntime);
+			profilerJson.AddMember("trackInBackground", prof.TrackInBackground);
+			profilerJson.AddMember("samplingHz", prof.SamplingHz);
+			profilerJson.AddMember("trackingSpan", prof.TrackingSpan);
+			if (!prof.ModuleEnabled.empty()) {
+				Json::Value modulesJson = Json::Value::MakeObject();
+				for (const auto& [name, enabled] : prof.ModuleEnabled) {
+					modulesJson.AddMember(name, enabled);
+				}
+				profilerJson.AddMember("modules", std::move(modulesJson));
+			}
+			root.AddMember("profiler", std::move(profilerJson));
+		}
+
 		return root;
 	}
 
@@ -715,10 +740,38 @@ endforeach()
 				}
 				if (const Json::Value* packagesValue = root.FindMember("packages")) {
 					project.Packages.clear();
-					for (const Json::Value& packageValue : packagesValue->GetArray()) {
-						const std::string packageName = packageValue.AsStringOr();
-						if (!packageName.empty()) {
-							project.Packages.push_back(packageName);
+					// Defend against malformed projects: GetArray on a
+					// non-array Value would assert/throw inside Json::Value.
+					// A non-array `packages` field means the user wrote
+					// something invalid; silently skip and warn rather than
+					// taking the editor down at project-load time.
+					if (packagesValue->IsArray()) {
+						for (const Json::Value& packageValue : packagesValue->GetArray()) {
+							const std::string packageName = packageValue.AsStringOr();
+							if (!packageName.empty()) {
+								project.Packages.push_back(packageName);
+							}
+						}
+					}
+					else {
+						AIM_CORE_WARN_TAG("AxiomProject",
+							"Project '{}': 'packages' field is not a JSON array; ignoring.", configPath);
+					}
+				}
+				if (const Json::Value* profilerValue = root.FindMember("profiler")) {
+					if (const Json::Value* v = profilerValue->FindMember("enableInRuntime"))
+						project.Profiler.EnableInRuntime = v->AsBoolOr(false);
+					if (const Json::Value* v = profilerValue->FindMember("trackInBackground"))
+						project.Profiler.TrackInBackground = v->AsBoolOr(false);
+					if (const Json::Value* v = profilerValue->FindMember("samplingHz"))
+						project.Profiler.SamplingHz = static_cast<int>(v->AsInt64Or(60));
+					if (const Json::Value* v = profilerValue->FindMember("trackingSpan"))
+						project.Profiler.TrackingSpan = static_cast<int>(v->AsInt64Or(200));
+					if (const Json::Value* modulesValue = profilerValue->FindMember("modules")) {
+						project.Profiler.ModuleEnabled.clear();
+						for (const auto& [name, value] : modulesValue->GetObject()) {
+							project.Profiler.ModuleEnabled.emplace_back(
+								std::string(name), value.AsBoolOr(true));
 						}
 					}
 				}
@@ -1112,6 +1165,102 @@ public class GameScript : EntityScript
 		return result;
 	}
 
+	AxiomProject::BuildResult AxiomProject::BuildSolutionTargets(const std::vector<std::string>& targets,
+		const std::string& configuration, const std::string& platform) {
+		BuildResult result;
+
+		// Empty target list = nothing to build. Treat as success so callers can use this
+		// uniformly: enumerate project-local packages, derive targets, hand them off.
+		// A project with no project-local packages produces an empty list and skips MSBuild
+		// entirely — exactly what we want, since the engine binaries are already up to date
+		// from the user's last `Setup.bat` build.
+		if (targets.empty()) {
+			result.Succeeded = true;
+			result.ExitCode = 0;
+			result.Output = "No targets to build.";
+			return result;
+		}
+
+		const std::string engineRoot = GetEngineRootDir();
+		if (engineRoot.empty()) {
+			result.Output = "Could not resolve engine root directory; skipping build.";
+			AIM_WARN_TAG("AxiomProject", "{}", result.Output);
+			return result;
+		}
+
+		const std::filesystem::path solutionPath = std::filesystem::path(engineRoot) / "Axiom.sln";
+		std::error_code ec;
+		if (!std::filesystem::exists(solutionPath, ec) || ec) {
+			result.Output = "Axiom.sln not found at " + solutionPath.generic_string();
+			AIM_WARN_TAG("AxiomProject", "{}", result.Output);
+			return result;
+		}
+
+		// MSBuild's -t:X;Y;Z flag scopes the build to those project targets. Project names
+		// in the solution are dot-separated (e.g. Pkg.Foo.Native). MSBuild expects them
+		// joined with semicolons.
+		std::string targetsArg = "-t:";
+		for (size_t i = 0; i < targets.size(); ++i) {
+			if (i > 0) targetsArg += ";";
+			targetsArg += targets[i];
+		}
+
+		const std::string msbuild = GetMSBuildPath();
+
+		AIM_INFO_TAG("AxiomProject", "Building {} target(s) in Axiom.sln (Configuration={}, Platform={}): {}",
+			targets.size(), configuration, platform, targetsArg);
+
+		Process::Result processResult = Process::Run({
+			msbuild,
+			solutionPath.generic_string(),
+			"-p:Configuration=" + configuration,
+			"-p:Platform=" + platform,
+			targetsArg,
+			"-m",
+			"-restore",         // run `dotnet restore` before build — without this, freshly
+			                    // generated csproj files fail with NETSDK1004 on first build
+			                    // because no project.assets.json exists yet
+			"-verbosity:minimal",
+			"-nologo"
+		}, engineRoot);
+
+		result.ExitCode = processResult.ExitCode;
+		result.Succeeded = processResult.Succeeded();
+		result.Output = std::move(processResult.Output);
+
+		if (!result.Succeeded) {
+			AIM_ERROR_TAG("AxiomProject", "MSBuild failed (exit code {}): {}", result.ExitCode, result.Output);
+		}
+		else {
+			AIM_INFO_TAG("AxiomProject", "MSBuild target build succeeded.");
+		}
+		return result;
+	}
+
+	std::vector<std::string> AxiomProject::EnumerateProjectLocalPackages(const std::string& projectRoot) {
+		// A project's local packages live at <projectRoot>/Packages/<Name>/axiom-package.lua.
+		// We don't read or parse the manifest here — caller derives MSBuild target names
+		// from the directory name (`Pkg.<Name>.Native`, `Pkg.<Name>`).
+		std::vector<std::string> names;
+		if (projectRoot.empty()) return names;
+
+		const std::filesystem::path packagesDir = std::filesystem::path(projectRoot) / "Packages";
+		std::error_code ec;
+		if (!std::filesystem::exists(packagesDir, ec) || ec) return names;
+		if (!std::filesystem::is_directory(packagesDir, ec) || ec) return names;
+
+		for (const auto& entry : std::filesystem::directory_iterator(packagesDir, ec)) {
+			if (ec) break;
+			if (!entry.is_directory(ec) || ec) continue;
+			const std::filesystem::path manifest = entry.path() / "axiom-package.lua";
+			if (std::filesystem::exists(manifest, ec) && !ec) {
+				names.push_back(entry.path().filename().string());
+			}
+		}
+
+		return names;
+	}
+
 	AxiomProject::AutomateResult AxiomProject::AutomateForProject(const std::string& projectRootDir,
 		const std::string& configuration, const std::string& platform) {
 		AutomateResult result;
@@ -1125,8 +1274,21 @@ public class GameScript : EntityScript
 			return result;
 		}
 
-		result.Build = BuildSolution(configuration, platform);
-		result.RanBuild = true;
+		// Build only the project-local packages, NOT the whole engine solution. The engine
+		// binaries are already in place from Setup.bat; trying to relink Axiom-Engine.dll
+		// here would fail because the calling process (launcher/editor) has it loaded.
+		std::vector<std::string> targets;
+		for (const std::string& packageName : EnumerateProjectLocalPackages(projectRootDir)) {
+			// Each package exposes up to two MSBuild targets: a native StaticLib/SharedLib
+			// (`Pkg.X.Native`) and a managed C# SharedLib (`Pkg.X`). Premake only generates
+			// the ones that exist; passing both as targets is safe — MSBuild ignores
+			// targets that don't resolve to a real project.
+			targets.push_back("Pkg." + packageName + ".Native");
+			targets.push_back("Pkg." + packageName);
+		}
+
+		result.Build = BuildSolutionTargets(targets, configuration, platform);
+		result.RanBuild = !targets.empty();
 		return result;
 	}
 

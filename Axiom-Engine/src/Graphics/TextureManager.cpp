@@ -3,6 +3,14 @@
 #include "TextureManager.hpp"
 #include <Serialization/File.hpp>
 
+#include "Components/Graphics/SpriteRendererComponent.hpp"
+#include "Components/Graphics/ParticleSystem2DComponent.hpp"
+#include "Components/Graphics/ImageComponent.hpp"
+#include "Scene/Scene.hpp"
+#include "Scene/SceneManager.hpp"
+
+#include <unordered_set>
+
 namespace Axiom {
 	namespace {
 		struct TextureLookupKey {
@@ -89,6 +97,26 @@ namespace Axiom {
 	std::string TextureManager::s_RootPath = Path::Combine("AxiomAssets", "Textures");
 
 	constexpr uint16_t k_InvalidIndex = std::numeric_limits<uint16_t>::max();
+
+	std::size_t TextureManager::GetTotalTextureMemoryBytes() {
+		// Iterate the live texture table. We exclude default textures by
+		// skipping the first `s_DefaultTextures.size()` entries — that's
+		// where Initialize() places them; user textures land after.
+		// Approximation: 4 bytes per pixel (RGBA8). Doesn't account for
+		// mipmaps (we don't generate any in the engine today) or compressed
+		// formats (none used).
+		std::size_t total = 0;
+		const std::size_t defaultCount = s_DefaultTextures.size();
+		for (std::size_t i = 0; i < s_Textures.size(); ++i) {
+			const TextureEntry& entry = s_Textures[i];
+			if (!entry.IsValid) continue;
+			if (i < defaultCount) continue;
+			const std::size_t w = static_cast<std::size_t>(entry.Texture.GetWidth());
+			const std::size_t h = static_cast<std::size_t>(entry.Texture.GetHeight());
+			total += w * h * 4;
+		}
+		return total;
+	}
 
 	void TextureManager::Initialize() {
 		if (s_IsInitialized) {
@@ -437,5 +465,71 @@ namespace Axiom {
 		}
 
 		return { k_InvalidIndex, 0 };
+	}
+
+	size_t TextureManager::PurgeUnreferenced() {
+		if (!s_IsInitialized) {
+			AIM_CORE_WARN("TextureManager isn't initialized");
+			return 0;
+		}
+
+		// Collect all in-use handles by walking every loaded Scene's
+		// registry. We pull from every component type that holds a
+		// TextureHandle field today: SpriteRendererComponent,
+		// ParticleSystem2DComponent (m_TextureHandle), and ImageComponent.
+		std::unordered_set<TextureHandle> referenced;
+		referenced.reserve(s_Textures.size());
+
+		SceneManager::Get().ForeachLoadedScene([&referenced](Scene& scene) {
+			entt::registry& registry = scene.GetRegistry();
+
+			auto sprites = registry.view<SpriteRendererComponent>();
+			for (auto entity : sprites) {
+				const auto& sprite = sprites.get<SpriteRendererComponent>(entity);
+				if (sprite.TextureHandle.IsValid()) {
+					referenced.insert(sprite.TextureHandle);
+				}
+			}
+
+			auto particles = registry.view<ParticleSystem2DComponent>();
+			for (auto entity : particles) {
+				const auto& particleSystem = particles.get<ParticleSystem2DComponent>(entity);
+				const TextureHandle& handle = particleSystem.GetTextureHandle();
+				if (handle.IsValid()) {
+					referenced.insert(handle);
+				}
+			}
+
+			auto images = registry.view<ImageComponent>();
+			for (auto entity : images) {
+				const auto& image = images.get<ImageComponent>(entity);
+				if (image.TextureHandle.IsValid()) {
+					referenced.insert(image.TextureHandle);
+				}
+			}
+		});
+
+		// Walk s_Textures and free any non-default entry whose handle
+		// isn't in the reference set. The first s_DefaultTextures.size()
+		// entries are reserved by LoadDefaultTextures() during Initialize()
+		// and must never be evicted — UnloadTexture() also enforces this,
+		// but we skip them here to avoid the warning spam.
+		const size_t defaultCount = s_DefaultTextures.size();
+		size_t freedCount = 0;
+		for (size_t i = defaultCount; i < s_Textures.size(); ++i) {
+			const TextureEntry& entry = s_Textures[i];
+			if (!entry.IsValid) {
+				continue;
+			}
+
+			TextureHandle handle(static_cast<uint16_t>(i), entry.Generation);
+			if (referenced.find(handle) == referenced.end()) {
+				UnloadTexture(handle);
+				++freedCount;
+			}
+		}
+
+		AIM_CORE_INFO_TAG("TextureManager", "Purged {} unreferenced textures", freedCount);
+		return freedCount;
 	}
 }

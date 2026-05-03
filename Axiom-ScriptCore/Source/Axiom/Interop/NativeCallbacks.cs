@@ -89,6 +89,7 @@ internal unsafe struct NativeBindingsStruct
     public delegate* unmanaged<ulong, float, float, float*, float*, void> Camera2D_ScreenToWorld;
     public delegate* unmanaged<ulong, float> Camera2D_GetViewportWidth;
     public delegate* unmanaged<ulong, float> Camera2D_GetViewportHeight;
+    public delegate* unmanaged<ulong> Camera2D_GetMainEntity;
 
     // ── Rigidbody2D ──────────────────────────────────────────────
     public delegate* unmanaged<ulong, float, float, int, void> Rigidbody2D_ApplyForce;
@@ -122,6 +123,8 @@ internal unsafe struct NativeBindingsStruct
     public delegate* unmanaged<ulong, int, void> AudioSource_SetLoop;
     public delegate* unmanaged<ulong, int> AudioSource_IsPlaying;
     public delegate* unmanaged<ulong, int> AudioSource_IsPaused;
+    public delegate* unmanaged<ulong, ulong> AudioSource_GetAudio;
+    public delegate* unmanaged<ulong, ulong, void> AudioSource_SetAudio;
 
     // ── Axiom-Physics ─────────────────────────────────────────────
     public delegate* unmanaged<ulong, int> FastBody2D_GetBodyType;

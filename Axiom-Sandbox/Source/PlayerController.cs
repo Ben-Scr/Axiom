@@ -4,12 +4,14 @@ public class PlayerController : EntityScript
 {
     private float speed = 5.0f;
 
-    public void Start()
+    // E26: override the documented OnStart/OnUpdate surface from EntityScript
+    public override void OnStart()
     {
         Log.Info("PlayerController attached to: " + Entity.Name);
     }
 
-    public void Update()
+    // E26: override the documented OnStart/OnUpdate surface from EntityScript
+    public override void OnUpdate()
     {
         // Test 5
         var velocity = Vector2.One;

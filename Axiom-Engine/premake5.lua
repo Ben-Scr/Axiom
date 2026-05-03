@@ -105,6 +105,15 @@ project "Axiom-Engine"
         }
     )
 
+    -- Profiler is gated by the standalone --no-profiler premake flag, not
+    -- by the module profile. When stripped, drop the entire Profiling/
+    -- folder so no Tracy headers are pulled in and no symbols are emitted.
+    RemoveFilesIfModuleDisabled(AxiomProfiler.Enabled,
+        {
+            "src/Profiling/**"
+        }
+    )
+
 
     UseAxiomEngineModuleDependencies()
     defines(GetAxiomModuleDefines())
@@ -203,7 +212,11 @@ project "Axiom-Engine"
     end
 
     filter "system:windows"
-        buildoptions { "/utf-8" }
+        -- /FS is required when MSBuild's parallel compilation (/MP) hands out the
+        -- same vc143.pdb to multiple CL.EXE workers — without it, concurrent PDB
+        -- writes raise C1041. /MP itself is enabled by passing "-m" to MSBuild
+        -- from our automation paths; /FS makes that path safe.
+        buildoptions { "/utf-8", "/FS" }
         systemversion "latest"
         defines { "AIM_PLATFORM_WINDOWS" }
 
@@ -212,6 +225,10 @@ project "Axiom-Engine"
         defines { "AIM_PLATFORM_LINUX" }
 
     filter {}
+
+    -- (Cereal include is provided globally via Dependency.EngineCore — the
+    -- per-file scoping attempt didn't reliably propagate to vcxproj; see
+    -- the commentary in Dependencies.lua next to %{IncludeDir.Cereal}.)
 
     filter "files:**/glad.c"
         flags { "NoPCH" }

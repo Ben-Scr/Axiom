@@ -1,3 +1,4 @@
+#include <Components/General/Transform2DComponent.hpp>
 #include <Scripting/NativeScript.hpp>
 #include <cmath>
 
@@ -7,9 +8,11 @@ public:
 
 	void Update(float dt) override {
 		m_Time += dt;
-		float x, y;
-		GetPosition(x, y);
-		SetPosition(x, std::sin(m_Time * 2.0f) * 1.5f);
+		auto& transform = GetComponent<Axiom::Transform2DComponent>();
+		// Keep X, drive Y by a sine — sample of script-driven motion.
+		// SetPosition (rather than direct field assignment) keeps physics
+		// in sync via the component's dirty flag.
+		transform.SetPosition({ transform.Position.x, std::sin(m_Time * 2.0f) * 1.5f });
 	}
 
 private:

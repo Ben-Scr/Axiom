@@ -406,6 +406,16 @@ namespace Axiom {
 		}
 
 		static std::vector<ReferencePickerEntry> CollectAssetPickerEntries(AssetKind kind) {
+			// Force a re-scan of the project's asset directory before reading.
+			// AssetRegistry only auto-rebuilds when s_Dirty is set or the
+			// project root changes — neither of which fires when the user
+			// drops a new texture into Assets/ behind the editor's back.
+			// Without this MarkDirty, the picker shows the stale snapshot
+			// from whenever the registry was last touched (the bug the user
+			// reported for `[ShowInEditor] private Texture texture;`).
+			AssetRegistry::MarkDirty();
+			AssetRegistry::Sync();
+
 			std::vector<ReferencePickerEntry> entries;
 			for (const AssetRegistry::Record& record : AssetRegistry::GetAssetsByKind(kind)) {
 				ReferencePickerEntry entry;
@@ -981,7 +991,49 @@ namespace Axiom {
 			return className + "#" + std::to_string(scriptIndex) + "." + fieldName;
 		}
 
-		static void RenderScriptFieldsForInstance(ScriptComponent& sc, const ScriptInstance& instance, std::size_t scriptIndex) {
+		// Propagate a per-script field edit from the primary entity to every
+		// other selected entity in `entities`. Multi-edit only reaches this
+		// path after callers verify all selected entities have an identical
+		// script set, so script index `scriptIndex` matches across all of them.
+		static void PropagateScriptFieldEdit(std::span<const Entity> entities,
+			std::size_t scriptIndex, const std::string& className,
+			const std::string& fieldName, const std::string& newValue,
+			bool isPlaying)
+		{
+			auto& callbacks = ScriptEngine::GetCallbacks();
+			for (std::size_t i = 0; i < entities.size(); ++i) {
+				const Entity& entity = entities[i];
+				if (!entity.HasComponent<ScriptComponent>()) continue;
+				auto& sc = const_cast<Entity&>(entity).GetComponent<ScriptComponent>();
+				if (scriptIndex >= sc.Scripts.size()) continue;
+				const auto& inst = sc.Scripts[scriptIndex];
+				if (inst.GetClassName() != className) continue;
+
+				if (inst.HasManagedInstance() && callbacks.SetScriptField) {
+					callbacks.SetScriptField(static_cast<int32_t>(inst.GetGCHandle()),
+						fieldName.c_str(), newValue.c_str());
+				}
+				if (!isPlaying) {
+					sc.PendingFieldValues[className + "." + fieldName] = newValue;
+				}
+			}
+		}
+
+		static void PropagateManagedComponentFieldEdit(std::span<const Entity> entities,
+			const std::string& className, const std::string& fieldName,
+			const std::string& newValue)
+		{
+			for (const Entity& entity : entities) {
+				if (!entity.HasComponent<ScriptComponent>()) continue;
+				auto& sc = const_cast<Entity&>(entity).GetComponent<ScriptComponent>();
+				sc.PendingFieldValues[className + "." + fieldName] = newValue;
+			}
+		}
+
+		static void RenderScriptFieldsForInstance(ScriptComponent& sc,
+			const ScriptInstance& instance, std::size_t scriptIndex,
+			std::span<const Entity> entities, bool multiEditEnabled)
+		{
 			auto& callbacks = ScriptEngine::GetCallbacks();
 			bool isPlaying = Application::GetIsPlaying();
 			bool hasLiveInstance = instance.HasManagedInstance();
@@ -1031,12 +1083,20 @@ namespace Axiom {
 						std::string key = instance.GetClassName() + "." + field.name;
 						sc.PendingFieldValues[key] = field.value;
 					}
+
+					if (multiEditEnabled && entities.size() > 1) {
+						PropagateScriptFieldEdit(entities, scriptIndex, instance.GetClassName(),
+							field.name, field.value, isPlaying);
+					}
 				}
 			}
 			ImGui::Unindent(8.0f);
 		}
 
-		static void RenderFieldsForManagedComponent(ScriptComponent& sc, const std::string& className, std::size_t componentIndex) {
+		static void RenderFieldsForManagedComponent(ScriptComponent& sc,
+			const std::string& className, std::size_t componentIndex,
+			std::span<const Entity> entities, bool multiEditEnabled)
+		{
 			auto& callbacks = ScriptEngine::GetCallbacks();
 			if (!callbacks.GetClassFieldDefs) {
 				return;
@@ -1069,6 +1129,10 @@ namespace Axiom {
 
 				if (field.value != oldValue) {
 					sc.PendingFieldValues[className + "." + field.name] = field.value;
+					if (multiEditEnabled && entities.size() > 1) {
+						PropagateManagedComponentFieldEdit(entities, className,
+							field.name, field.value);
+					}
 				}
 			}
 			ImGui::Unindent(8.0f);
@@ -1153,9 +1217,47 @@ namespace Axiom {
 		}
 	}
 
-	void DrawScriptComponentInspector(Entity entity)
+	namespace {
+		// Two ScriptComponents have the same "shape" if they list the same
+		// managed components and the same script class names in the same order.
+		// Multi-edit script-field propagation is only safe when the shape
+		// matches across the entire selection — otherwise the script index
+		// `i` doesn't refer to the same script on every entity.
+		static bool ScriptComponentShapeMatches(const ScriptComponent& a, const ScriptComponent& b) {
+			if (a.ManagedComponents.size() != b.ManagedComponents.size()) return false;
+			if (a.Scripts.size() != b.Scripts.size()) return false;
+			for (std::size_t i = 0; i < a.ManagedComponents.size(); ++i) {
+				if (a.ManagedComponents[i] != b.ManagedComponents[i]) return false;
+			}
+			for (std::size_t i = 0; i < a.Scripts.size(); ++i) {
+				if (a.Scripts[i].GetClassName() != b.Scripts[i].GetClassName()) return false;
+				if (a.Scripts[i].GetType() != b.Scripts[i].GetType()) return false;
+			}
+			return true;
+		}
+	}
+
+	void DrawScriptComponentInspector(std::span<const Entity> entities)
 	{
-		auto& scriptComp = entity.GetComponent<ScriptComponent>();
+		if (entities.empty()) return;
+
+		// Multi-edit only writes script fields to other entities when their
+		// script "shape" matches the primary entity's. Mismatched selections
+		// fall back to single-entity behavior on entities[0] with a notice.
+		const Entity& primary = entities[0];
+		auto& scriptComp = const_cast<Entity&>(primary).GetComponent<ScriptComponent>();
+		bool shapeUniform = true;
+		for (std::size_t i = 1; i < entities.size(); ++i) {
+			const auto& other = entities[i].GetComponent<ScriptComponent>();
+			if (!ScriptComponentShapeMatches(scriptComp, other)) {
+				shapeUniform = false;
+				break;
+			}
+		}
+		if (entities.size() > 1 && !shapeUniform) {
+			ImGui::TextDisabled("Multi-edit limited - script set differs across selection");
+		}
+		const bool multiEditEnabled = shapeUniform;
 
 		size_t removeIndex = SIZE_MAX;
 		size_t removeManagedComponentIndex = SIZE_MAX;
@@ -1175,7 +1277,7 @@ namespace Axiom {
 
 			if (open) {
 				if (ScriptEngine::IsInitialized()) {
-					RenderFieldsForManagedComponent(scriptComp, className, i);
+					RenderFieldsForManagedComponent(scriptComp, className, i, entities, multiEditEnabled);
 				}
 				else {
 					ImGui::TextDisabled("Script engine not initialized");
@@ -1211,7 +1313,7 @@ namespace Axiom {
 				});
 
 				if (instance.GetType() != ScriptType::Native && ScriptEngine::IsInitialized()) {
-					RenderScriptFieldsForInstance(scriptComp, instance, i);
+					RenderScriptFieldsForInstance(scriptComp, instance, i, entities, multiEditEnabled);
 				}
 
 				ImGuiUtils::EndComponentSection();
@@ -1221,12 +1323,34 @@ namespace Axiom {
 		}
 
 		if (removeIndex != SIZE_MAX) {
-			ScriptSystem::RemoveScript(entity, removeIndex);
+			// Remove the matching script from every entity that has the same
+			// script at the same index, when shapes match.
+			if (multiEditEnabled) {
+				for (const Entity& e : entities) {
+					ScriptSystem::RemoveScript(const_cast<Entity&>(e), removeIndex);
+				}
+			}
+			else {
+				ScriptSystem::RemoveScript(const_cast<Entity&>(primary), removeIndex);
+			}
 		}
 		if (removeManagedComponentIndex != SIZE_MAX && removeManagedComponentIndex < scriptComp.ManagedComponents.size()) {
-			if (scriptComp.RemoveManagedComponent(scriptComp.ManagedComponents[removeManagedComponentIndex])) {
-				if (Scene* scene = entity.GetScene()) {
-					scene->MarkDirty();
+			const std::string className = scriptComp.ManagedComponents[removeManagedComponentIndex];
+			if (multiEditEnabled) {
+				for (const Entity& e : entities) {
+					auto& sc = const_cast<Entity&>(e).GetComponent<ScriptComponent>();
+					if (sc.RemoveManagedComponent(className)) {
+						if (Scene* scene = const_cast<Entity&>(e).GetScene()) {
+							scene->MarkDirty();
+						}
+					}
+				}
+			}
+			else {
+				if (scriptComp.RemoveManagedComponent(className)) {
+					if (Scene* scene = const_cast<Entity&>(primary).GetScene()) {
+						scene->MarkDirty();
+					}
 				}
 			}
 		}

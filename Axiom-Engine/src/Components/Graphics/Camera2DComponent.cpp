@@ -46,12 +46,31 @@ namespace Axiom {
 	}
 
 	void Camera2DComponent::UpdateView() {
+		// E19: closed-form 2D inverse view. The camera model is
+		//   M = T(px,py) * Rz(theta)
+		// Its inverse is
+		//   M^-1 = Rz(-theta) * T(-px,-py)
+		// which expanded into a 4x4 column-major glm::mat4 is the matrix below.
+		// Replaces the previous glm::inverse(M) call (per-frame general 4x4
+		// inverse via cofactor expansion).
 		const float rotZ = m_Transform->Rotation;
-		glm::mat4 camModel(1.0f);
-		camModel = glm::translate(camModel, glm::vec3(m_Transform->Position.x, m_Transform->Position.y, 0.0f));
-		camModel = glm::rotate(camModel, rotZ, glm::vec3(0.0f, 0.0f, 1.0f));
+		const float c = std::cos(rotZ);
+		const float s = std::sin(rotZ);
+		const float px = m_Transform->Position.x;
+		const float py = m_Transform->Position.y;
 
-		m_ViewMat = glm::inverse(camModel);
+		// Column-major. Rotation block is Rz(-theta) (transpose of Rz);
+		// translation column is Rz(-theta) * (-p).
+		glm::mat4 view(1.0f);
+		view[0][0] =  c; view[0][1] = -s; view[0][2] = 0.0f; view[0][3] = 0.0f;
+		view[1][0] =  s; view[1][1] =  c; view[1][2] = 0.0f; view[1][3] = 0.0f;
+		view[2][0] = 0.0f; view[2][1] = 0.0f; view[2][2] = 1.0f; view[2][3] = 0.0f;
+		view[3][0] = -c * px - s * py;
+		view[3][1] =  s * px - c * py;
+		view[3][2] = 0.0f;
+		view[3][3] = 1.0f;
+		m_ViewMat = view;
+
 		UpdateViewportAABB();
 	}
 

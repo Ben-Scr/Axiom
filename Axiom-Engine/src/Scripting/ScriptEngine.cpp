@@ -465,4 +465,47 @@ namespace Axiom {
 		return s_Callbacks.GlobalSystemClassExists(className.c_str()) != 0;
 	}
 
+	// ── New lifecycle thunks (appended for binary compat) ──
+
+	void ScriptEngine::InvokeAwake(uint32_t handle)
+	{
+		if (handle == 0 || !s_Callbacks.InvokeAwake) return;
+		s_Callbacks.InvokeAwake(static_cast<int32_t>(handle));
+	}
+
+	void ScriptEngine::InvokeFixedUpdate(uint32_t handle)
+	{
+		if (handle == 0 || !s_Callbacks.InvokeFixedUpdate) return;
+		s_Callbacks.InvokeFixedUpdate(static_cast<int32_t>(handle));
+	}
+
+	void ScriptEngine::InvokeGameSystemAwake(uint32_t handle)
+	{
+		if (handle == 0 || !s_Callbacks.InvokeGameSystemAwake) return;
+		s_Callbacks.InvokeGameSystemAwake(static_cast<int32_t>(handle));
+	}
+
+	void ScriptEngine::InvokeGameSystemFixedUpdate(uint32_t handle)
+	{
+		if (handle == 0 || !s_Callbacks.InvokeGameSystemFixedUpdate) return;
+		s_Callbacks.InvokeGameSystemFixedUpdate(static_cast<int32_t>(handle));
+	}
+
+	void ScriptEngine::InvokeGlobalSystemFixedUpdate(uint32_t handle)
+	{
+		if (handle == 0 || !s_Callbacks.InvokeGlobalSystemFixedUpdate) return;
+		s_Callbacks.InvokeGlobalSystemFixedUpdate(static_cast<int32_t>(handle));
+	}
+
+	void ScriptEngine::FixedUpdateGlobalSystems()
+	{
+		if (!s_Initialized || !s_Callbacks.InvokeGlobalSystemFixedUpdate) return;
+		for (const auto& instance : s_GlobalSystems)
+		{
+			if (instance.Handle != 0 && instance.Enabled) {
+				s_Callbacks.InvokeGlobalSystemFixedUpdate(static_cast<int32_t>(instance.Handle));
+			}
+		}
+	}
+
 } // namespace Axiom

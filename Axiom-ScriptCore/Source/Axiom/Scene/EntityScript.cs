@@ -8,7 +8,7 @@ namespace Axiom;
 public abstract class EntityScript
 {
     public Entity Entity { get; internal set; } = Entity.Invalid;
-    public Transform2DComponent Transform => Entity.Transform;
+    public Transform2D Transform => Entity.Transform;
 
     internal void _SetEntityID(ulong id)
     {
@@ -27,6 +27,7 @@ public abstract class EntityScript
     public virtual void OnAwake() { }
     public virtual void OnStart() { }
     public virtual void OnUpdate() { }
+    public virtual void OnFixedUpdate() { }
     public virtual void OnDestroy() { }
 
     public virtual void OnApplicationStart() { }

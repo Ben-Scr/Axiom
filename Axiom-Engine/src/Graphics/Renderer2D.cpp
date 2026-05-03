@@ -10,13 +10,29 @@
 #include "Components/Tags.hpp"
 #include <Utils/Timer.hpp>
 
+#include "Profiling/GpuTimer.hpp"
+#include "Profiling/Profiler.hpp"
 #include "Scene/Scene.hpp"
 #include "Graphics/TextureManager.hpp"
+#include "Graphics/StaticRenderData.hpp"
 
 #include <glad/glad.h>
 
 namespace Axiom {
 	namespace {
+		struct ContributorEntry {
+			uint32_t Token = 0;
+			Renderer2D::InstanceContributor Fn;
+		};
+		std::vector<ContributorEntry>& GetContributors() {
+			static std::vector<ContributorEntry> s_Contributors;
+			return s_Contributors;
+		}
+		uint32_t& NextContributorToken() {
+			static uint32_t s_NextToken = 0;
+			return s_NextToken;
+		}
+
 		Camera2DComponent* ResolveClearCamera() {
 			Application* app = Application::GetInstance();
 			if (!app || !app->GetSceneManager()) {
@@ -49,6 +65,27 @@ namespace Axiom {
 		}
 	}
 
+	Renderer2D::Renderer2D() = default;
+	Renderer2D::~Renderer2D() = default;
+
+	uint32_t Renderer2D::RegisterInstanceContributor(InstanceContributor contributor) {
+		if (!contributor) return 0;
+		auto& contributors = GetContributors();
+		auto& nextToken = NextContributorToken();
+		const uint32_t token = ++nextToken;
+		contributors.push_back({ token, std::move(contributor) });
+		return token;
+	}
+
+	void Renderer2D::UnregisterInstanceContributor(uint32_t token) {
+		if (token == 0) return;
+		auto& contributors = GetContributors();
+		contributors.erase(
+			std::remove_if(contributors.begin(), contributors.end(),
+				[token](const ContributorEntry& e) { return e.Token == token; }),
+			contributors.end());
+	}
+
 	void Renderer2D::Initialize() {
 		m_QuadMesh.Initialize();
 		m_SpriteShader.Initialize();
@@ -58,10 +95,25 @@ namespace Axiom {
 			AIM_CORE_ERROR_TAG("Renderer2D", "Sprite shader is invalid — rendering disabled");
 			return;
 		}
+
+#ifdef AXIOM_PROFILER_ENABLED
+		// GpuTimer needs a live GL context — Initialize is the right spot
+		// since OpenGL::Initialize ran before us in Application::Initialize.
+		m_GpuTimer = std::make_unique<GpuTimer>();
+		m_GpuTimer->Initialize();
+#endif
+
 		m_IsInitialized = true;
 	}
 
 	void Renderer2D::BeginFrame() {
+		// "Rendering" is the single CPU-Usage bucket for all draw work
+		// (covers BeginFrame's RenderScenes/quad submission). EndFrame is
+		// trivial; SwapBuffers' vsync wait is captured by the "VSync" bucket.
+		AXIOM_PROFILE_SCOPE("Rendering");
+#ifdef AXIOM_PROFILER_ENABLED
+		if (m_GpuTimer) m_GpuTimer->BeginFrame();
+#endif
 		Timer timer = Timer();
 
 		if (m_SkipBeginFrameRender) {
@@ -116,6 +168,19 @@ namespace Axiom {
 
 	void Renderer2D::EndFrame() {
 		if (!m_IsEnabled) return;
+#ifdef AXIOM_PROFILER_ENABLED
+		if (m_GpuTimer) {
+			m_GpuTimer->EndFrame();
+			m_GpuTimer->PollAndPublish();
+		}
+		// Per-frame Rendering-category counters. With the engine's instanced
+		// quad pipeline: each rendered instance is one quad = 4 vertices /
+		// 2 triangles. DrawCalls already represents the number of GL draw
+		// invocations submitted (one per state-change "batch").
+		AXIOM_PROFILE_VALUE("Batches", float(m_DrawCallsCount));
+		AXIOM_PROFILE_VALUE("Triangles", float(m_RenderedInstancesCount * 2));
+		AXIOM_PROFILE_VALUE("Vertices", float(m_RenderedInstancesCount * 4));
+#endif
 	}
 
 	void Renderer2D::RenderScenes() {
@@ -155,8 +220,15 @@ namespace Axiom {
 
 		m_Instances.clear();
 
-		auto ptsView = scene.GetRegistry().view<ParticleSystem2DComponent>(entt::exclude<DisabledTag>);
-		auto srView = scene.GetRegistry().view<Transform2DComponent, SpriteRendererComponent>(entt::exclude<DisabledTag>);
+		// const_cast: we lazily attach a per-entity render-time cache
+		// (StaticRenderData) for entities tagged Static, and clear the
+		// Transform2D dirty flag once the cache is refreshed. The registry is
+		// conceptually mutable here — same shape as the camera const_cast in
+		// ResolveClearCamera above.
+		entt::registry& registry = const_cast<entt::registry&>(scene.GetRegistry());
+
+		auto ptsView = registry.view<ParticleSystem2DComponent>(entt::exclude<DisabledTag>);
+		auto srView = registry.view<Transform2DComponent, SpriteRendererComponent>(entt::exclude<DisabledTag>);
 
 		m_Instances.reserve(ptsView.size_hint() + srView.size_hint());
 
@@ -177,8 +249,22 @@ namespace Axiom {
 			}
 		}
 
-		for (const auto& [ent, tr, spriteRenderer] : srView.each()) {
-			if (!AABB::Intersects(viewportAABB, AABB::FromTransform(tr)))
+		for (auto&& [ent, tr, spriteRenderer] : srView.each()) {
+			AABB entityAABB;
+			if (registry.all_of<StaticTag>(ent)) {
+				StaticRenderData& cache = registry.get_or_emplace<StaticRenderData>(ent);
+				if (!cache.Valid || tr.IsDirty()) {
+					cache.CachedAABB = AABB::FromTransform(tr);
+					cache.Valid = true;
+					tr.ClearDirty();
+				}
+				entityAABB = cache.CachedAABB;
+			}
+			else {
+				entityAABB = AABB::FromTransform(tr);
+			}
+
+			if (!AABB::Intersects(viewportAABB, entityAABB))
 				continue;
 
 			m_Instances.emplace_back(
@@ -190,6 +276,24 @@ namespace Axiom {
 				spriteRenderer.SortingOrder,
 				spriteRenderer.SortingLayer
 			);
+		}
+
+		// Package instance contributors. Tilemap2D and any future renderable
+		// package pushes instances here so they participate in the same
+		// sort + texture-batch path as built-in sprites/particles. Wrapped
+		// per-contributor so a single misbehaving package can't crash the
+		// whole render frame.
+		for (const auto& entry : GetContributors()) {
+			if (!entry.Fn) continue;
+			try {
+				entry.Fn(scene, viewportAABB, m_Instances);
+			} catch (const std::exception& e) {
+				AIM_CORE_ERROR_TAG("Renderer2D",
+					"Instance contributor (token {}) threw: {}", entry.Token, e.what());
+			} catch (...) {
+				AIM_CORE_ERROR_TAG("Renderer2D",
+					"Instance contributor (token {}) threw an unknown exception", entry.Token);
+			}
 		}
 
 		std::sort(m_Instances.begin(), m_Instances.end(),
@@ -211,6 +315,12 @@ namespace Axiom {
 		const TextureHandle fallbackTexture = TextureManager::GetDefaultTexture(DefaultTexture::Square);
 		m_DrawCallsCount = 0;
 
+		// E17: Carry the resolved handle for the next batch forward instead of
+		// re-resolving the boundary instance with ResolveRenderableTextureHandle.
+		// The inner loop now compares cheap raw handle equality and only
+		// re-evaluates IsValid (via ResolveRenderableTextureHandle) when an
+		// instance's stored handle differs from the current batch's stored
+		// handle. Roughly halves the IsValid calls in long single-texture runs.
 		for (size_t batchStart = 0; batchStart < m_Instances.size(); ) {
 			TextureHandle batchTextureHandle{};
 			Texture2D* batchTexture = ResolveRenderableTexture(
@@ -218,10 +328,18 @@ namespace Axiom {
 				fallbackTexture,
 				batchTextureHandle);
 
+			const TextureHandle batchSourceHandle = m_Instances[batchStart].TextureHandle;
 			size_t batchEnd = batchStart + 1;
 			for (; batchEnd < m_Instances.size(); ++batchEnd) {
+				const TextureHandle& nextSourceHandle = m_Instances[batchEnd].TextureHandle;
+				// Same source handle as the batch -> guaranteed to resolve to
+				// the same handle, no IsValid call needed.
+				if (nextSourceHandle == batchSourceHandle) {
+					continue;
+				}
+
 				TextureHandle nextTextureHandle = ResolveRenderableTextureHandle(
-					m_Instances[batchEnd].TextureHandle,
+					nextSourceHandle,
 					fallbackTexture);
 				if (!(nextTextureHandle == batchTextureHandle)) {
 					break;
@@ -247,10 +365,25 @@ namespace Axiom {
 	}
 
 	void Renderer2D::Shutdown() {
+#ifdef AXIOM_PROFILER_ENABLED
+		// Tear down the GPU timer while we still have a live GL context.
+		if (m_GpuTimer) {
+			m_GpuTimer->Shutdown();
+			m_GpuTimer.reset();
+		}
+#endif
 		m_QuadMesh.Shutdown();
 		m_SpriteShader.Shutdown();
 		m_Instances.clear();
 		m_Instances.shrink_to_fit();
 		m_DrawCallsCount = 0;
+		// Defensive: clear instance contributors here so the dispatch list
+		// can never outlive the renderer. Today PackageHost::UnloadAll runs
+		// last in Application::Shutdown (per audit H10) and each package's
+		// AxiomPackage_OnUnload calls UnregisterInstanceContributor — but a
+		// hard process exit, abort path, or future reorder could skip those.
+		// A zero-sized contributor list during render is the only safe
+		// post-Shutdown state for the renderer, so we enforce it here.
+		GetContributors().clear();
 	}
 }

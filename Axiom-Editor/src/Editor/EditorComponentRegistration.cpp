@@ -8,37 +8,75 @@
 
 #include "Components/Components.hpp"
 
+#include <span>
+#include <typeindex>
+
 namespace Axiom {
 	namespace {
+		using InspectorFn = void (*)(std::span<const Entity>);
+
+		struct InspectorBinding {
+			std::type_index type;
+			InspectorFn inspector;
+		};
+
 		template<typename T>
-		void RegisterComponent(SceneManager& sceneManager, const std::string& displayName,
-			void (*inspector)(Entity),
-			ComponentCategory category = ComponentCategory::Component,
-			const std::string& subcategory = "",
-			const std::string& serializedName = "")
-		{
-			ComponentInfo info{ displayName, subcategory, category };
-			info.serializedName = serializedName;
-			info.drawInspector = inspector;
-			sceneManager.RegisterComponentType<T>(info);
+		InspectorBinding Bind(InspectorFn inspector) {
+			return InspectorBinding{ std::type_index(typeid(T)), inspector };
+		}
+
+		// Editor-only: attach a draw-inspector callback to an already-registered
+		// component. The component itself (display name, category, serializedName,
+		// has/add/remove/copyTo) MUST be registered by the engine in
+		// BuiltInComponentRegistration.cpp first; this file only paints in the UI
+		// behavior on top. ScriptComponent is the one exception: it is registered
+		// here because its inspector is the only thing the editor needs from it
+		// and the engine never instantiates a ComponentInfo for it.
+		void AttachInspector(SceneManager& sceneManager, std::type_index type, InspectorFn inspector) {
+			bool attached = false;
+			sceneManager.GetComponentRegistry().ForEachComponentInfo([&](const std::type_index& id, ComponentInfo& info) {
+				if (id == type) {
+					info.drawInspector = inspector;
+					attached = true;
+				}
+			});
+			AIM_CORE_ASSERT(attached, AxiomErrorCode::InvalidArgument,
+				"AttachInspector: component type not registered. Register it in BuiltInComponentRegistration.cpp before attaching an inspector.");
 		}
 	}
 
 	void RegisterEditorComponentInspectors(SceneManager& sceneManager) {
-		RegisterComponent<NameComponent>(sceneManager, "Name", DrawNameComponentInspector, ComponentCategory::Component, "General", "name");
-		RegisterComponent<Transform2DComponent>(sceneManager, "Transform 2D", DrawTransform2DInspector, ComponentCategory::Component, "General", "Transform2D");
+		// ScriptComponent is editor-only as far as registration goes: register it
+		// here (it isn't part of BuiltInComponentRegistration) before attaching
+		// its inspector below.
+		{
+			ComponentInfo scriptInfo{ "Scripts", "Scripting", ComponentCategory::Component };
+			scriptInfo.serializedName = "Scripts";
+			sceneManager.RegisterComponentType<ScriptComponent>(scriptInfo);
+		}
 
-		RegisterComponent<SpriteRendererComponent>(sceneManager, "Sprite Renderer", DrawSpriteRendererInspector, ComponentCategory::Component, "Rendering", "SpriteRenderer");
-		RegisterComponent<Camera2DComponent>(sceneManager, "Camera 2D", DrawCamera2DInspector, ComponentCategory::Component, "Rendering", "Camera2D");
-		RegisterComponent<ParticleSystem2DComponent>(sceneManager, "Particle System 2D", DrawParticleSystem2DInspector, ComponentCategory::Component, "Rendering", "ParticleSystem2D");
+		// Inspector-only attachments. The component metadata itself lives in
+		// Axiom-Engine/src/Scene/BuiltInComponentRegistration.cpp — do not
+		// re-declare display names, categories, or serialized names here.
+		const InspectorBinding bindings[] = {
+			Bind<NameComponent>(DrawNameComponentInspector),
+			Bind<Transform2DComponent>(DrawTransform2DInspector),
 
-		RegisterComponent<BoxCollider2DComponent>(sceneManager, "Box Collider 2D", DrawBoxCollider2DInspector, ComponentCategory::Component, "Physics", "BoxCollider2D");
-		RegisterComponent<Rigidbody2DComponent>(sceneManager, "Rigidbody 2D", DrawRigidbody2DInspector, ComponentCategory::Component, "Physics", "Rigidbody2D");
-		RegisterComponent<FastBody2DComponent>(sceneManager, "Fast Body 2D", DrawFastBody2DInspector, ComponentCategory::Component, "Physics", "FastBody2D");
-		RegisterComponent<FastBoxCollider2DComponent>(sceneManager, "Fast Box Collider 2D", DrawFastBoxCollider2DInspector, ComponentCategory::Component, "Physics", "FastBoxCollider2D");
-		RegisterComponent<FastCircleCollider2DComponent>(sceneManager, "Fast Circle Collider 2D", DrawFastCircleCollider2DInspector, ComponentCategory::Component, "Physics", "FastCircleCollider2D");
+			Bind<SpriteRendererComponent>(DrawSpriteRendererInspector),
+			Bind<Camera2DComponent>(DrawCamera2DInspector),
+			Bind<ParticleSystem2DComponent>(DrawParticleSystem2DInspector),
 
-		RegisterComponent<AudioSourceComponent>(sceneManager, "Audio Source", DrawAudioSourceInspector, ComponentCategory::Component, "Audio", "AudioSource");
-		RegisterComponent<ScriptComponent>(sceneManager, "Scripts", DrawScriptComponentInspector, ComponentCategory::Component, "Scripting", "Scripts");
+			Bind<BoxCollider2DComponent>(DrawBoxCollider2DInspector),
+			Bind<Rigidbody2DComponent>(DrawRigidbody2DInspector),
+			Bind<FastBody2DComponent>(DrawFastBody2DInspector),
+			Bind<FastBoxCollider2DComponent>(DrawFastBoxCollider2DInspector),
+			Bind<FastCircleCollider2DComponent>(DrawFastCircleCollider2DInspector),
+
+			Bind<AudioSourceComponent>(DrawAudioSourceInspector),
+			Bind<ScriptComponent>(DrawScriptComponentInspector),
+		};
+
+		for (const auto& b : bindings)
+			AttachInspector(sceneManager, b.type, b.inspector);
 	}
 }

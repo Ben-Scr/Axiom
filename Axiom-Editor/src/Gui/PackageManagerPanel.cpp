@@ -2,9 +2,11 @@
 #include "Gui/PackageManagerPanel.hpp"
 
 #include "Core/Log.hpp"
+#include "Core/PackageHost.hpp"
 #include "Project/AxiomProject.hpp"
 #include "Project/ProjectManager.hpp"
 #include "Scripting/ScriptEngine.hpp"
+#include "Utils/Process.hpp"
 
 #include <imgui.h>
 #include <algorithm>
@@ -99,16 +101,6 @@ namespace Axiom {
 					m_InstalledNuGetPackages = m_Manager->GetInstalledPackages();
 					m_InstalledNuGetDirty = false;
 
-					AIM_CORE_INFO_TAG("PackageManagerPanel",
-						"Post-op refresh: GetInstalledPackages returned {} entries (operation '{}', target '{}', success={})",
-						m_InstalledNuGetPackages.size(),
-						m_OperationWasInstall ? "Install" : "Remove",
-						m_OperationTarget,
-						result.Success);
-					for (const auto& inst : m_InstalledNuGetPackages) {
-						AIM_CORE_INFO_TAG("PackageManagerPanel", "  installed: id='{}' version='{}'", inst.Id, inst.Version);
-					}
-
 					// Re-cross-reference EVERY search result against the fresh installed
 					// list. Case-insensitive because NuGet IDs are case-insensitive.
 					for (auto& pkg : m_SearchResults) {
@@ -190,6 +182,7 @@ namespace Axiom {
 		// Floating install-windows opened from the "+" menu.
 		RenderGitInstallWindow();
 		RenderNuGetInstallWindow();
+		RenderNewPackageWindow();
 	}
 
 	void PackageManagerPanel::RefreshManifestsIfDirty() {
@@ -211,17 +204,35 @@ namespace Axiom {
 		ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
 
 		const bool automating = m_AutomationTask && m_AutomationTask->Running.load(std::memory_order_acquire);
-		const bool canAdd = ProjectManager::GetCurrentProject() && !m_IsOperating && !automating;
-		if (!canAdd) ImGui::BeginDisabled();
+		// "Create new package" works without a project (engine-developer flow targeting
+		// `<repo>/packages/`). The other entries still need a project — they install
+		// into the project's csproj / allow-list. Gate them individually inside the popup.
+		const bool canOpenMenu = !m_IsOperating && !automating;
+		const bool canInstallToProject = ProjectManager::GetCurrentProject() && canOpenMenu;
+		if (!canOpenMenu) ImGui::BeginDisabled();
 		if (ImGui::Button("+", ImVec2(plusWidth, plusWidth))) {
 			ImGui::OpenPopup("##AddPackageMenu");
 		}
-		if (!canAdd) ImGui::EndDisabled();
+		if (!canOpenMenu) ImGui::EndDisabled();
 		if (ImGui::IsItemHovered()) {
-			ImGui::SetTooltip(canAdd ? "Add a user package" : "Open a project to add packages");
+			ImGui::SetTooltip(canOpenMenu ? "Add a package" : "Wait for current operation to finish");
 		}
 
 		if (ImGui::BeginPopup("##AddPackageMenu")) {
+			if (ImGui::MenuItem("Create new package...")) {
+				m_NewPackageNameBuffer[0] = '\0';
+				m_NewPackageDescriptionBuffer[0] = '\0';
+				m_NewPackageLayerNative = true;
+				m_NewPackageLayerStandalone = false;
+				m_NewPackageLayerCsharp = false;
+				// Default the radio to "this project" if a project is open — that's
+				// almost always what the user wants from inside the editor.
+				m_NewPackageTarget = ProjectManager::GetCurrentProject() ? 1 : 0;
+				m_NewPackageError.clear();
+				m_ShowNewPackageWindow = true;
+			}
+			ImGui::Separator();
+			if (!canInstallToProject) ImGui::BeginDisabled();
 			if (ImGui::MenuItem("Install package from disk")) {
 				HandleDiskInstall();
 			}
@@ -232,6 +243,7 @@ namespace Axiom {
 			if (ImGui::MenuItem("Install package from NuGet")) {
 				m_ShowNuGetInstallWindow = true;
 			}
+			if (!canInstallToProject) ImGui::EndDisabled();
 			ImGui::EndPopup();
 		}
 
@@ -389,6 +401,201 @@ namespace Axiom {
 		StartPostInstallAutomation();
 	}
 
+	// ── New-Package wizard ──────────────────────────────────────────────────────
+	//
+	// The wizard is a thin UI front-end over `scripts/NewPackage.py`. The same
+	// scaffolding code path serves CLI users and editor users; bugs and tweaks
+	// land in one place. We pass `--no-premake` from here because the editor's
+	// existing post-install automation already runs the engine-solution regen
+	// (and a build for project-local packages); doing it twice wastes ~5s.
+
+	void PackageManagerPanel::RenderNewPackageWindow() {
+		if (!m_ShowNewPackageWindow) return;
+
+		ImGui::SetNextWindowSize(ImVec2(560, 0), ImGuiCond_FirstUseEver);
+		if (ImGui::Begin("Create new package", &m_ShowNewPackageWindow,
+			ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoDocking)) {
+
+			ImGui::TextWrapped("Scaffolds a new Axiom package — manifest, source stubs, and "
+				"(optionally) the project allow-list entry. Backed by scripts/NewPackage.py.");
+			ImGui::Spacing();
+
+			ImGui::TextUnformatted("Name");
+			ImGui::SetNextItemWidth(-1.0f);
+			ImGui::InputTextWithHint("##NewPkgName", "e.g. Axiom.Foo or MyGame.Loot",
+				m_NewPackageNameBuffer, sizeof(m_NewPackageNameBuffer));
+			ImGui::TextDisabled("PascalCase segments separated by '.', e.g. Axiom.Tilemap2D.");
+
+			ImGui::Spacing();
+			ImGui::TextUnformatted("Description (optional)");
+			ImGui::SetNextItemWidth(-1.0f);
+			ImGui::InputText("##NewPkgDesc", m_NewPackageDescriptionBuffer,
+				sizeof(m_NewPackageDescriptionBuffer));
+
+			ImGui::Spacing();
+			ImGui::TextUnformatted("Layers");
+			ImGui::Indent();
+			ImGui::Checkbox("Native (engine_core)##NewPkgNative", &m_NewPackageLayerNative);
+			if (ImGui::IsItemHovered()) {
+				ImGui::SetTooltip("C++ that links Axiom-Engine and can use AIM_*_TAG, ECS, etc.");
+			}
+			ImGui::Checkbox("Standalone C++ (no engine link)##NewPkgStandalone",
+				&m_NewPackageLayerStandalone);
+			if (ImGui::IsItemHovered()) {
+				ImGui::SetTooltip("C++ that does NOT link Axiom-Engine. Mutually exclusive with Native.");
+			}
+			ImGui::Checkbox("C# (.NET 9.0)##NewPkgCsharp", &m_NewPackageLayerCsharp);
+			if (ImGui::IsItemHovered()) {
+				ImGui::SetTooltip("Managed assembly (Pkg.<Name>.dll). Auto-bridges to the native sibling "
+					"if Native or Standalone is also checked.");
+			}
+			ImGui::Unindent();
+
+			// Mutual exclusion guardrail mirrors the CLI's parse_layers() check.
+			if (m_NewPackageLayerNative && m_NewPackageLayerStandalone) {
+				ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.20f, 1.0f),
+					"Native and Standalone are mutually exclusive.");
+			}
+
+			ImGui::Spacing();
+			ImGui::TextUnformatted("Target");
+			ImGui::Indent();
+			AxiomProject* project = ProjectManager::GetCurrentProject();
+			ImGui::RadioButton("Engine packages (<repo>/packages/)##NewPkgEngine",
+				&m_NewPackageTarget, 0);
+			if (!project) ImGui::BeginDisabled();
+			ImGui::RadioButton(project
+				? "This project (<project>/Packages/)##NewPkgProject"
+				: "This project (<no project loaded>)##NewPkgProject",
+				&m_NewPackageTarget, 1);
+			if (!project) ImGui::EndDisabled();
+			ImGui::Unindent();
+
+			if (!m_NewPackageError.empty()) {
+				ImGui::Spacing();
+				ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "%s", m_NewPackageError.c_str());
+			}
+
+			ImGui::Spacing();
+			ImGui::Separator();
+			ImGui::Spacing();
+
+			const bool automating = m_AutomationTask && m_AutomationTask->Running.load(std::memory_order_acquire);
+			const bool layerOk =
+				(m_NewPackageLayerNative || m_NewPackageLayerStandalone || m_NewPackageLayerCsharp)
+				&& !(m_NewPackageLayerNative && m_NewPackageLayerStandalone);
+			const bool nameOk = std::strlen(m_NewPackageNameBuffer) > 0;
+			const bool canCreate = layerOk && nameOk && !m_NewPackageIsCreating
+				&& !m_IsOperating && !automating;
+
+			if (!canCreate) ImGui::BeginDisabled();
+			if (ImGui::Button("Create", ImVec2(120, 0))) {
+				HandleNewPackageCreate();
+			}
+			if (!canCreate) ImGui::EndDisabled();
+
+			ImGui::SameLine();
+			if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+				m_ShowNewPackageWindow = false;
+				m_NewPackageError.clear();
+			}
+		}
+		ImGui::End();
+	}
+
+	void PackageManagerPanel::HandleNewPackageCreate() {
+		m_NewPackageError.clear();
+
+		const std::string engineRoot = AxiomProject::GetEngineRootDir();
+		if (engineRoot.empty()) {
+			m_NewPackageError = "Engine root not resolved; cannot locate scripts/NewPackage.py.";
+			return;
+		}
+
+		const std::filesystem::path scriptPath =
+			std::filesystem::path(engineRoot) / "scripts" / "NewPackage.py";
+		if (!std::filesystem::exists(scriptPath)) {
+			m_NewPackageError = "scripts/NewPackage.py not found at: " + scriptPath.generic_string();
+			return;
+		}
+
+		// Build the --layers token from the checkboxes. The CLI accepts either
+		// commas or pluses; we use commas because they don't get re-parsed by
+		// the host shell on either Windows or POSIX.
+		std::vector<std::string> layerTokens;
+		if (m_NewPackageLayerNative)     layerTokens.emplace_back("native");
+		if (m_NewPackageLayerStandalone) layerTokens.emplace_back("standalone");
+		if (m_NewPackageLayerCsharp)     layerTokens.emplace_back("csharp");
+		std::string layersArg;
+		for (size_t i = 0; i < layerTokens.size(); ++i) {
+			if (i > 0) layersArg += ',';
+			layersArg += layerTokens[i];
+		}
+
+		std::vector<std::string> command = {
+			"python",
+			scriptPath.generic_string(),
+			std::string(m_NewPackageNameBuffer),
+			"--layers", layersArg,
+			"--no-premake",   // we run regen+build via StartPostInstallAutomation below
+		};
+
+		AxiomProject* project = ProjectManager::GetCurrentProject();
+		if (m_NewPackageTarget == 1) {
+			if (!project) {
+				m_NewPackageError = "Project target selected but no project is loaded.";
+				return;
+			}
+			command.emplace_back("--project");
+			command.emplace_back(project->RootDirectory);
+		}
+
+		if (std::strlen(m_NewPackageDescriptionBuffer) > 0) {
+			command.emplace_back("--description");
+			command.emplace_back(m_NewPackageDescriptionBuffer);
+		}
+
+		m_NewPackageIsCreating = true;
+		m_StatusMessage = std::string("Creating package '") + m_NewPackageNameBuffer + "'...";
+		m_StatusIsError = false;
+
+		// Run the scaffolder synchronously. With --no-premake it does only
+		// file I/O and at most a small JSON edit, so this returns in well
+		// under a second — a frame skip is a fair trade for code simplicity.
+		Process::Result result = Process::Run(command, std::filesystem::path(engineRoot));
+		m_NewPackageIsCreating = false;
+
+		if (!result.Succeeded()) {
+			m_NewPackageError = "Scaffolder failed (exit " + std::to_string(result.ExitCode) +
+				"). Output:\n" + result.Output;
+			AIM_ERROR_TAG("AxiomPackages", "{}", m_NewPackageError);
+			m_StatusMessage = "Package creation failed.";
+			m_StatusIsError = true;
+			return;
+		}
+
+		AIM_INFO_TAG("AxiomPackages", "Created package '{}'.", m_NewPackageNameBuffer);
+
+		// If a project is open, kick off the standard post-install pipeline:
+		// premake regen (with --axiom-project) + targeted MSBuild for the
+		// project's package projects. If no project is open, we leave engine
+		// regen + build to the user — auto-rebuilding the running editor's
+		// own engine.dll is unsafe.
+		m_ManifestsDirty = true;
+		if (project) {
+			StartPostInstallAutomation();
+		}
+		else {
+			m_StatusMessage = std::string("Package '") + m_NewPackageNameBuffer +
+				"' created. Run premake5 vs2022 + rebuild the engine solution to pick it up.";
+			m_StatusIsError = false;
+		}
+
+		m_ShowNewPackageWindow = false;
+		m_NewPackageNameBuffer[0] = '\0';
+		m_NewPackageDescriptionBuffer[0] = '\0';
+	}
+
 	void PackageManagerPanel::RenderGitInstallWindow() {
 		if (!m_ShowGitInstallWindow) return;
 
@@ -445,22 +652,9 @@ namespace Axiom {
 				return;
 			}
 
-			const auto& sources = m_Manager->GetSources();
-			if (!sources.empty()) {
-				ImGui::SetNextItemWidth(150.0f);
-				if (ImGui::BeginCombo("##NuGetSource", sources[m_SelectedSource]->GetName().c_str())) {
-					for (int i = 0; i < static_cast<int>(sources.size()); i++) {
-						bool selected = (m_SelectedSource == i);
-						if (ImGui::Selectable(sources[i]->GetName().c_str(), selected)) {
-							m_SelectedSource = i;
-							m_SearchResults.clear();
-						}
-						if (selected) ImGui::SetItemDefaultFocus();
-					}
-					ImGui::EndCombo();
-				}
-				ImGui::SameLine();
-			}
+			// This window is dedicated to NuGet — the source is always the NuGet source
+			// (registered at index 0 by the editor layer). No selector needed.
+			m_SelectedSource = 0;
 
 			ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 70.0f);
 			bool enterPressed = ImGui::InputText("##NuGetSearch", m_NuGetSearchBuffer, sizeof(m_NuGetSearchBuffer),
@@ -517,6 +711,13 @@ namespace Axiom {
 		if (ImGui::CollapsingHeader("User Packages##installed")) {
 			RenderInstalledUserPackagesSection();
 		}
+
+		ImGui::Spacing();
+
+		ImGui::SetNextItemOpen(true, ImGuiCond_FirstUseEver);
+		if (ImGui::CollapsingHeader("NuGet Packages##installed")) {
+			RenderInstalledNuGetPackagesSection();
+		}
 	}
 
 	void PackageManagerPanel::RenderInstalledAxiomPackagesSection() {
@@ -548,41 +749,60 @@ namespace Axiom {
 		ImGui::Indent();
 
 		AxiomProject* project = ProjectManager::GetCurrentProject();
+		if (!project) {
+			ImGui::TextDisabled("Open a project to see its installed user packages.");
+			ImGui::Unindent();
+			return;
+		}
 
 		// Project-local Axiom packages — installed via the GitHub / Local flows
-		// AND in the project's allow-list.
-		int axiomUserShown = 0;
+		// AND in the project's allow-list. NuGet PackageReferences live in their
+		// own panel below; they aren't part of the Axiom packages allow-list.
+		int shown = 0;
 		for (const auto& manifest : m_AllManifests) {
 			if (manifest.IsEngine) continue;
 			if (!IsPackageInstalled(manifest.Name)) continue;
 			if (!MatchesFilter(manifest.Name, m_InstalledFilterBuffer)) continue;
 			RenderAxiomPackageRow(manifest, "installed-user", RowMode::InstalledOnly);
-			++axiomUserShown;
+			++shown;
+		}
+		if (shown == 0) {
+			ImGui::TextDisabled("No user packages installed. Add a package via the Search tab.");
 		}
 
-		// NuGet PackageReferences from the project's .csproj (separate flow — those
-		// aren't part of the Axiom packages allow-list).
-		int nugetShown = 0;
-		if (m_Manager && m_Manager->IsReady()) {
-			if (m_InstalledNuGetDirty) {
-				m_InstalledNuGetPackages = m_Manager->GetInstalledPackages();
-				m_InstalledNuGetDirty = false;
-			}
-			for (int i = 0; i < static_cast<int>(m_InstalledNuGetPackages.size()); i++) {
-				const auto& pkg = m_InstalledNuGetPackages[i];
-				if (!MatchesFilter(pkg.Id, m_InstalledFilterBuffer)) continue;
-				RenderNugetPackageRow(pkg, i + 100000);
-				++nugetShown;
-			}
+		ImGui::Unindent();
+	}
+
+	void PackageManagerPanel::RenderInstalledNuGetPackagesSection() {
+		ImGui::Indent();
+
+		AxiomProject* project = ProjectManager::GetCurrentProject();
+		if (!project) {
+			ImGui::TextDisabled("Open a project to see its installed NuGet packages.");
+			ImGui::Unindent();
+			return;
 		}
 
-		if (axiomUserShown == 0 && nugetShown == 0) {
-			if (project) {
-				ImGui::TextDisabled("No user packages installed. Add a package via the Search tab.");
-			}
-			else {
-				ImGui::TextDisabled("Open a project to see its installed user packages.");
-			}
+		if (!m_Manager || !m_Manager->IsReady()) {
+			ImGui::TextDisabled("NuGet source unavailable.");
+			ImGui::Unindent();
+			return;
+		}
+
+		if (m_InstalledNuGetDirty) {
+			m_InstalledNuGetPackages = m_Manager->GetInstalledPackages();
+			m_InstalledNuGetDirty = false;
+		}
+
+		int shown = 0;
+		for (int i = 0; i < static_cast<int>(m_InstalledNuGetPackages.size()); i++) {
+			const auto& pkg = m_InstalledNuGetPackages[i];
+			if (!MatchesFilter(pkg.Id, m_InstalledFilterBuffer)) continue;
+			RenderNugetPackageRow(pkg, i + 100000);
+			++shown;
+		}
+		if (shown == 0) {
+			ImGui::TextDisabled("No NuGet packages installed. Use the Search tab's '+' menu to install one.");
 		}
 
 		ImGui::Unindent();
@@ -854,8 +1074,22 @@ namespace Axiom {
 				return;
 			}
 
-			setStage("Building engine solution (incremental MSBuild)...", 0.40f);
-			AxiomProject::BuildResult build = AxiomProject::BuildSolution();
+			// Same constraint as the launcher path: don't rebuild the engine itself
+			// from inside a process that has Axiom-Engine.dll loaded. Build only the
+			// project-local package projects. Empty targets = no MSBuild call at all.
+			const std::vector<std::string> packageNames =
+				AxiomProject::EnumerateProjectLocalPackages(projectRoot);
+			std::vector<std::string> targets;
+			targets.reserve(packageNames.size() * 2);
+			for (const std::string& pkg : packageNames) {
+				targets.push_back("Pkg." + pkg + ".Native");
+				targets.push_back("Pkg." + pkg);
+			}
+
+			setStage(targets.empty()
+				? "No package projects to build; skipping MSBuild."
+				: "Building project-local packages...", 0.40f);
+			AxiomProject::BuildResult build = AxiomProject::BuildSolutionTargets(targets);
 			{
 				std::scoped_lock lock(state->Mutex);
 				state->Progress = 1.0f;
@@ -899,7 +1133,22 @@ namespace Axiom {
 		}
 
 		if (success) {
-			m_StatusMessage = "Package operation complete; engine solution rebuilt.";
+			// Hot-load any newly-built package DLLs into the running editor
+			// process. Without this the user has to restart the editor before
+			// the just-installed package's components show up in the Add
+			// Component popup — its OnLoad never ran, so the engine's
+			// ComponentRegistry has no entry for the new types. LoadInstalled
+			// is idempotent against already-loaded packages and honors the
+			// project's `packages` allow-list (which InstallToProject just
+			// wrote to before this automation kicked off).
+			const size_t newlyLoaded = PackageHost::LoadInstalled();
+			if (newlyLoaded > 0) {
+				m_StatusMessage = "Package operation complete; loaded " +
+					std::to_string(newlyLoaded) + " new package(s) — components are available now.";
+			}
+			else {
+				m_StatusMessage = "Package operation complete; engine solution rebuilt.";
+			}
 			m_StatusIsError = false;
 		}
 		else {

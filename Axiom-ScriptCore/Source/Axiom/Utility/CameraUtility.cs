@@ -5,13 +5,13 @@ public static class CameraUtility
 {
     public static Vector2 GetMousePosition2D()
     {
-        Camera2DComponent mainCamera = Camera2DComponent.Main;
+        Camera2D? mainCamera = Camera2D.Main;
 
         if (mainCamera == null) throw new System.NullReferenceException("Main Camera doesn't exist");
 
         return mainCamera.ScreenToWorld(Input.MousePosition);
     }
-    public static Vector2 GetMousePosition(Camera2DComponent camera)
+    public static Vector2 GetMousePosition(Camera2D camera)
     {
         if (camera == null) throw new System.NullReferenceException("Main Camera doesn't exist");
 

@@ -29,7 +29,10 @@ public sealed class Texture : IEquatable<Texture>
     public int Width => UUID != 0 ? InternalCalls.Texture_GetWidth(UUID) : 0;
     public int Height => UUID != 0 ? InternalCalls.Texture_GetHeight(UUID) : 0;
 
-    internal static Texture? FromAssetUUID(ulong assetId)
+    // Public so packages built in separate assemblies (Pkg.<Name>.dll)
+    // can construct managed Texture wrappers from a stored asset GUID
+    // without re-implementing the AssetRegistry lookup.
+    public static Texture? FromAssetUUID(ulong assetId)
     {
         if (assetId == 0 || !InternalCalls.Asset_IsValid(assetId))
             return null;

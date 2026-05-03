@@ -89,6 +89,7 @@
     <Compile Include="Source\Axiom\Graphics\Texture.cs" />
     <Compile Include="Source\Axiom\Interop\NativeCallbacks.cs" />
     <Compile Include="Source\Axiom\Interop\NativeInterop.cs" />
+    <Compile Include="Source\Axiom\Interop\PackageNativeResolver.cs" />
     <Compile Include="Source\Axiom\Interop\ScriptHostBridge.cs" />
     <Compile Include="Source\Axiom\Interop\ScriptInstanceManager.cs" />
     <Compile Include="Source\Axiom\Math\Color.cs" />

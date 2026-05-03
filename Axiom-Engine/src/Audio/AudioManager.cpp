@@ -8,11 +8,14 @@
 #include "Serialization/Path.hpp"
 
 #include "Components/Audio/AudioSourceComponent.hpp"
+#include "Scene/Scene.hpp"
+#include "Scene/SceneManager.hpp"
 
 #define MINIAUDIO_IMPLEMENTATION
 #include <miniaudio.h>
 
 #include <filesystem>
+#include <unordered_set>
 
 namespace Axiom {
 	namespace {
@@ -296,6 +299,52 @@ namespace Axiom {
 		s_soundLimits.clear();
 		s_soundQueue = {};
 		s_activeSoundCount = 0;
+	}
+
+	size_t AudioManager::PurgeUnreferenced() {
+		if (!s_IsInitialized) {
+			AIM_CORE_WARN("AudioManager isn't initialized");
+			return 0;
+		}
+
+		// Collect in-use AudioHandle values from every loaded Scene's
+		// registry. AudioSourceComponent is the only component today that
+		// holds an AudioHandle.
+		std::unordered_set<AudioHandle::HandleType> referenced;
+		referenced.reserve(s_audioMap.size());
+
+		SceneManager::Get().ForeachLoadedScene([&referenced](Scene& scene) {
+			entt::registry& registry = scene.GetRegistry();
+
+			auto sources = registry.view<AudioSourceComponent>();
+			for (auto entity : sources) {
+				const auto& source = sources.get<AudioSourceComponent>(entity);
+				const AudioHandle& handle = source.GetAudioHandle();
+				if (handle.IsValid()) {
+					referenced.insert(handle.GetHandle());
+				}
+			}
+		});
+
+		// Walk s_audioMap and free any entry whose id isn't in the set.
+		// Audio has no notion of "default" / built-in entries, so every
+		// loaded Audio is fair game. We collect the doomed handles first
+		// to avoid mutating s_audioMap while iterating it.
+		std::vector<AudioHandle> toFree;
+		toFree.reserve(s_audioMap.size());
+		for (const auto& [id, audio] : s_audioMap) {
+			if (referenced.find(id) == referenced.end()) {
+				toFree.emplace_back(id);
+			}
+		}
+
+		for (const AudioHandle& handle : toFree) {
+			UnloadAudio(handle);
+		}
+
+		const size_t freedCount = toFree.size();
+		AIM_CORE_INFO_TAG("AudioManager", "Purged {} unreferenced audio entries", freedCount);
+		return freedCount;
 	}
 
 	void AudioManager::PlayAudioSource(AudioSourceComponent& source) {

@@ -42,6 +42,7 @@ project "GLFW"
     }
 
     filter "system:windows"
+        buildoptions { "/FS" }
         systemversion "latest"
         defines { "_GLFW_WIN32", "_CRT_SECURE_NO_WARNINGS" }
         files

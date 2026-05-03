@@ -88,6 +88,9 @@ namespace Axiom {
 		void  (*Camera2D_ScreenToWorld)(uint64_t entityID, float sx, float sy, float* outX, float* outY);
 		float (*Camera2D_GetViewportWidth)(uint64_t entityID);
 		float (*Camera2D_GetViewportHeight)(uint64_t entityID);
+		// Returns the entity ID of the active scene's main camera (0 if none).
+		// Backs C# `Camera2DComponent.Main`.
+		uint64_t (*Camera2D_GetMainEntity)();
 
 		// ── Rigidbody2D ──────────────────────────────────────────────
 		void  (*Rigidbody2D_ApplyForce)(uint64_t entityID, float forceX, float forceY, int wake);
@@ -121,6 +124,11 @@ namespace Axiom {
 		void  (*AudioSource_SetLoop)(uint64_t entityID, int loop);
 		int   (*AudioSource_IsPlaying)(uint64_t entityID);
 		int   (*AudioSource_IsPaused)(uint64_t entityID);
+		// Audio asset reference: backs C# `AudioSourceComponent.Audio`.
+		// Get returns the asset UUID currently assigned (0 when none).
+		// Set assigns by UUID and refreshes the live AudioHandle via AudioManager.
+		uint64_t (*AudioSource_GetAudio)(uint64_t entityID);
+		void     (*AudioSource_SetAudio)(uint64_t entityID, uint64_t assetId);
 
 		// ── Axiom-Physics ─────────────────────────────────────────────
 		int   (*FastBody2D_GetBodyType)(uint64_t entityID);
@@ -256,6 +264,13 @@ namespace Axiom {
 		void    (*InvokeGlobalSystemEnable)(int32_t handle);
 		void    (*InvokeGlobalSystemDisable)(int32_t handle);
 		int     (*GlobalSystemClassExists)(const char* className);
+
+		// ── New lifecycle slots (appended for binary compat) ──
+		void    (*InvokeAwake)(int32_t handle);
+		void    (*InvokeFixedUpdate)(int32_t handle);
+		void    (*InvokeGameSystemAwake)(int32_t handle);
+		void    (*InvokeGameSystemFixedUpdate)(int32_t handle);
+		void    (*InvokeGlobalSystemFixedUpdate)(int32_t handle);
 	};
 
 } // namespace Axiom

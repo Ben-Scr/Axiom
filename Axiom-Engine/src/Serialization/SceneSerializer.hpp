@@ -36,6 +36,25 @@ namespace Axiom {
 		static bool ApplyPrefabInstanceOverrides(Scene& scene, EntityHandle entity);
 		static EntityHandle RevertPrefabInstanceOverride(Scene& scene, EntityHandle entity, const std::string& overridePath);
 
+		// Re-instantiate a prefab instance against the current on-disk source
+		// while preserving the instance's per-field overrides. `previousSourceEntityValue`
+		// is the prefab's "Entity" JSON block as it existed BEFORE the source was
+		// saved — it's the baseline against which overrides are computed and then
+		// re-applied on top of the new source. Returns the new entity handle
+		// (the old one is destroyed). Used by the prefab inspector to push edits
+		// to live instances without dropping their per-field overrides.
+		static EntityHandle RefreshPrefabInstance(Scene& scene, EntityHandle existing,
+			const Json::Value& previousSourceEntityValue);
+
+		// Compute the per-field override set for a single prefab instance:
+		// outOverrides is filled with `{ "Transform2D.posX": <value>, ... }`
+		// — keys are dot-paths into the entity's serialized form. Returns true
+		// only when the entity is an `EntityOrigin::Prefab` instance whose source
+		// GUID resolves in the AssetRegistry; orphans and non-instances return
+		// false with `outOverrides` left empty. Used by the inspector to flag
+		// overridden components/fields and feed the Revert Field UI.
+		static bool ComputeInstanceOverrides(Scene& scene, EntityHandle entity, Json::Value& outOverrides);
+
 	private:
 		static EntityHandle DeserializeEntity(Scene& scene, const Json::Value& entityValue);
 		static EntityHandle DeserializeFullEntity(

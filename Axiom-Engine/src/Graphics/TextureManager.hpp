@@ -33,6 +33,14 @@ namespace Axiom {
             static void UnloadAll(bool defaultTextures = false);
             static uint64_t GetTextureAssetUUID(TextureHandle handle);
 
+            // Walks every live Scene's registry collecting TextureHandle values from
+            // components that hold them (SpriteRendererComponent, ParticleSystem2DComponent,
+            // any others with a TextureHandle field). Frees every entry not in that set.
+            // Default/built-in textures (the entries reserved at Initialize() time) are
+            // never evicted. Safe to call between frames; may take O(textures × components)
+            // time. Returns the number of entries freed.
+            static size_t PurgeUnreferenced();
+
             /// Returns the texture path relative to a texture root directory.
             /// This is the same format accepted by LoadTexture().
             static std::string GetTextureName(TextureHandle handle) {
@@ -69,6 +77,12 @@ namespace Axiom {
                     s_Textures[handle.index].IsValid &&
                     s_Textures[handle.index].Generation == handle.generation;
             }
+
+            // Sum of all currently-loaded textures' GPU memory footprint, in
+            // bytes. Estimate: 4 bytes per pixel (RGBA8). Used by the profiler's
+            // "Texture Memory" module. Default textures are excluded — they're
+            // tiny (1x1 / 32x32) and aren't user-controlled state.
+            static std::size_t GetTotalTextureMemoryBytes();
 
 		private:
 			static TextureHandle FindTextureByPath(const std::string& path, Filter filter, Wrap u, Wrap v);

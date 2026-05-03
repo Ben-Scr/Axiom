@@ -18,6 +18,10 @@ namespace Axiom {
 	public:
 		void Awake(Scene& scene) override;
 		void Update(Scene& scene) override;
+		// H7: dispatches OnFixedUpdate to managed and native scripts on every
+		// fixed-rate physics tick. Companion to Update; runs after the physics
+		// step + transform sync (PhysicsSystem2D::FixedUpdate ordering applies).
+		void FixedUpdate(Scene& scene) override;
 		void OnPreRender(Scene& scene) override;
 		void OnDestroy(Scene& scene) override;
 		static bool RemoveScript(Entity entity, size_t index);

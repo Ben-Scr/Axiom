@@ -19,6 +19,7 @@
 #include <filesystem>
 #include <algorithm>
 #include <unordered_set>
+#include <vector>
 
 namespace Axiom {
 
@@ -41,10 +42,23 @@ namespace Axiom {
 			return TextureManager::LoadTexture(path);
 		}
 
+		// Apply a sprite texture path to a single component instance.
 		static void AssignSpriteTexture(SpriteRendererComponent& sprite, const std::string& path) {
 			UUID assetId = UUID(0);
 			sprite.TextureHandle = LoadTextureFromAssetPath(path, &assetId);
 			sprite.TextureAssetId = assetId;
+		}
+
+		// Apply a sprite texture path to every entity in the selection.
+		static void AssignSpriteTextureForAll(std::span<const Entity> entities, const std::string& path) {
+			UUID sharedAssetId = UUID(0);
+			TextureHandle sharedHandle = LoadTextureFromAssetPath(path, &sharedAssetId);
+			for (const Entity& entity : entities) {
+				if (!entity.HasComponent<SpriteRendererComponent>()) continue;
+				auto& sprite = const_cast<Entity&>(entity).GetComponent<SpriteRendererComponent>();
+				sprite.TextureHandle = sharedHandle;
+				sprite.TextureAssetId = sharedAssetId;
+			}
 		}
 
 		static void AssignAudioClip(AudioSourceComponent& audioSource, const std::string& path) {
@@ -55,6 +69,20 @@ namespace Axiom {
 			}
 
 			audioSource.SetAudioHandle(AudioManager::LoadAudio(path), UUID(0));
+		}
+
+		static void AssignAudioClipForAll(std::span<const Entity> entities, const std::string& path) {
+			const uint64_t assetId = AssetRegistry::GetOrCreateAssetUUID(path);
+			for (const Entity& entity : entities) {
+				if (!entity.HasComponent<AudioSourceComponent>()) continue;
+				auto& audioSource = const_cast<Entity&>(entity).GetComponent<AudioSourceComponent>();
+				if (assetId != 0 && AssetRegistry::IsAudio(assetId)) {
+					audioSource.SetAudioHandle(AudioManager::LoadAudioByUUID(assetId), UUID(assetId));
+				}
+				else {
+					audioSource.SetAudioHandle(AudioManager::LoadAudio(path), UUID(0));
+				}
+			}
 		}
 
 		static void DrawPickerHeaderControls(const char* searchId, char* searchBuffer, std::size_t searchBufferSize, bool& isOpen) {
@@ -108,9 +136,12 @@ namespace Axiom {
 		static ThumbnailCache s_TexturePickerThumbnails;
 		static bool s_TexturePickerThumbnailCacheInitialized = false;
 		static std::unordered_set<std::string> s_TexturePickerLoadedPaths;
-		// Store entity handle instead of raw component pointer to avoid
-		// dangling pointer if the entity is destroyed or components reallocate.
-		static EntityHandle s_TexturePickerTargetEntity = entt::null;
+		// Capture every selected entity so picking applies to all of them, not
+		// just the most recently focused one.
+		// Stored as full Entity (not bare handle) so the picker can write back to
+		// whichever scene the inspector was rendering — the prefab inspector
+		// uses a detached scene that isn't SceneManager::GetActiveScene().
+		static std::vector<Entity> s_TexturePickerTargets;
 
 		static bool IsImageExtension(const std::string& ext) {
 			return ext == ".png" || ext == ".jpg" || ext == ".jpeg"
@@ -154,34 +185,55 @@ namespace Axiom {
 		}
 
 		static void ApplyTexturePickerSelection(const TexturePickerEntry* entry) {
-			Scene* scene = SceneManager::Get().GetActiveScene();
-			if (scene && scene->IsValid(s_TexturePickerTargetEntity)
-				&& scene->HasComponent<SpriteRendererComponent>(s_TexturePickerTargetEntity)) {
-				auto& sprite = scene->GetComponent<SpriteRendererComponent>(s_TexturePickerTargetEntity);
-				if (!entry) {
-					sprite.TextureHandle = TextureHandle();
-					sprite.TextureAssetId = UUID(0);
-				}
-				else if (entry->AssetId != 0 && AssetRegistry::IsTexture(entry->AssetId)) {
-					sprite.TextureHandle = TextureManager::LoadTextureByUUID(entry->AssetId);
-					sprite.TextureAssetId = UUID(entry->AssetId);
+			TextureHandle sharedHandle;
+			UUID sharedAssetId = UUID(0);
+			if (entry) {
+				if (entry->AssetId != 0 && AssetRegistry::IsTexture(entry->AssetId)) {
+					sharedHandle = TextureManager::LoadTextureByUUID(entry->AssetId);
+					sharedAssetId = UUID(entry->AssetId);
 				}
 				else {
-					sprite.TextureHandle = TextureManager::LoadTexture(entry->FullPath);
-					sprite.TextureAssetId = UUID(0);
+					sharedHandle = TextureManager::LoadTexture(entry->FullPath);
+					sharedAssetId = UUID(0);
 				}
 			}
 
+			// Each target carries its own Scene*, so this works for the active
+			// scene AND for the prefab inspector's detached scene.
+			for (const Entity& target : s_TexturePickerTargets) {
+				Scene* targetScene = const_cast<Entity&>(target).GetScene();
+				if (!targetScene) continue;
+				const EntityHandle handle = target.GetHandle();
+				if (!targetScene->IsValid(handle) || !targetScene->HasComponent<SpriteRendererComponent>(handle)) continue;
+				auto& sprite = targetScene->GetComponent<SpriteRendererComponent>(handle);
+				sprite.TextureHandle = sharedHandle;
+				sprite.TextureAssetId = sharedAssetId;
+				targetScene->MarkDirty();
+			}
+
 			s_TexturePickerOpen = false;
+			s_TexturePickerTargets.clear();
 		}
 
-		static void OpenTexturePicker(EntityHandle entity) {
+		static void OpenTexturePicker(std::span<const Entity> entities) {
 			s_TexturePickerOpen = true;
 			s_TexturePickerSearch[0] = '\0';
-			s_TexturePickerTargetEntity = entity;
+			s_TexturePickerTargets.clear();
+			s_TexturePickerTargets.reserve(entities.size());
+			for (const Entity& entity : entities) {
+				s_TexturePickerTargets.push_back(entity);
+			}
 			s_TexturePickerEntries.clear();
 			EnsureTexturePickerThumbnailCache();
 			ClearTexturePickerThumbnailCache();
+			// Force the asset registry to re-scan before we collect — the
+			// picker scans the filesystem directly via CollectTextureFiles,
+			// but GetOrCreateAssetUUID below routes through AssetRegistry
+			// which would otherwise return 0 for assets it hasn't indexed
+			// yet (a brand-new texture file wouldn't drag into the picker
+			// with a usable AssetId).
+			AssetRegistry::MarkDirty();
+			AssetRegistry::Sync();
 
 			// Collect from AxiomAssets/Textures (engine) and Assets/Textures (user project)
 			std::string axiomTexDir = Path::ResolveAxiomAssets("Textures");
@@ -345,88 +397,170 @@ namespace Axiom {
 		}
 	}
 
-	void DrawNameComponentInspector(Entity entity)
+	void DrawNameComponentInspector(std::span<const Entity> entities)
 	{
-		auto& name = entity.GetComponent<NameComponent>();
-		char buffer[256]{};
-		std::snprintf(buffer, sizeof(buffer), "%s", name.Name.c_str());
-		if (ImGui::InputText("##NameValue", buffer, sizeof(buffer))) {
-			name.Name = buffer;
-		}
-	}
-
-	void DrawTransform2DInspector(Entity entity)
-	{
-		auto& transform = entity.GetComponent<Transform2DComponent>();
-		ImGuiUtils::DrawInspectorControl("Position", [&transform](const char* id) {
-			return ImGui::DragFloat2(id, &transform.Position.x, 0.05f);
-		});
-		ImGuiUtils::DrawInspectorControl("Scale", [&transform](const char* id) {
-			return ImGui::DragFloat2(id, &transform.Scale.x, 0.05f, 0.001f);
-		});
-		ImGuiUtils::DrawInspectorControl("Rotation", [&transform](const char* id) {
-			return ImGui::DragFloat(id, &transform.Rotation, 0.01f);
-		});
-	}
-
-	void DrawRigidbody2DInspector(Entity entity)
-	{
-		auto& rb2D = entity.GetComponent<Rigidbody2DComponent>();
-
-		Vec2 position = rb2D.GetPosition();
-		Vec2 velocity = rb2D.GetVelocity();
-		float gravityScale = rb2D.GetGravityScale();
-		float rotation = rb2D.GetRotation();
-
-		if (ImGuiUtils::DrawInspectorControl("Position", [&position](const char* id) {
-			return ImGui::DragFloat2(id, &position.x, 0.05f);
-		}))
-			rb2D.SetPosition(position);
-
-		if (ImGuiUtils::DrawInspectorControl("Velocity", [&velocity](const char* id) {
-			return ImGui::DragFloat2(id, &velocity.x, 0.05f);
-		}))
-			rb2D.SetVelocity(velocity);
-
-		if (ImGuiUtils::DrawInspectorControl("Rotation", [&rotation](const char* id) {
-			return ImGui::DragFloat(id, &rotation, 0.01f);
-		}))
-			rb2D.SetRotation(rotation);
-
-		if (ImGuiUtils::DrawInspectorControl("Gravity Scale", [&gravityScale](const char* id) {
-			return ImGui::SliderFloat(id, &gravityScale, 0.0f, 1.0f);
-		}))
-			rb2D.SetGravityScale(gravityScale);
-
-		ImGuiUtils::DrawEnumCombo<BodyType>("Body Type", rb2D.GetBodyType(), [&rb2D](BodyType newType) {
-			rb2D.SetBodyType(newType);
+		ImGuiUtils::InputTextMulti("##NameValue", entities,
+			[](const Entity& e) -> std::string {
+				return e.GetComponent<NameComponent>().Name;
+			},
+			[](const Entity& e, const std::string& v) {
+				const_cast<Entity&>(e).GetComponent<NameComponent>().Name = v;
 			});
 	}
 
-	void DrawSpriteRendererInspector(Entity entity)
+	void DrawTransform2DInspector(std::span<const Entity> entities)
 	{
-		auto& sprite = entity.GetComponent<SpriteRendererComponent>();
-		ImGuiUtils::DrawInspectorControl("Color", [&sprite](const char* id) {
-			return ImGui::ColorEdit4(id, &sprite.Color.r, ImGuiColorEditFlags_NoInputs);
-		});
-		ImGuiUtils::DrawInspectorControl("Sorting Order", [&sprite](const char* id) {
-			return ImGui::DragScalar(id, ImGuiDataType_S16, &sprite.SortingOrder, 1.0f);
-		});
-		ImGuiUtils::DrawInspectorControl("Sorting Layer", [&sprite](const char* id) {
-			return ImGui::DragScalar(id, ImGuiDataType_U8, &sprite.SortingLayer, 1.0f);
-		});
+		ImGuiUtils::DragFloatNMulti("Position", entities, 2,
+			[](const Entity& e, int c) -> float {
+				const auto& t = e.GetComponent<Transform2DComponent>();
+				return c == 0 ? t.Position.x : t.Position.y;
+			},
+			[](const Entity& e, int c, float v) {
+				auto& t = const_cast<Entity&>(e).GetComponent<Transform2DComponent>();
+				if (c == 0) t.Position.x = v;
+				else        t.Position.y = v;
+			},
+			0.05f);
 
-		std::string textureDisplayName = "(None)";
+		ImGuiUtils::DragFloatNMulti("Scale", entities, 2,
+			[](const Entity& e, int c) -> float {
+				const auto& t = e.GetComponent<Transform2DComponent>();
+				return c == 0 ? t.Scale.x : t.Scale.y;
+			},
+			[](const Entity& e, int c, float v) {
+				auto& t = const_cast<Entity&>(e).GetComponent<Transform2DComponent>();
+				if (c == 0) t.Scale.x = v;
+				else        t.Scale.y = v;
+			},
+			0.05f, 0.001f, 0.0f);
+
+		ImGuiUtils::DragFloatMulti("Rotation", entities,
+			[](const Entity& e) -> float {
+				return e.GetComponent<Transform2DComponent>().Rotation;
+			},
+			[](const Entity& e, float v) {
+				const_cast<Entity&>(e).GetComponent<Transform2DComponent>().Rotation = v;
+			},
+			0.01f);
+	}
+
+	void DrawRigidbody2DInspector(std::span<const Entity> entities)
+	{
+		ImGuiUtils::DragFloatNMulti("Position", entities, 2,
+			[](const Entity& e, int c) -> float {
+				const Vec2 p = e.GetComponent<Rigidbody2DComponent>().GetPosition();
+				return c == 0 ? p.x : p.y;
+			},
+			[](const Entity& e, int c, float v) {
+				auto& rb = const_cast<Entity&>(e).GetComponent<Rigidbody2DComponent>();
+				Vec2 p = rb.GetPosition();
+				if (c == 0) p.x = v; else p.y = v;
+				rb.SetPosition(p);
+			},
+			0.05f);
+
+		ImGuiUtils::DragFloatNMulti("Velocity", entities, 2,
+			[](const Entity& e, int c) -> float {
+				const Vec2 v = e.GetComponent<Rigidbody2DComponent>().GetVelocity();
+				return c == 0 ? v.x : v.y;
+			},
+			[](const Entity& e, int c, float v) {
+				auto& rb = const_cast<Entity&>(e).GetComponent<Rigidbody2DComponent>();
+				Vec2 cur = rb.GetVelocity();
+				if (c == 0) cur.x = v; else cur.y = v;
+				rb.SetVelocity(cur);
+			},
+			0.05f);
+
+		ImGuiUtils::DragFloatMulti("Rotation", entities,
+			[](const Entity& e) -> float {
+				return e.GetComponent<Rigidbody2DComponent>().GetRotation();
+			},
+			[](const Entity& e, float v) {
+				const_cast<Entity&>(e).GetComponent<Rigidbody2DComponent>().SetRotation(v);
+			},
+			0.01f);
+
+		ImGuiUtils::SliderFloatMulti("Gravity Scale", entities,
+			[](const Entity& e) -> float {
+				return e.GetComponent<Rigidbody2DComponent>().GetGravityScale();
+			},
+			[](const Entity& e, float v) {
+				const_cast<Entity&>(e).GetComponent<Rigidbody2DComponent>().SetGravityScale(v);
+			},
+			0.0f, 1.0f);
+
+		ImGuiUtils::EnumComboMulti<BodyType>("Body Type", entities,
+			[](const Entity& e) -> BodyType {
+				return const_cast<Entity&>(e).GetComponent<Rigidbody2DComponent>().GetBodyType();
+			},
+			[](const Entity& e, BodyType v) {
+				const_cast<Entity&>(e).GetComponent<Rigidbody2DComponent>().SetBodyType(v);
+			});
+	}
+
+	void DrawSpriteRendererInspector(std::span<const Entity> entities)
+	{
+		ImGuiUtils::ColorEdit4Multi("Color", entities,
+			[](const Entity& e, int c) -> float {
+				const Color& col = e.GetComponent<SpriteRendererComponent>().Color;
+				return (&col.r)[c];
+			},
+			[](const Entity& e, int c, float v) {
+				Color& col = const_cast<Entity&>(e).GetComponent<SpriteRendererComponent>().Color;
+				(&col.r)[c] = v;
+			},
+			ImGuiColorEditFlags_NoInputs);
+
+		ImGuiUtils::DragScalarMulti<int16_t>("Sorting Order", entities, ImGuiDataType_S16,
+			[](const Entity& e) -> int16_t {
+				return e.GetComponent<SpriteRendererComponent>().SortingOrder;
+			},
+			[](const Entity& e, int16_t v) {
+				const_cast<Entity&>(e).GetComponent<SpriteRendererComponent>().SortingOrder = v;
+			},
+			1.0f);
+
+		ImGuiUtils::DragScalarMulti<uint8_t>("Sorting Layer", entities, ImGuiDataType_U8,
+			[](const Entity& e) -> uint8_t {
+				return e.GetComponent<SpriteRendererComponent>().SortingLayer;
+			},
+			[](const Entity& e, uint8_t v) {
+				const_cast<Entity&>(e).GetComponent<SpriteRendererComponent>().SortingLayer = v;
+			},
+			1.0f);
+
+		// Texture: only show a uniform display name when every selected entity
+		// has the same texture handle; otherwise show "—". Picker-driven edits
+		// always apply to the entire selection.
+		bool textureUniform = true;
+		TextureHandle firstHandle;
+		if (!entities.empty()) firstHandle = entities[0].GetComponent<SpriteRendererComponent>().TextureHandle;
+		for (std::size_t i = 1; i < entities.size(); ++i) {
+			const TextureHandle h = entities[i].GetComponent<SpriteRendererComponent>().TextureHandle;
+			if (h != firstHandle) { textureUniform = false; break; }
+		}
+
+		std::string textureDisplayName;
 		std::string textureTooltip;
-		if (sprite.TextureHandle.IsValid()) {
-			textureTooltip = TextureManager::GetTextureName(sprite.TextureHandle);
+		if (!textureUniform) {
+			textureDisplayName = "-";
+		}
+		else if (firstHandle.IsValid()) {
+			textureTooltip = TextureManager::GetTextureName(firstHandle);
 			if (!textureTooltip.empty()) {
 				textureDisplayName = std::filesystem::path(textureTooltip).filename().string();
 			}
+			else {
+				textureDisplayName = "(None)";
+			}
+		}
+		else {
+			textureDisplayName = "(None)";
 		}
 
 		if (DrawAssetSelectionField("Texture", textureDisplayName, textureTooltip)) {
-			OpenTexturePicker(entity.GetHandle());
+			OpenTexturePicker(entities);
 		}
 
 		if (ImGui::BeginDragDropTarget()) {
@@ -435,7 +569,7 @@ namespace Axiom {
 				std::string ext = std::filesystem::path(droppedPath).extension().string();
 				std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
 				if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp" || ext == ".tga") {
-					AssignSpriteTexture(sprite, droppedPath);
+					AssignSpriteTextureForAll(entities, droppedPath);
 				}
 			}
 			ImGui::EndDragDropTarget();
@@ -443,8 +577,10 @@ namespace Axiom {
 
 		RenderTexturePicker();
 
-		if (sprite.TextureHandle.IsValid()) {
-			if (Texture2D* texture = TextureManager::GetTexture(sprite.TextureHandle)) {
+		// Texture preview, filter/wrap controls — only meaningful when a single
+		// shared texture is selected. Otherwise show a muted hint.
+		if (textureUniform && firstHandle.IsValid()) {
+			if (Texture2D* texture = TextureManager::GetTexture(firstHandle)) {
 				const float texWidth = texture->GetWidth();
 				const float texHeight = texture->GetHeight();
 
@@ -464,226 +600,327 @@ namespace Axiom {
 				ImGui::PopID();
 			}
 		}
+		else if (!textureUniform) {
+			ImGui::TextDisabled("Mixed texture — pick to apply to all");
+		}
 	}
 
-	void DrawCamera2DInspector(Entity entity)
+	void DrawCamera2DInspector(std::span<const Entity> entities)
 	{
-		auto& camera = entity.GetComponent<Camera2DComponent>();
-		float zoom = camera.GetZoom();
-		if (ImGuiUtils::DrawInspectorControl("Zoom", [&zoom](const char* id) {
-			return ImGui::DragFloat(id, &zoom, 0.01f, 0.01f, 100.0f);
-		})) {
-			camera.SetZoom(zoom);
-		}
-		float ortho = camera.GetOrthographicSize();
-		if (ImGuiUtils::DrawInspectorControl("Orthographic Size", [&ortho](const char* id) {
-			return ImGui::DragFloat(id, &ortho, 0.05f, 0.05f, 1000.0f);
-		})) {
-			camera.SetOrthographicSize(ortho);
-		}
+		ImGuiUtils::DragFloatMulti("Zoom", entities,
+			[](const Entity& e) -> float { return e.GetComponent<Camera2DComponent>().GetZoom(); },
+			[](const Entity& e, float v) { const_cast<Entity&>(e).GetComponent<Camera2DComponent>().SetZoom(v); },
+			0.01f, 0.01f, 100.0f);
 
-		Color clearColor = camera.GetClearColor();
-		Color newClearColor = ImGuiUtils::DrawColorPick4("Clear Color", clearColor);
-		if (newClearColor != clearColor) {
-			camera.SetClearColor(newClearColor);
-		}
+		ImGuiUtils::DragFloatMulti("Orthographic Size", entities,
+			[](const Entity& e) -> float { return e.GetComponent<Camera2DComponent>().GetOrthographicSize(); },
+			[](const Entity& e, float v) { const_cast<Entity&>(e).GetComponent<Camera2DComponent>().SetOrthographicSize(v); },
+			0.05f, 0.05f, 1000.0f);
 
-		ImGuiUtils::DrawVec2ReadOnly("Viewport Size", camera.GetViewport()->GetSize());
-		ImGuiUtils::DrawVec2ReadOnly("World Viewport", camera.WorldViewPort());
+		ImGuiUtils::ColorEdit4Multi("Clear Color", entities,
+			[](const Entity& e, int c) -> float {
+				const Color& col = e.GetComponent<Camera2DComponent>().GetClearColor();
+				return (&col.r)[c];
+			},
+			[](const Entity& e, int c, float v) {
+				auto& cam = const_cast<Entity&>(e).GetComponent<Camera2DComponent>();
+				Color col = cam.GetClearColor();
+				(&col.r)[c] = v;
+				cam.SetClearColor(col);
+			});
+
+		// Read-only viewports: only meaningful when a single camera is selected;
+		// otherwise show muted hints.
+		if (entities.size() == 1) {
+			const auto& camera = entities[0].GetComponent<Camera2DComponent>();
+			ImGuiUtils::DrawVec2ReadOnly("Viewport Size", camera.GetViewport()->GetSize());
+			ImGuiUtils::DrawVec2ReadOnly("World Viewport", camera.WorldViewPort());
+		}
+		else {
+			ImGuiUtils::BeginInspectorFieldRow("Viewport Size");
+			ImGui::TextDisabled("-  (multiple cameras)");
+			ImGuiUtils::BeginInspectorFieldRow("World Viewport");
+			ImGui::TextDisabled("-  (multiple cameras)");
+		}
 	}
 
-	void DrawParticleSystem2DInspector(Entity entity)
+	void DrawParticleSystem2DInspector(std::span<const Entity> entities)
 	{
-		auto& ps = entity.GetComponent<ParticleSystem2DComponent>();
-
-		const std::string playbackLabel = std::string(ps.IsPlaying() ? "Pause" : "Play") + "##Value";
+		// "Play / Pause" toggle: drive every selected particle system the same
+		// way. We base the button label on the "majority" play state — first
+		// entity wins in mixed cases, which matches the existing single-edit
+		// behavior when applied to all.
+		bool firstPlaying = false;
+		bool playUniform = true;
+		if (!entities.empty()) {
+			firstPlaying = entities[0].GetComponent<ParticleSystem2DComponent>().IsPlaying();
+			for (std::size_t i = 1; i < entities.size(); ++i) {
+				if (entities[i].GetComponent<ParticleSystem2DComponent>().IsPlaying() != firstPlaying) {
+					playUniform = false;
+					break;
+				}
+			}
+		}
+		const std::string playbackLabel = (playUniform ? (firstPlaying ? "Pause" : "Play") : "Play / Pause") + std::string("##Value");
 		if (ImGuiUtils::DrawInspectorControl("Playback", [&playbackLabel](const char*) {
 			return ImGui::Button(playbackLabel.c_str());
 		})) {
-			if (ps.IsPlaying()) {
-				ps.Pause();
-			}
-			else {
-				ps.Play();
+			for (const Entity& e : entities) {
+				auto& ps = const_cast<Entity&>(e).GetComponent<ParticleSystem2DComponent>();
+				if (ps.IsPlaying()) ps.Pause();
+				else                ps.Play();
 			}
 		}
 
-		ImGuiUtils::DrawInspectorControl("Play On Awake", [&ps](const char* id) {
-			return ImGui::Checkbox(id, &ps.PlayOnAwake);
+		ImGuiUtils::CheckboxMulti("Play On Awake", entities,
+			[](const Entity& e) -> bool { return e.GetComponent<ParticleSystem2DComponent>().PlayOnAwake; },
+			[](const Entity& e, bool v) { const_cast<Entity&>(e).GetComponent<ParticleSystem2DComponent>().PlayOnAwake = v; });
+
+		ImGuiUtils::InputFloatMulti("LifeTime", entities,
+			[](const Entity& e) -> float { return e.GetComponent<ParticleSystem2DComponent>().ParticleSettings.LifeTime; },
+			[](const Entity& e, float v) { const_cast<Entity&>(e).GetComponent<ParticleSystem2DComponent>().ParticleSettings.LifeTime = v; });
+
+		ImGuiUtils::InputFloatMulti("Scale", entities,
+			[](const Entity& e) -> float { return e.GetComponent<ParticleSystem2DComponent>().ParticleSettings.Scale; },
+			[](const Entity& e, float v) { const_cast<Entity&>(e).GetComponent<ParticleSystem2DComponent>().ParticleSettings.Scale = v; });
+
+		ImGuiUtils::InputFloatMulti("Speed", entities,
+			[](const Entity& e) -> float { return e.GetComponent<ParticleSystem2DComponent>().ParticleSettings.Speed; },
+			[](const Entity& e, float v) { const_cast<Entity&>(e).GetComponent<ParticleSystem2DComponent>().ParticleSettings.Speed = v; });
+
+		ImGuiUtils::CheckboxMulti("Gravity", entities,
+			[](const Entity& e) -> bool { return e.GetComponent<ParticleSystem2DComponent>().ParticleSettings.UseGravity; },
+			[](const Entity& e, bool v) { const_cast<Entity&>(e).GetComponent<ParticleSystem2DComponent>().ParticleSettings.UseGravity = v; });
+
+		// Gravity Value: enabled only when all entities have UseGravity set.
+		bool gravityEnabledUniform = true;
+		bool gravityEnabledFirst = false;
+		if (!entities.empty()) {
+			gravityEnabledFirst = entities[0].GetComponent<ParticleSystem2DComponent>().ParticleSettings.UseGravity;
+			for (std::size_t i = 1; i < entities.size(); ++i) {
+				if (entities[i].GetComponent<ParticleSystem2DComponent>().ParticleSettings.UseGravity != gravityEnabledFirst) {
+					gravityEnabledUniform = false;
+					break;
+				}
+			}
+		}
+		ImGuiUtils::DrawEnabled(gravityEnabledUniform && gravityEnabledFirst, [&]() {
+			ImGuiUtils::DragFloatNMulti("Gravity Value", entities, 2,
+				[](const Entity& e, int c) -> float {
+					const Vec2& g = e.GetComponent<ParticleSystem2DComponent>().ParticleSettings.Gravity;
+					return c == 0 ? g.x : g.y;
+				},
+				[](const Entity& e, int c, float v) {
+					Vec2& g = const_cast<Entity&>(e).GetComponent<ParticleSystem2DComponent>().ParticleSettings.Gravity;
+					if (c == 0) g.x = v; else g.y = v;
+				});
 		});
 
-		ImGuiUtils::DrawInspectorControl("LifeTime", [&ps](const char* id) {
-			return ImGui::InputFloat(id, &ps.ParticleSettings.LifeTime);
-		});
-		ImGuiUtils::DrawInspectorControl("Scale", [&ps](const char* id) {
-			return ImGui::InputFloat(id, &ps.ParticleSettings.Scale);
-		});
-		ImGuiUtils::DrawInspectorControl("Speed", [&ps](const char* id) {
-			return ImGui::InputFloat(id, &ps.ParticleSettings.Speed);
-		});
-
-		if (ImGuiUtils::DrawInspectorControl("Gravity", [&ps](const char* id) {
-			return ImGui::RadioButton(id, ps.ParticleSettings.UseGravity);
-		}))
-			ps.ParticleSettings.UseGravity = !ps.ParticleSettings.UseGravity;
-
-		ImGuiUtils::DrawEnabled(ps.ParticleSettings.UseGravity, [&ps]() {
-			ImGuiUtils::DrawInspectorControl("Gravity Value", [&ps](const char* id) {
-				return ImGui::InputFloat2(id, &ps.ParticleSettings.Gravity.x);
-			});
-		});
-
-		if (ImGuiUtils::DrawInspectorControl("Random Colors", [&ps](const char* id) {
-			return ImGui::RadioButton(id, ps.ParticleSettings.UseRandomColors);
-		}))
-			ps.ParticleSettings.UseRandomColors = !ps.ParticleSettings.UseRandomColors;
+		ImGuiUtils::CheckboxMulti("Random Colors", entities,
+			[](const Entity& e) -> bool { return e.GetComponent<ParticleSystem2DComponent>().ParticleSettings.UseRandomColors; },
+			[](const Entity& e, bool v) { const_cast<Entity&>(e).GetComponent<ParticleSystem2DComponent>().ParticleSettings.UseRandomColors = v; });
 
 		if (ImGui::CollapsingHeader("Emission", ImGuiTreeNodeFlags_DefaultOpen)) {
 			ImGui::PushID("Emission");
-			ImGuiUtils::DrawInspectorControl("Emit Over Time", [&ps](const char* id) {
-				return ImGui::InputInt(id, (int*)&ps.EmissionSettings.EmitOverTime);
-			});
+			ImGuiUtils::InputIntMulti("Emit Over Time", entities,
+				[](const Entity& e) -> int { return static_cast<int>(e.GetComponent<ParticleSystem2DComponent>().EmissionSettings.EmitOverTime); },
+				[](const Entity& e, int v) { const_cast<Entity&>(e).GetComponent<ParticleSystem2DComponent>().EmissionSettings.EmitOverTime = static_cast<uint16_t>(std::clamp(v, 0, 65535)); });
 
-			ImGuiUtils::DrawEnumCombo<ParticleSystem2DComponent::ShapeType>("Shape Type", std::visit([](auto&& shape) -> ParticleSystem2DComponent::ShapeType {
-				using T = std::decay_t<decltype(shape)>;
-				if constexpr (std::is_same_v<T, ParticleSystem2DComponent::CircleParams>) {
-					return ParticleSystem2DComponent::ShapeType::Circle;
-				}
-				else if constexpr (std::is_same_v<T, ParticleSystem2DComponent::SquareParams>) {
-					return ParticleSystem2DComponent::ShapeType::Square;
-				}
-				}, ps.Shape), [&ps](ParticleSystem2DComponent::ShapeType newType) {
-					if (newType == ParticleSystem2DComponent::ShapeType::Circle) {
-						ps.Shape = ParticleSystem2DComponent::CircleParams{ 1.f, false };
-					}
-					else if (newType == ParticleSystem2DComponent::ShapeType::Square) {
-						ps.Shape = ParticleSystem2DComponent::SquareParams{ Vec2{ 1.f, 1.f } };
-					}
-					});
-
-				std::visit([&](auto& s) {
+			// Shape type combo. If selections have different alternatives,
+			// switching writes that alternative to all (defaults match the
+			// existing single-edit branch).
+			using ShapeType = ParticleSystem2DComponent::ShapeType;
+			auto shapeOf = [](const Entity& e) -> ShapeType {
+				return std::visit([](auto&& s) -> ShapeType {
 					using T = std::decay_t<decltype(s)>;
-					if constexpr (std::is_same_v<T, ParticleSystem2DComponent::CircleParams>) {
-						ImGuiUtils::DrawInspectorControl("Radius", [&s](const char* id) {
-							return ImGui::InputFloat(id, &s.Radius);
-						});
-						ImGuiUtils::DrawInspectorControl("On Circle Edge", [&s](const char* id) {
-							return ImGui::Checkbox(id, &s.IsOnCircle);
-						});
-					}
-					else if constexpr (std::is_same_v<T, ParticleSystem2DComponent::SquareParams>) {
-						ImGuiUtils::DrawVec2("Half Extents", s.HalfExtends);
-					}
-					}, ps.Shape);
+					if constexpr (std::is_same_v<T, ParticleSystem2DComponent::CircleParams>) return ShapeType::Circle;
+					else                                                                       return ShapeType::Square;
+					}, e.GetComponent<ParticleSystem2DComponent>().Shape);
+			};
+			ImGuiUtils::EnumComboMulti<ShapeType>("Shape Type", entities,
+				shapeOf,
+				[](const Entity& e, ShapeType v) {
+					auto& ps = const_cast<Entity&>(e).GetComponent<ParticleSystem2DComponent>();
+					if (v == ShapeType::Circle) ps.Shape = ParticleSystem2DComponent::CircleParams{ 1.f, false };
+					else                        ps.Shape = ParticleSystem2DComponent::SquareParams{ Vec2{ 1.f, 1.f } };
+				});
+
+			// Shape parameters: only render the per-alternative fields when all
+			// selected entities currently use the same alternative — otherwise
+			// editing them is ambiguous.
+			ShapeType firstShape = entities.empty() ? ShapeType::Circle : shapeOf(entities[0]);
+			bool shapeUniform = true;
+			for (std::size_t i = 1; i < entities.size(); ++i) {
+				if (shapeOf(entities[i]) != firstShape) { shapeUniform = false; break; }
+			}
+			if (!shapeUniform) {
+				ImGui::TextDisabled("Mixed shape — pick one to apply to all");
+			}
+			else if (firstShape == ShapeType::Circle) {
+				ImGuiUtils::InputFloatMulti("Radius", entities,
+					[](const Entity& e) -> float { return std::get<ParticleSystem2DComponent::CircleParams>(e.GetComponent<ParticleSystem2DComponent>().Shape).Radius; },
+					[](const Entity& e, float v) { std::get<ParticleSystem2DComponent::CircleParams>(const_cast<Entity&>(e).GetComponent<ParticleSystem2DComponent>().Shape).Radius = v; });
+				ImGuiUtils::CheckboxMulti("On Circle Edge", entities,
+					[](const Entity& e) -> bool { return std::get<ParticleSystem2DComponent::CircleParams>(e.GetComponent<ParticleSystem2DComponent>().Shape).IsOnCircle; },
+					[](const Entity& e, bool v) { std::get<ParticleSystem2DComponent::CircleParams>(const_cast<Entity&>(e).GetComponent<ParticleSystem2DComponent>().Shape).IsOnCircle = v; });
+			}
+			else {
+				ImGuiUtils::DragFloatNMulti("Half Extents", entities, 2,
+					[](const Entity& e, int c) -> float {
+						const Vec2& v = std::get<ParticleSystem2DComponent::SquareParams>(e.GetComponent<ParticleSystem2DComponent>().Shape).HalfExtends;
+						return c == 0 ? v.x : v.y;
+					},
+					[](const Entity& e, int c, float v) {
+						Vec2& he = std::get<ParticleSystem2DComponent::SquareParams>(const_cast<Entity&>(e).GetComponent<ParticleSystem2DComponent>().Shape).HalfExtends;
+						if (c == 0) he.x = v; else he.y = v;
+					});
+			}
 			ImGui::PopID();
 		}
 
 		if (ImGui::CollapsingHeader("Rendering")) {
 			ImGui::PushID("Rendering");
-			ps.RenderingSettings.Color = ImGuiUtils::DrawColorPick4("Color", ps.RenderingSettings.Color);
-			ImGuiUtils::DrawInspectorControl("Max Particles", [&ps](const char* id) {
-				return ImGui::DragInt(id, (int*)&ps.RenderingSettings.MaxParticles, 1.0f, 1, 10000);
-			});
-			ImGuiUtils::DrawInspectorControl("Sorting Order", [&ps](const char* id) {
-				return ImGui::InputInt(id, (int*)&ps.RenderingSettings.SortingOrder);
-			});
-			ImGuiUtils::DrawInspectorControl("Sorting Layer", [&ps](const char* id) {
-				return ImGui::InputInt(id, (int*)&ps.RenderingSettings.SortingLayer);
-			});
+			ImGuiUtils::ColorEdit4Multi("Color", entities,
+				[](const Entity& e, int c) -> float {
+					const Color& col = e.GetComponent<ParticleSystem2DComponent>().RenderingSettings.Color;
+					return (&col.r)[c];
+				},
+				[](const Entity& e, int c, float v) {
+					Color& col = const_cast<Entity&>(e).GetComponent<ParticleSystem2DComponent>().RenderingSettings.Color;
+					(&col.r)[c] = v;
+				});
 
-			// Fall back to the engine's default Square texture when the particle system
-			// has no texture assigned yet (otherwise GetTexture() with an invalid handle
-			// spams "[OutOfRange] TextureHandle index 65535" every frame).
-			TextureHandle previewHandle = ps.GetTextureHandle();
-			if (!previewHandle.IsValid()) {
-				previewHandle = TextureManager::GetDefaultTexture(DefaultTexture::Square);
-			}
-			if (Texture2D* texture = TextureManager::GetTexture(previewHandle)) {
-				ImGuiUtils::DrawTexturePreview(texture->GetHandle(), texture->GetWidth(), texture->GetHeight());
+			ImGuiUtils::DragIntMulti("Max Particles", entities,
+				[](const Entity& e) -> int { return static_cast<int>(e.GetComponent<ParticleSystem2DComponent>().RenderingSettings.MaxParticles); },
+				[](const Entity& e, int v) { const_cast<Entity&>(e).GetComponent<ParticleSystem2DComponent>().RenderingSettings.MaxParticles = static_cast<uint32_t>(std::max(1, v)); },
+				1.0f, 1, 10000);
+
+			ImGuiUtils::InputIntMulti("Sorting Order", entities,
+				[](const Entity& e) -> int { return static_cast<int>(e.GetComponent<ParticleSystem2DComponent>().RenderingSettings.SortingOrder); },
+				[](const Entity& e, int v) { const_cast<Entity&>(e).GetComponent<ParticleSystem2DComponent>().RenderingSettings.SortingOrder = static_cast<int16_t>(v); });
+
+			ImGuiUtils::InputIntMulti("Sorting Layer", entities,
+				[](const Entity& e) -> int { return static_cast<int>(e.GetComponent<ParticleSystem2DComponent>().RenderingSettings.SortingLayer); },
+				[](const Entity& e, int v) { const_cast<Entity&>(e).GetComponent<ParticleSystem2DComponent>().RenderingSettings.SortingLayer = static_cast<uint8_t>(std::clamp(v, 0, 255)); });
+
+			// Texture preview: only meaningful for a single selection.
+			if (entities.size() == 1) {
+				const auto& ps = entities[0].GetComponent<ParticleSystem2DComponent>();
+				TextureHandle previewHandle = ps.GetTextureHandle();
+				if (!previewHandle.IsValid()) {
+					previewHandle = TextureManager::GetDefaultTexture(DefaultTexture::Square);
+				}
+				if (Texture2D* texture = TextureManager::GetTexture(previewHandle)) {
+					ImGuiUtils::DrawTexturePreview(texture->GetHandle(), texture->GetWidth(), texture->GetHeight());
+				}
 			}
 			ImGui::PopID();
 		}
 	}
 
-	void DrawBoxCollider2DInspector(Entity entity)
+	void DrawBoxCollider2DInspector(std::span<const Entity> entities)
 	{
-		auto& collider = entity.GetComponent<BoxCollider2DComponent>();
 		Scene* scene = SceneManager::Get().GetActiveScene();
-		if (!scene || !scene->IsValid(entity.GetHandle()) || !scene->HasComponent<Transform2DComponent>(entity.GetHandle())) {
-			ImGui::TextDisabled("Box collider requires a valid Transform 2D");
+		if (!scene) {
+			ImGui::TextDisabled("No active scene");
 			return;
 		}
 
-		const auto& transform = scene->GetComponent<Transform2DComponent>(entity.GetHandle());
-		Vec2 localSize = collider.GetLocalScale(*scene);
-		Vec2 size = collider.GetScale();
-		Vec2 offset = collider.GetCenter();
-
-		if (ImGuiUtils::DrawInspectorControl("Offset", [&offset](const char* id) {
-			return ImGui::DragFloat2(id, &offset.x, 0.05f);
-		})) {
-			collider.SetCenter(offset, *scene);
-		}
-
-		if (ImGuiUtils::DrawInspectorControl("Size", [&size](const char* id) {
-			return ImGui::DragFloat2(id, &size.x, 0.05f, 0.001f, 1000.0f);
-		})) {
-			size.x = std::max(size.x, 0.001f);
-			size.y = std::max(size.y, 0.001f);
-
-			if (std::fabs(transform.Scale.x) > 0.0001f) {
-				localSize.x = size.x / transform.Scale.x;
+		// Verify each selected entity has a Transform2D (collider depends on it
+		// for world-scale math). If any entity is missing it, show the existing
+		// hint and bail.
+		for (const Entity& entity : entities) {
+			if (!scene->IsValid(entity.GetHandle()) || !scene->HasComponent<Transform2DComponent>(entity.GetHandle())) {
+				ImGui::TextDisabled("Box collider requires a valid Transform 2D");
+				return;
 			}
-			if (std::fabs(transform.Scale.y) > 0.0001f) {
-				localSize.y = size.y / transform.Scale.y;
-			}
-
-			collider.SetScale(localSize, *scene);
 		}
 
-		bool sensor = collider.IsSensor();
-		if (ImGuiUtils::DrawInspectorControl("Sensor", [&sensor](const char* id) {
-			return ImGui::Checkbox(id, &sensor);
-		})) {
-			collider.SetSensor(sensor, *scene);
-		}
+		ImGuiUtils::DragFloatNMulti("Offset", entities, 2,
+			[](const Entity& e, int c) -> float {
+				const Vec2 v = e.GetComponent<BoxCollider2DComponent>().GetCenter();
+				return c == 0 ? v.x : v.y;
+			},
+			[scene](const Entity& e, int c, float v) {
+				auto& col = const_cast<Entity&>(e).GetComponent<BoxCollider2DComponent>();
+				Vec2 cur = col.GetCenter();
+				if (c == 0) cur.x = v; else cur.y = v;
+				col.SetCenter(cur, *scene);
+			},
+			0.05f);
 
-		bool contactEvents = collider.CanRegisterContacts();
-		if (ImGuiUtils::DrawInspectorControl("Contact Events", [&contactEvents](const char* id) {
-			return ImGui::Checkbox(id, &contactEvents);
-		})) {
-			collider.SetRegisterContacts(contactEvents);
-		}
+		// Size (world): per-channel write convertes back through the entity's
+		// transform scale to a local-size, matching the existing single-edit path.
+		ImGuiUtils::DragFloatNMulti("Size", entities, 2,
+			[](const Entity& e, int c) -> float {
+				const Vec2 v = e.GetComponent<BoxCollider2DComponent>().GetScale();
+				return c == 0 ? v.x : v.y;
+			},
+			[scene](const Entity& e, int c, float v) {
+				auto& col = const_cast<Entity&>(e).GetComponent<BoxCollider2DComponent>();
+				const auto& transform = scene->GetComponent<Transform2DComponent>(e.GetHandle());
+				Vec2 worldSize = col.GetScale();
+				Vec2 localSize = col.GetLocalScale(*scene);
+				const float clamped = std::max(v, 0.001f);
+				if (c == 0) {
+					worldSize.x = clamped;
+					if (std::fabs(transform.Scale.x) > 0.0001f) localSize.x = clamped / transform.Scale.x;
+				}
+				else {
+					worldSize.y = clamped;
+					if (std::fabs(transform.Scale.y) > 0.0001f) localSize.y = clamped / transform.Scale.y;
+				}
+				col.SetScale(localSize, *scene);
+			},
+			0.05f, 0.001f, 1000.0f);
 
-		bool enabled = collider.IsEnabled();
-		if (ImGuiUtils::DrawInspectorControl("Collider Enabled", [&enabled](const char* id) {
-			return ImGui::Checkbox(id, &enabled);
-		})) {
-			collider.SetEnabled(enabled);
-		}
+		ImGuiUtils::CheckboxMulti("Sensor", entities,
+			[](const Entity& e) -> bool { return e.GetComponent<BoxCollider2DComponent>().IsSensor(); },
+			[scene](const Entity& e, bool v) { const_cast<Entity&>(e).GetComponent<BoxCollider2DComponent>().SetSensor(v, *scene); });
 
-		float friction = collider.GetFriction();
-		if (ImGuiUtils::DrawInspectorControl("Friction", [&friction](const char* id) {
-			return ImGui::DragFloat(id, &friction, 0.01f, 0.0f, 10.0f);
-		})) {
-			collider.SetFriction(friction);
-		}
+		ImGuiUtils::CheckboxMulti("Contact Events", entities,
+			[](const Entity& e) -> bool { return e.GetComponent<BoxCollider2DComponent>().CanRegisterContacts(); },
+			[](const Entity& e, bool v) { const_cast<Entity&>(e).GetComponent<BoxCollider2DComponent>().SetRegisterContacts(v); });
 
-		float bounciness = collider.GetBounciness();
-		if (ImGuiUtils::DrawInspectorControl("Bounciness", [&bounciness](const char* id) {
-			return ImGui::DragFloat(id, &bounciness, 0.01f, 0.0f, 1.0f);
-		})) {
-			collider.SetBounciness(bounciness);
-		}
+		ImGuiUtils::CheckboxMulti("Collider Enabled", entities,
+			[](const Entity& e) -> bool { return e.GetComponent<BoxCollider2DComponent>().IsEnabled(); },
+			[](const Entity& e, bool v) { const_cast<Entity&>(e).GetComponent<BoxCollider2DComponent>().SetEnabled(v); });
 
-		uint64_t layerMask = collider.GetLayer();
-		if (ImGuiUtils::DrawInspectorControl("Layer Mask", [&layerMask](const char* id) {
-			return ImGui::InputScalar(id, ImGuiDataType_U64, &layerMask);
-		})) {
-			collider.SetLayer(layerMask);
-		}
+		ImGuiUtils::DragFloatMulti("Friction", entities,
+			[](const Entity& e) -> float { return e.GetComponent<BoxCollider2DComponent>().GetFriction(); },
+			[](const Entity& e, float v) { const_cast<Entity&>(e).GetComponent<BoxCollider2DComponent>().SetFriction(v); },
+			0.01f, 0.0f, 10.0f);
 
-		ImGuiUtils::DrawVec2ReadOnly("Local Size", localSize);
+		ImGuiUtils::DragFloatMulti("Bounciness", entities,
+			[](const Entity& e) -> float { return e.GetComponent<BoxCollider2DComponent>().GetBounciness(); },
+			[](const Entity& e, float v) { const_cast<Entity&>(e).GetComponent<BoxCollider2DComponent>().SetBounciness(v); },
+			0.01f, 0.0f, 1.0f);
+
+		ImGuiUtils::InputScalarMulti<uint64_t>("Layer Mask", entities, ImGuiDataType_U64,
+			[](const Entity& e) -> uint64_t { return e.GetComponent<BoxCollider2DComponent>().GetLayer(); },
+			[](const Entity& e, uint64_t v) { const_cast<Entity&>(e).GetComponent<BoxCollider2DComponent>().SetLayer(v); });
+
+		// Local Size readout. Per-channel mixed when transforms or sizes differ.
+		float localValues[2] = {};
+		std::array<bool, 2> localMixed{};
+		ImGuiUtils::MultiEdit::SamplePerChannel<2>(entities,
+			[scene](const Entity& e, std::size_t c) -> float {
+				const Vec2 v = e.GetComponent<BoxCollider2DComponent>().GetLocalScale(*scene);
+				return c == 0 ? v.x : v.y;
+			},
+			localValues, localMixed);
+		ImGui::PushID("LocalSize");
+		ImGuiUtils::BeginInspectorFieldRow("Local Size");
+		ImGuiUtils::MultiEdit::MultiItemRow(2, [&](int c) {
+			ImGui::PushID(c);
+			ImGui::BeginDisabled();
+			float v = localValues[c];
+			ImGui::InputFloat("##c", &v, 0.0f, 0.0f, localMixed[c] ? "-" : "%.3f", ImGuiInputTextFlags_ReadOnly);
+			ImGui::EndDisabled();
+			ImGui::PopID();
+			return false;
+		});
+		ImGui::PopID();
 	}
 
 	// ── Audio Picker (same pattern as Texture Picker) ──────────────
@@ -699,25 +936,37 @@ namespace Axiom {
 		static bool s_AudioPickerOpen = false;
 		static char s_AudioPickerSearch[128] = {};
 		static std::vector<AudioPickerEntry> s_AudioPickerEntries;
-		static EntityHandle s_AudioPickerTargetEntity = entt::null;
+		// See s_TexturePickerTargets above — Entity (not EntityHandle) so the
+		// picker writes back to whichever scene the inspector was rendering,
+		// including the prefab inspector's detached scene.
+		static std::vector<Entity> s_AudioPickerTargets;
 
 		static void ApplyAudioPickerSelection(const AudioPickerEntry* entry) {
-			Scene* scene = SceneManager::Get().GetActiveScene();
-			if (scene && scene->IsValid(s_AudioPickerTargetEntity)
-				&& scene->HasComponent<AudioSourceComponent>(s_AudioPickerTargetEntity)) {
-				auto& audioSource = scene->GetComponent<AudioSourceComponent>(s_AudioPickerTargetEntity);
-				if (!entry) {
-					audioSource.SetAudioHandle(AudioHandle(), UUID(0));
-				}
-				else if (entry->AssetId != 0 && AssetRegistry::IsAudio(entry->AssetId)) {
-					audioSource.SetAudioHandle(AudioManager::LoadAudioByUUID(entry->AssetId), UUID(entry->AssetId));
+			AudioHandle sharedHandle;
+			UUID sharedAssetId = UUID(0);
+			if (entry) {
+				if (entry->AssetId != 0 && AssetRegistry::IsAudio(entry->AssetId)) {
+					sharedHandle = AudioManager::LoadAudioByUUID(entry->AssetId);
+					sharedAssetId = UUID(entry->AssetId);
 				}
 				else {
-					audioSource.SetAudioHandle(AudioManager::LoadAudio(entry->FullPath), UUID(0));
+					sharedHandle = AudioManager::LoadAudio(entry->FullPath);
+					sharedAssetId = UUID(0);
 				}
 			}
 
+			for (const Entity& target : s_AudioPickerTargets) {
+				Scene* targetScene = const_cast<Entity&>(target).GetScene();
+				if (!targetScene) continue;
+				const EntityHandle handle = target.GetHandle();
+				if (!targetScene->IsValid(handle) || !targetScene->HasComponent<AudioSourceComponent>(handle)) continue;
+				auto& audioSource = targetScene->GetComponent<AudioSourceComponent>(handle);
+				audioSource.SetAudioHandle(sharedHandle, sharedAssetId);
+				targetScene->MarkDirty();
+			}
+
 			s_AudioPickerOpen = false;
+			s_AudioPickerTargets.clear();
 		}
 
 		static void CollectAudioFiles(const std::string& dir, const std::string& rootDir,
@@ -747,10 +996,14 @@ namespace Axiom {
 			});
 		}
 
-		static void OpenAudioPicker(EntityHandle entity) {
+		static void OpenAudioPicker(std::span<const Entity> entities) {
 			s_AudioPickerOpen = true;
 			s_AudioPickerSearch[0] = '\0';
-			s_AudioPickerTargetEntity = entity;
+			s_AudioPickerTargets.clear();
+			s_AudioPickerTargets.reserve(entities.size());
+			for (const Entity& e : entities) {
+				s_AudioPickerTargets.push_back(e);
+			}
 			s_AudioPickerEntries.clear();
 
 			AxiomProject* project = ProjectManager::GetCurrentProject();
@@ -801,47 +1054,56 @@ namespace Axiom {
 		}
 	}
 
-	void DrawAudioSourceInspector(Entity entity)
+	void DrawAudioSourceInspector(std::span<const Entity> entities)
 	{
-		auto& audio = entity.GetComponent<AudioSourceComponent>();
+		ImGuiUtils::CheckboxMulti("Play On Awake", entities,
+			[](const Entity& e) -> bool { return e.GetComponent<AudioSourceComponent>().GetPlayOnAwake(); },
+			[](const Entity& e, bool v) { const_cast<Entity&>(e).GetComponent<AudioSourceComponent>().SetPlayOnAwake(v); });
 
-		bool playOnAwake = audio.GetPlayOnAwake();
-		if (ImGuiUtils::DrawInspectorControl("Play On Awake", [&playOnAwake](const char* id) {
-			return ImGui::Checkbox(id, &playOnAwake);
-		})) {
-			audio.SetPlayOnAwake(playOnAwake);
-		}
+		ImGuiUtils::SliderFloatMulti("Volume", entities,
+			[](const Entity& e) -> float { return e.GetComponent<AudioSourceComponent>().GetVolume(); },
+			[](const Entity& e, float v) { const_cast<Entity&>(e).GetComponent<AudioSourceComponent>().SetVolume(v); },
+			0.0f, 1.0f);
 
-		float volume = audio.GetVolume();
-		if (ImGuiUtils::DrawInspectorControl("Volume", [&volume](const char* id) {
-			return ImGui::SliderFloat(id, &volume, 0.0f, 1.0f);
-		})) {
-			audio.SetVolume(volume);
-		}
+		ImGuiUtils::DragFloatMulti("Pitch", entities,
+			[](const Entity& e) -> float { return e.GetComponent<AudioSourceComponent>().GetPitch(); },
+			[](const Entity& e, float v) { const_cast<Entity&>(e).GetComponent<AudioSourceComponent>().SetPitch(v); },
+			0.01f, 0.1f, 3.0f);
 
-		float pitch = audio.GetPitch();
-		if (ImGuiUtils::DrawInspectorControl("Pitch", [&pitch](const char* id) {
-			return ImGui::DragFloat(id, &pitch, 0.01f, 0.1f, 3.0f);
-		})) {
-			audio.SetPitch(pitch);
-		}
-
-		bool loop = audio.IsLooping();
-		if (ImGuiUtils::DrawInspectorControl("Loop", [&loop](const char* id) {
-			return ImGui::Checkbox(id, &loop);
-		})) {
-			audio.SetLoop(loop);
-		}
+		ImGuiUtils::CheckboxMulti("Loop", entities,
+			[](const Entity& e) -> bool { return e.GetComponent<AudioSourceComponent>().IsLooping(); },
+			[](const Entity& e, bool v) { const_cast<Entity&>(e).GetComponent<AudioSourceComponent>().SetLoop(v); });
 
 		ImGui::Spacing();
-		bool hasClip = audio.GetAudioHandle().IsValid();
-		const std::string audioPath = hasClip ? AudioManager::GetAudioName(audio.GetAudioHandle()) : std::string();
-		const std::string audioDisplayName = hasClip && !audioPath.empty()
-			? std::filesystem::path(audioPath).filename().string()
-			: std::string("(None)");
+
+		// Audio Clip uniform check
+		bool clipUniform = true;
+		AudioHandle firstHandle;
+		if (!entities.empty()) firstHandle = entities[0].GetComponent<AudioSourceComponent>().GetAudioHandle();
+		for (std::size_t i = 1; i < entities.size(); ++i) {
+			if (entities[i].GetComponent<AudioSourceComponent>().GetAudioHandle() != firstHandle) {
+				clipUniform = false;
+				break;
+			}
+		}
+
+		std::string audioDisplayName;
+		std::string audioPath;
+		if (!clipUniform) {
+			audioDisplayName = "-";
+		}
+		else if (firstHandle.IsValid()) {
+			audioPath = AudioManager::GetAudioName(firstHandle);
+			audioDisplayName = audioPath.empty()
+				? std::string("(None)")
+				: std::filesystem::path(audioPath).filename().string();
+		}
+		else {
+			audioDisplayName = "(None)";
+		}
 
 		if (DrawAssetSelectionField("Clip", audioDisplayName, audioPath)) {
-			OpenAudioPicker(entity.GetHandle());
+			OpenAudioPicker(entities);
 		}
 
 		if (ImGui::BeginDragDropTarget()) {
@@ -850,7 +1112,7 @@ namespace Axiom {
 				std::string ext = std::filesystem::path(droppedPath).extension().string();
 				std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
 				if (ext == ".wav" || ext == ".mp3" || ext == ".ogg" || ext == ".flac") {
-					AssignAudioClip(audio, droppedPath);
+					AssignAudioClipForAll(entities, droppedPath);
 				}
 			}
 			ImGui::EndDragDropTarget();
@@ -861,71 +1123,83 @@ namespace Axiom {
 
 	// ── Axiom-Physics Inspectors ─────────────────────────────────────
 
-	void DrawFastBody2DInspector(Entity entity)
+	void DrawFastBody2DInspector(std::span<const Entity> entities)
 	{
-		auto& body = entity.GetComponent<FastBody2DComponent>();
+		static const char* bodyTypeNames[] = { "Static", "Dynamic", "Kinematic" };
+		ImGuiUtils::ComboMulti("Body Type", entities,
+			[](const Entity& e) -> int { return static_cast<int>(e.GetComponent<FastBody2DComponent>().Type); },
+			[](const Entity& e, int v) {
+				auto& body = const_cast<Entity&>(e).GetComponent<FastBody2DComponent>();
+				body.Type = static_cast<AxiomPhys::BodyType>(v);
+				if (body.m_Body) body.m_Body->SetBodyType(body.Type);
+			},
+			bodyTypeNames, 3);
 
-		const char* bodyTypeNames[] = { "Static", "Dynamic", "Kinematic" };
-		int currentType = static_cast<int>(body.Type);
-		if (ImGuiUtils::DrawInspectorControl("Body Type", [&currentType, &bodyTypeNames](const char* id) {
-			return ImGui::Combo(id, &currentType, bodyTypeNames, 3);
-		})) {
-			body.Type = static_cast<AxiomPhys::BodyType>(currentType);
-			if (body.m_Body) body.m_Body->SetBodyType(body.Type);
-		}
+		ImGuiUtils::DragFloatMulti("Mass", entities,
+			[](const Entity& e) -> float { return e.GetComponent<FastBody2DComponent>().Mass; },
+			[](const Entity& e, float v) {
+				auto& body = const_cast<Entity&>(e).GetComponent<FastBody2DComponent>();
+				body.Mass = v;
+				if (body.m_Body) body.m_Body->SetMass(body.Mass);
+			},
+			0.1f, 0.001f, 10000.0f);
 
-		if (ImGuiUtils::DrawInspectorControl("Mass", [&body](const char* id) {
-			return ImGui::DragFloat(id, &body.Mass, 0.1f, 0.001f, 10000.0f);
-		})) {
-			if (body.m_Body) body.m_Body->SetMass(body.Mass);
-		}
+		ImGuiUtils::CheckboxMulti("Use Gravity", entities,
+			[](const Entity& e) -> bool { return e.GetComponent<FastBody2DComponent>().UseGravity; },
+			[](const Entity& e, bool v) {
+				auto& body = const_cast<Entity&>(e).GetComponent<FastBody2DComponent>();
+				body.UseGravity = v;
+				if (body.m_Body) body.m_Body->SetGravityEnabled(body.UseGravity);
+			});
 
-		if (ImGuiUtils::DrawInspectorControl("Use Gravity", [&body](const char* id) {
-			return ImGui::Checkbox(id, &body.UseGravity);
-		})) {
-			if (body.m_Body) body.m_Body->SetGravityEnabled(body.UseGravity);
-		}
+		ImGuiUtils::CheckboxMulti("Boundary Check", entities,
+			[](const Entity& e) -> bool { return e.GetComponent<FastBody2DComponent>().BoundaryCheck; },
+			[](const Entity& e, bool v) {
+				auto& body = const_cast<Entity&>(e).GetComponent<FastBody2DComponent>();
+				body.BoundaryCheck = v;
+				if (body.m_Body) body.m_Body->SetBoundaryCheckEnabled(body.BoundaryCheck);
+			});
 
-		if (ImGuiUtils::DrawInspectorControl("Boundary Check", [&body](const char* id) {
-			return ImGui::Checkbox(id, &body.BoundaryCheck);
-		})) {
-			if (body.m_Body) body.m_Body->SetBoundaryCheckEnabled(body.BoundaryCheck);
-		}
-
-		if (body.IsValid()) {
-			ImGui::Separator();
-			ImGui::TextDisabled("Runtime");
-			Vec2 vel = body.GetVelocity();
-			ImGuiUtils::DrawVec2ReadOnly("Velocity", vel);
-			Vec2 pos = body.GetPosition();
-			ImGuiUtils::DrawVec2ReadOnly("Position", pos);
-		}
-	}
-
-	void DrawFastBoxCollider2DInspector(Entity entity)
-	{
-		auto& collider = entity.GetComponent<FastBoxCollider2DComponent>();
-
-		if (ImGuiUtils::DrawInspectorControl("Half Extents", [&collider](const char* id) {
-			return ImGui::DragFloat2(id, &collider.HalfExtents.x, 0.05f, 0.01f, 100.0f);
-		})) {
-			if (collider.m_Collider) {
-				collider.m_Collider->SetHalfExtents({ collider.HalfExtents.x, collider.HalfExtents.y });
+		// Runtime values: only meaningful when a single body is live and
+		// selected (these are read each frame from the physics body).
+		if (entities.size() == 1) {
+			const auto& body = entities[0].GetComponent<FastBody2DComponent>();
+			if (body.IsValid()) {
+				ImGui::Separator();
+				ImGui::TextDisabled("Runtime");
+				Vec2 vel = body.GetVelocity();
+				ImGuiUtils::DrawVec2ReadOnly("Velocity", vel);
+				Vec2 pos = body.GetPosition();
+				ImGuiUtils::DrawVec2ReadOnly("Position", pos);
 			}
 		}
 	}
 
-	void DrawFastCircleCollider2DInspector(Entity entity)
+	void DrawFastBoxCollider2DInspector(std::span<const Entity> entities)
 	{
-		auto& collider = entity.GetComponent<FastCircleCollider2DComponent>();
+		ImGuiUtils::DragFloatNMulti("Half Extents", entities, 2,
+			[](const Entity& e, int c) -> float {
+				const Vec2& v = e.GetComponent<FastBoxCollider2DComponent>().HalfExtents;
+				return c == 0 ? v.x : v.y;
+			},
+			[](const Entity& e, int c, float v) {
+				auto& col = const_cast<Entity&>(e).GetComponent<FastBoxCollider2DComponent>();
+				if (c == 0) col.HalfExtents.x = v; else col.HalfExtents.y = v;
+				if (col.m_Collider) col.m_Collider->SetHalfExtents({ col.HalfExtents.x, col.HalfExtents.y });
+			},
+			0.05f, 0.01f, 100.0f);
+	}
 
-		if (ImGuiUtils::DrawInspectorControl("Radius", [&collider](const char* id) {
-			return ImGui::DragFloat(id, &collider.Radius, 0.05f, 0.01f, 100.0f);
-		})) {
-			if (collider.m_Collider) {
-				collider.m_Collider->SetRadius(collider.Radius);
-			}
-		}
+	void DrawFastCircleCollider2DInspector(std::span<const Entity> entities)
+	{
+		ImGuiUtils::DragFloatMulti("Radius", entities,
+			[](const Entity& e) -> float { return e.GetComponent<FastCircleCollider2DComponent>().Radius; },
+			[](const Entity& e, float v) {
+				auto& col = const_cast<Entity&>(e).GetComponent<FastCircleCollider2DComponent>();
+				col.Radius = v;
+				if (col.m_Collider) col.m_Collider->SetRadius(col.Radius);
+			},
+			0.05f, 0.01f, 100.0f);
 	}
 
 }

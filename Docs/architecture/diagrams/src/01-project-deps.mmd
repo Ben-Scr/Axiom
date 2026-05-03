@@ -1,0 +1,37 @@
+graph TD
+    classDef engine fill:#2d4a6e,stroke:#4a7ab8,color:#fff
+    classDef binary fill:#3a3a3a,stroke:#888,color:#fff
+    classDef csharp fill:#5a4080,stroke:#9070c0,color:#fff
+    classDef ext fill:#1f3a1f,stroke:#4a8a4a,color:#fff
+
+    AE[Axiom-Engine.dll<br/>SharedLib]:::engine
+    EDIT[Axiom-Editor.exe]:::binary
+    LAUN[Axiom-Launcher.exe]:::binary
+    RUN[Axiom-Runtime.exe]:::binary
+    SC[Axiom-ScriptCore.dll<br/>C# .NET 9.0]:::csharp
+    SB[Axiom-Sandbox.dll<br/>C# user game]:::csharp
+    NS[Axiom-NativeScripts.dll<br/>C++ user scripts]:::csharp
+    PKG[Pkg.Foo / Pkg.Foo.Native<br/>per-package]:::csharp
+
+    GLFW[GLFW.dll]:::ext
+    GLAD[Glad.dll]:::ext
+    TRACY[Tracy.dll<br/>opt-in]:::ext
+    IMGUI[ImGui<br/>StaticLib, editor only]:::ext
+    BOX2D[Box2D / Axiom-Physics<br/>StaticLib]:::ext
+    NET[hostfxr / CoreCLR<br/>system]:::ext
+
+    EDIT --> AE
+    LAUN --> AE
+    RUN --> AE
+    AE --> GLFW
+    AE --> GLAD
+    AE -.->|opt-in| TRACY
+    EDIT --> IMGUI
+    AE -.->|opt-in| BOX2D
+    AE -.->|opt-in| NET
+    SB --> SC
+    NS --> AE
+    PKG --> AE
+    AE -. loads at runtime .-> SB
+    AE -. loads at runtime .-> NS
+    AE -. loads at runtime .-> PKG

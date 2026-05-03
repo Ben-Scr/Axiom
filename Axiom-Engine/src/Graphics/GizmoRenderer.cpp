@@ -41,9 +41,24 @@ namespace Axiom {
 	unsigned int GizmoRenderer2D::m_VAO = 0;
 	unsigned int GizmoRenderer2D::m_VBO = 0;
 	unsigned int GizmoRenderer2D::m_EBO = 0;
+	// E18: persistent buffer capacities. Grow-only via glBufferData; per-frame
+	// uploads are glBufferSubData (no orphan/realloc on the steady state).
+	std::size_t GizmoRenderer2D::m_VBOCapacityBytes = 0;
+	std::size_t GizmoRenderer2D::m_EBOCapacityBytes = 0;
 	int GizmoRenderer2D::m_uMVP = -1;
 
 	static std::vector<UploadVertex> s_UploadBuffer;
+
+	namespace {
+		// E18: power-of-two grow helper, mirrors QuadMesh::NextInstanceCapacity.
+		std::size_t NextBufferCapacityBytes(std::size_t requiredBytes, std::size_t initialBytes) {
+			std::size_t capacity = initialBytes;
+			while (capacity < requiredBytes) {
+				capacity *= 2;
+			}
+			return capacity;
+		}
+	}
 
 	bool GizmoRenderer2D::Initialize() {
 		if (m_IsInitialized)
@@ -66,7 +81,10 @@ namespace Axiom {
 
 		glBindVertexArray(m_VAO);
 		glBindBuffer(GL_ARRAY_BUFFER, m_VBO);
-		glBufferData(GL_ARRAY_BUFFER, 0, nullptr, GL_DYNAMIC_DRAW);
+		// E18: seed VBO/EBO with healthy initial capacity so glBufferSubData
+		// can run on first frame without an immediate realloc.
+		m_VBOCapacityBytes = 4096 * sizeof(UploadVertex);
+		glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(m_VBOCapacityBytes), nullptr, GL_DYNAMIC_DRAW);
 
 		glEnableVertexAttribArray(0);
 		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, GizmoVertexStride, reinterpret_cast<void*>(0));
@@ -75,7 +93,8 @@ namespace Axiom {
 		glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, GizmoVertexStride, reinterpret_cast<void*>(sizeof(float) * 3));
 
 		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_EBO);
-		glBufferData(GL_ELEMENT_ARRAY_BUFFER, 0, nullptr, GL_DYNAMIC_DRAW);
+		m_EBOCapacityBytes = 8192 * sizeof(uint16_t);
+		glBufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr>(m_EBOCapacityBytes), nullptr, GL_DYNAMIC_DRAW);
 
 		glBindVertexArray(0);
 		glBindBuffer(GL_ARRAY_BUFFER, 0);
@@ -104,6 +123,9 @@ namespace Axiom {
 			glDeleteVertexArrays(1, &m_VAO);
 			m_VAO = 0;
 		}
+		// E18: reset capacities so a future Initialize re-seeds correctly.
+		m_VBOCapacityBytes = 0;
+		m_EBOCapacityBytes = 0;
 
 		m_GizmoShader.reset();
 		m_GizmoVertices.clear();
@@ -204,37 +226,8 @@ namespace Axiom {
 			return;
 
 		BuildGeometry(layerMask);
-		FlushGizmos();
-	}
-
-	void GizmoRenderer2D::FlushGizmos() {
-		if (!m_IsInitialized || m_GizmoVertices.empty() || !m_GizmoShader || !m_GizmoShader->IsValid())
-			return;
-
-		ConvertVertices(m_GizmoVertices, s_UploadBuffer);
-
-		glBindVertexArray(m_VAO);
-
-		glBindBuffer(GL_ARRAY_BUFFER, m_VBO);
-		glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(s_UploadBuffer.size() * sizeof(UploadVertex)), s_UploadBuffer.data(), GL_DYNAMIC_DRAW);
-
-		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_EBO);
-		glBufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr>(m_GizmoIndices.size() * sizeof(uint16_t)), m_GizmoIndices.data(), GL_DYNAMIC_DRAW);
-
-		m_GizmoShader->Submit();
-
-		if (Camera2DComponent::Main()) {
-			glm::mat4 mvp = Camera2DComponent::Main()->GetViewProjectionMatrix();
-			if (m_uMVP >= 0) {
-				glUniformMatrix4fv(m_uMVP, 1, GL_FALSE, glm::value_ptr(mvp));
-			}
-		}
-
-		glLineWidth(Gizmo::s_LineWidth);
-		glDrawElements(GL_LINES, static_cast<GLsizei>(m_GizmoIndices.size()), GL_UNSIGNED_SHORT, nullptr);
-
-		glBindVertexArray(0);
-		glUseProgram(0);
+		// E18: nullptr -> use Camera2DComponent::Main() VP (legacy behavior).
+		FlushGizmosImpl(nullptr);
 	}
 
 	void GizmoRenderer2D::RenderWithVP(const glm::mat4& vp, GizmoLayerMask layerMask) {
@@ -242,27 +235,48 @@ namespace Axiom {
 			return;
 
 		BuildGeometry(layerMask);
-		FlushGizmosWithVP(vp);
+		FlushGizmosImpl(&vp);
 	}
 
-	void GizmoRenderer2D::FlushGizmosWithVP(const glm::mat4& vp) {
+	// E18: factored helper. Replaces FlushGizmos / FlushGizmosWithVP. Uses
+	// glBufferSubData against a grow-only persistent buffer instead of
+	// glBufferData every frame (the previous code orphan-reallocated the VBO
+	// and EBO each frame even when sizes were stable).
+	void GizmoRenderer2D::FlushGizmosImpl(const glm::mat4* vpOverride) {
 		if (!m_IsInitialized || m_GizmoVertices.empty() || !m_GizmoShader || !m_GizmoShader->IsValid())
 			return;
 
 		ConvertVertices(m_GizmoVertices, s_UploadBuffer);
 
+		const std::size_t vboBytes = s_UploadBuffer.size() * sizeof(UploadVertex);
+		const std::size_t eboBytes = m_GizmoIndices.size() * sizeof(uint16_t);
+
 		glBindVertexArray(m_VAO);
 
 		glBindBuffer(GL_ARRAY_BUFFER, m_VBO);
-		glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(s_UploadBuffer.size() * sizeof(UploadVertex)), s_UploadBuffer.data(), GL_DYNAMIC_DRAW);
+		if (vboBytes > m_VBOCapacityBytes) {
+			m_VBOCapacityBytes = NextBufferCapacityBytes(vboBytes, m_VBOCapacityBytes ? m_VBOCapacityBytes : 4096 * sizeof(UploadVertex));
+			glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(m_VBOCapacityBytes), nullptr, GL_DYNAMIC_DRAW);
+		}
+		glBufferSubData(GL_ARRAY_BUFFER, 0, static_cast<GLsizeiptr>(vboBytes), s_UploadBuffer.data());
 
 		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_EBO);
-		glBufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr>(m_GizmoIndices.size() * sizeof(uint16_t)), m_GizmoIndices.data(), GL_DYNAMIC_DRAW);
+		if (eboBytes > m_EBOCapacityBytes) {
+			m_EBOCapacityBytes = NextBufferCapacityBytes(eboBytes, m_EBOCapacityBytes ? m_EBOCapacityBytes : 8192 * sizeof(uint16_t));
+			glBufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr>(m_EBOCapacityBytes), nullptr, GL_DYNAMIC_DRAW);
+		}
+		glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, static_cast<GLsizeiptr>(eboBytes), m_GizmoIndices.data());
 
 		m_GizmoShader->Submit();
 
 		if (m_uMVP >= 0) {
-			glUniformMatrix4fv(m_uMVP, 1, GL_FALSE, glm::value_ptr(vp));
+			if (vpOverride) {
+				glUniformMatrix4fv(m_uMVP, 1, GL_FALSE, glm::value_ptr(*vpOverride));
+			}
+			else if (Camera2DComponent::Main()) {
+				glm::mat4 mvp = Camera2DComponent::Main()->GetViewProjectionMatrix();
+				glUniformMatrix4fv(m_uMVP, 1, GL_FALSE, glm::value_ptr(mvp));
+			}
 		}
 
 		glLineWidth(Gizmo::s_LineWidth);

@@ -5,6 +5,9 @@
 #include "Serialization/File.hpp"
 #include "Serialization/Json.hpp"
 #include "Scene/Scene.hpp"
+#include "Scene/SceneManager.hpp"
+#include "Scene/ComponentRegistry.hpp"
+#include "Scene/ComponentInfo.hpp"
 #include "Scene/EntityHelper.hpp"
 #include "Components/General/NameComponent.hpp"
 #include "Components/General/Transform2DComponent.hpp"
@@ -563,6 +566,34 @@ namespace Axiom {
 						entityValue.AddMember("ScriptFields", std::move(scriptFields));
 					}
 				}
+			}
+
+			// ── Generic registry-driven serialize for package components ──
+			// Mirror of the deserialize sweep in SceneSerializerDeserialize.cpp.
+			// For every registered type that has a non-null `serialize`
+			// callback, ask the registry whether the entity carries it; if so,
+			// store the returned JSON under `serializedName`. Built-ins all
+			// leave `serialize` null and are handled above; this path picks up
+			// package-registered components like Tilemap2D.
+			{
+				Entity entityWrapper = scene.GetEntity(entity);
+				SceneManager::Get().GetComponentRegistry().ForEachComponentInfo(
+					[&](const std::type_index&, const ComponentInfo& info) {
+						if (!info.serialize || !info.has || info.serializedName.empty()) return;
+						if (!info.has(entityWrapper)) return;
+						try {
+							Value componentValue = info.serialize(entityWrapper);
+							entityValue.AddMember(info.serializedName, std::move(componentValue));
+						} catch (const std::exception& e) {
+							AIM_CORE_ERROR_TAG("SceneSerializer",
+								"Package component '{}' serialize threw: {}",
+								info.serializedName, e.what());
+						} catch (...) {
+							AIM_CORE_ERROR_TAG("SceneSerializer",
+								"Package component '{}' serialize threw an unknown exception",
+								info.serializedName);
+						}
+					});
 			}
 
 			return entityValue;

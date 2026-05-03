@@ -27,6 +27,14 @@ namespace Axiom {
 		// Idempotent — calling twice is a no-op.
 		static void LoadAll();
 
+		// Re-scan for package DLLs and load any that the active project's
+		// `packages` allow-list now permits but that aren't already loaded.
+		// Safe to call after a package-install build completes: the editor's
+		// PackageManagerPanel uses this so newly-built component types appear
+		// in the Add Component popup without an editor restart. Returns the
+		// number of new packages loaded by this call.
+		static size_t LoadInstalled();
+
 		// Unload all packages in reverse order. Safe to call even if LoadAll() never ran.
 		static void UnloadAll();
 

@@ -35,7 +35,10 @@ public sealed class Audio : IEquatable<Audio>
         InternalCalls.Audio_PlayOneShotAsset(UUID, volume);
     }
 
-    internal static Audio? FromAssetUUID(ulong assetId)
+    // Public so packages built in separate assemblies (Pkg.<Name>.dll)
+    // can construct managed Audio wrappers from a stored asset GUID
+    // without re-implementing the AssetRegistry lookup.
+    public static Audio? FromAssetUUID(ulong assetId)
     {
         if (assetId == 0 || !InternalCalls.Asset_IsValid(assetId))
             return null;

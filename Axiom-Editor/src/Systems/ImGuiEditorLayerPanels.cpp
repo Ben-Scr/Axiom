@@ -722,6 +722,13 @@ namespace Axiom {
 	void ImGuiEditorLayer::RenderAssetInspector() {
 		const std::string& selectedPath = m_AssetBrowser.GetSelectedPath();
 		if (selectedPath.empty()) {
+			// Selection cleared. If the prefab inspector held a dirty prefab,
+			// the save/discard prompt is driven from the dispatch above; here
+			// just close cleanly.
+			if (m_PrefabInspector.IsOpen() && !m_PrefabInspector.HasUnsavedChanges()) {
+				m_PrefabInspector.Close();
+				m_PrefabInspectorPath.clear();
+			}
 			ImGui::TextDisabled("No entity or asset selected");
 			return;
 		}
@@ -735,6 +742,36 @@ namespace Axiom {
 		std::string name = path.filename().string();
 		std::string ext = path.extension().string();
 		std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+
+		// `.prefab` selection routes through PrefabInspector. Selection change
+		// while a dirty prefab is open opens a save/discard modal — the new
+		// selection is queued in m_PendingPrefabSwitchPath until the user picks.
+		if (ext == ".prefab") {
+			if (m_PrefabInspector.IsOpen() && m_PrefabInspectorPath != selectedPath) {
+				if (m_PrefabInspector.HasUnsavedChanges()) {
+					m_PendingPrefabSwitchPath = selectedPath;
+					m_ShowPrefabSavePrompt = true;
+				}
+				else {
+					m_PrefabInspector.Open(selectedPath);
+					m_PrefabInspectorPath = selectedPath;
+				}
+			}
+			else if (!m_PrefabInspector.IsOpen()) {
+				m_PrefabInspector.Open(selectedPath);
+				m_PrefabInspectorPath = selectedPath;
+			}
+			m_PrefabInspector.Render();
+			return;
+		}
+
+		// Non-prefab asset: clean up any open prefab inspector (no prompt — user
+		// already navigated away; if they had unsaved work the prompt UX would
+		// have caught it during the .prefab→.prefab switch above).
+		if (m_PrefabInspector.IsOpen() && !m_PrefabInspector.HasUnsavedChanges()) {
+			m_PrefabInspector.Close();
+			m_PrefabInspectorPath.clear();
+		}
 
 		ImGui::TextDisabled("Asset:");
 		ImGui::SameLine();

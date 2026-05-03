@@ -107,6 +107,14 @@ py -3 scripts\Setup.py --generator vs2022 --module-profile core --skip-lfs
 
 Core consumers should include `Axiom/Core.hpp` or the legacy lean `Axiom.hpp`. A minimal consumer source is available at `Docs/Samples/CoreConsumer/main.cpp`. `Axiom/App.hpp`, `Core/Application.hpp`, and `EntryPoint.hpp` are full-runtime APIs and require the application module profile. Setup forwards Premake module flags such as `--module-profile custom --with-render --with-audio` for advanced builds, but the current editor/application surface expects the full runtime stack.
 
+### Scaffolding a new package
+
+```bash
+python scripts/NewPackage.py <PackageName>
+```
+
+Creates `packages/<PackageName>/` with a starter `axiom-package.lua` manifest. Re-run premake afterward to pick it up.
+
 ## Build
 
 ### Windows

@@ -129,6 +129,10 @@ namespace Axiom {
 		return nullptr;
 	}
 
+	// E27: HAZARD: Returned const char* is invalidated by the next binding call that
+	// touches s_StringReturnBuffer. Managed callers MUST copy immediately.
+	// TODO(audit-H/E27): Replace with managed-side buffer ownership
+	// (Axiom_*_GetString(char* buf, int bufLen)) to eliminate this bug class.
 	thread_local std::string s_StringReturnBuffer;
 
 	void PopulateNonComponentBindings(NativeBindings& b);
@@ -948,6 +952,16 @@ namespace Axiom {
 		return comp.ViewportHeight();
 	}
 
+	static uint64_t Axiom_Camera2D_GetMainEntity()
+	{
+		Scene* scene = GetScene();
+		if (!scene) return 0;
+
+		const EntityHandle handle = scene->GetMainCameraEntity();
+		if (handle == entt::null) return 0;
+		return GetEntityScriptId(*scene, handle);
+	}
+
 	// ── Rigidbody2D ─────────────────────────────────────────────────────
 
 	static void Axiom_Rigidbody2D_ApplyForce(uint64_t entityID, float forceX, float forceY, int wake)
@@ -1059,6 +1073,36 @@ namespace Axiom {
 	static void  Axiom_AudioSource_SetLoop(uint64_t entityID, int loop) { GET_COMPONENT(AudioSourceComponent, entityID, ); comp.SetLoop(loop != 0); }
 	static int   Axiom_AudioSource_IsPlaying(uint64_t entityID) { GET_COMPONENT(AudioSourceComponent, entityID, 0); return comp.IsPlaying() ? 1 : 0; }
 	static int   Axiom_AudioSource_IsPaused(uint64_t entityID) { GET_COMPONENT(AudioSourceComponent, entityID, 0); return comp.IsPaused() ? 1 : 0; }
+
+	static uint64_t Axiom_AudioSource_GetAudio(uint64_t entityID)
+	{
+		GET_COMPONENT(AudioSourceComponent, entityID, 0);
+
+		// Mirror SpriteRenderer_GetTexture: prefer the explicit asset ID; if
+		// the component holds only a live handle (e.g. loaded by path), look
+		// the UUID up via AudioManager and cache it back so subsequent calls
+		// are O(1).
+		uint64_t assetId = static_cast<uint64_t>(comp.GetAudioAssetId());
+		if (assetId == 0 && comp.GetAudioHandle().IsValid()) {
+			assetId = AudioManager::GetAudioAssetUUID(comp.GetAudioHandle());
+			if (assetId != 0) {
+				comp.SetAudioAssetId(UUID(assetId));
+			}
+		}
+		return assetId;
+	}
+
+	static void Axiom_AudioSource_SetAudio(uint64_t entityID, uint64_t assetId)
+	{
+		GET_COMPONENT(AudioSourceComponent, entityID, );
+
+		if (assetId == 0) {
+			comp.SetAudioHandle(AudioHandle(), UUID(0));
+			return;
+		}
+
+		comp.SetAudioHandle(AudioManager::LoadAudioByUUID(assetId), UUID(assetId));
+	}
 
 	// ── Axiom-Physics ────────────────────────────────────────────────────
 
@@ -1356,6 +1400,7 @@ namespace Axiom {
 		b.Camera2D_ScreenToWorld = &Axiom_Camera2D_ScreenToWorld;
 		b.Camera2D_GetViewportWidth = &Axiom_Camera2D_GetViewportWidth;
 		b.Camera2D_GetViewportHeight = &Axiom_Camera2D_GetViewportHeight;
+		b.Camera2D_GetMainEntity = &Axiom_Camera2D_GetMainEntity;
 
 		b.Rigidbody2D_ApplyForce = &Axiom_Rigidbody2D_ApplyForce;
 		b.Rigidbody2D_ApplyImpulse = &Axiom_Rigidbody2D_ApplyImpulse;
@@ -1386,6 +1431,8 @@ namespace Axiom {
 		b.AudioSource_SetLoop = &Axiom_AudioSource_SetLoop;
 		b.AudioSource_IsPlaying = &Axiom_AudioSource_IsPlaying;
 		b.AudioSource_IsPaused = &Axiom_AudioSource_IsPaused;
+		b.AudioSource_GetAudio = &Axiom_AudioSource_GetAudio;
+		b.AudioSource_SetAudio = &Axiom_AudioSource_SetAudio;
 
 		b.FastBody2D_GetBodyType = &Axiom_FastBody2D_GetBodyType;
 		b.FastBody2D_SetBodyType = &Axiom_FastBody2D_SetBodyType;

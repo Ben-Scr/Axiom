@@ -1,180 +1,16 @@
 #include "pch.hpp"
 #include "Packages/PackageManager.hpp"
+#include "Packages/CsprojParser.hpp"
 #include "Project/ProjectManager.hpp"
 #include "Serialization/Path.hpp"
 #include "Serialization/File.hpp"
 #include "Utils/Process.hpp"
-
-#include <cereal/macros.hpp>
-#include <cereal/external/rapidxml/rapidxml.hpp>
 
 #include <fstream>
 #include <filesystem>
 
 namespace Axiom {
 	namespace {
-		namespace rapidxml = cereal::rapidxml;
-
-		struct XmlFileDocument {
-			std::string Buffer;
-			rapidxml::xml_document<> Document;
-		};
-
-		std::string Trim(std::string_view value) {
-			const size_t start = value.find_first_not_of(" \t\r\n");
-			if (start == std::string_view::npos) {
-				return {};
-			}
-
-			const size_t end = value.find_last_not_of(" \t\r\n");
-			return std::string(value.substr(start, end - start + 1));
-		}
-
-		bool LoadXmlDocument(const std::filesystem::path& path, XmlFileDocument& document) {
-			std::ifstream input(path);
-			if (!input.is_open()) {
-				return false;
-			}
-
-			document.Buffer.assign((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
-			document.Buffer.push_back('\0');
-			document.Document.clear();
-
-			try {
-				document.Document.parse<rapidxml::parse_non_destructive>(&document.Buffer[0]);
-				return true;
-			}
-			catch (const rapidxml::parse_error& e) {
-				AIM_CORE_WARN_TAG("PackageManager", "Failed to parse XML '{}': {}", path.string(), e.what());
-				return false;
-			}
-		}
-
-		std::string GetAttributeValue(const rapidxml::xml_node<>* node, const char* attributeName) {
-			if (!node) {
-				return {};
-			}
-
-			if (const auto* attribute = node->first_attribute(attributeName)) {
-				return Trim(attribute->value());
-			}
-
-			return {};
-		}
-
-		std::string GetFirstChildValue(const rapidxml::xml_node<>* node, const char* childName) {
-			if (!node) {
-				return {};
-			}
-
-			if (const auto* child = node->first_node(childName)) {
-				return Trim(child->value());
-			}
-
-			return {};
-		}
-
-		std::string GetItemIdentity(const rapidxml::xml_node<>* node) {
-			std::string identity = GetAttributeValue(node, "Include");
-			if (!identity.empty()) {
-				return identity;
-			}
-
-			return GetAttributeValue(node, "Update");
-		}
-
-		std::string GetPackageVersion(const rapidxml::xml_node<>* node) {
-			std::string version = GetAttributeValue(node, "Version");
-			if (!version.empty()) {
-				return version;
-			}
-
-			version = GetAttributeValue(node, "VersionOverride");
-			if (!version.empty()) {
-				return version;
-			}
-
-			version = GetFirstChildValue(node, "Version");
-			if (!version.empty()) {
-				return version;
-			}
-
-			return GetFirstChildValue(node, "VersionOverride");
-		}
-
-		std::string GetSimpleAssemblyName(std::string identity) {
-			const size_t commaPos = identity.find(',');
-			if (commaPos != std::string::npos) {
-				identity = identity.substr(0, commaPos);
-			}
-
-			return Trim(identity);
-		}
-
-		std::unordered_map<std::string, std::string> LoadCentralPackageVersions(const std::filesystem::path& csprojPath) {
-			std::unordered_map<std::string, std::string> versions;
-			std::vector<std::filesystem::path> propsFiles;
-
-			std::filesystem::path currentDirectory = csprojPath.parent_path();
-			while (!currentDirectory.empty()) {
-				const std::filesystem::path propsPath = currentDirectory / "Directory.Packages.props";
-				if (std::filesystem::exists(propsPath)) {
-					propsFiles.push_back(propsPath);
-				}
-
-				const std::filesystem::path parent = currentDirectory.parent_path();
-				if (parent == currentDirectory) {
-					break;
-				}
-
-				currentDirectory = parent;
-			}
-
-			for (auto it = propsFiles.rbegin(); it != propsFiles.rend(); ++it) {
-				XmlFileDocument propsDocument;
-				if (!LoadXmlDocument(*it, propsDocument)) {
-					continue;
-				}
-
-				const rapidxml::xml_node<>* root = propsDocument.Document.first_node("Project");
-				if (!root) {
-					continue;
-				}
-
-				for (const auto* itemGroup = root->first_node("ItemGroup"); itemGroup; itemGroup = itemGroup->next_sibling("ItemGroup")) {
-					for (const auto* node = itemGroup->first_node("PackageVersion"); node; node = node->next_sibling("PackageVersion")) {
-						const std::string packageId = GetItemIdentity(node);
-						if (packageId.empty()) {
-							continue;
-						}
-
-						const std::string version = GetPackageVersion(node);
-						if (!version.empty()) {
-							versions[packageId] = version;
-						}
-					}
-				}
-			}
-
-			return versions;
-		}
-
-		void AddOrUpdateInstalledPackage(std::vector<PackageInfo>& installed, PackageInfo info) {
-			for (auto& existing : installed) {
-				if (existing.Id != info.Id || existing.SourceType != info.SourceType) {
-					continue;
-				}
-
-				if (existing.Version.empty() && !info.Version.empty()) {
-					existing.Version = info.Version;
-					existing.InstalledVersion = info.Version;
-				}
-				return;
-			}
-
-			installed.push_back(std::move(info));
-		}
-
 		std::string GetPackageToolExecutableName() {
 #if defined(AIM_PLATFORM_WINDOWS)
 			return "Axiom-PackageTool.exe";
@@ -439,71 +275,23 @@ namespace Axiom {
 	}
 
 	std::vector<PackageInfo> PackageManager::GetInstalledPackages() const {
-		std::vector<PackageInfo> installed;
-
-		std::string csproj = GetCsprojPath();
-		if (csproj.empty() || !File::Exists(csproj))
-			return installed;
-
-		XmlFileDocument projectDocument;
-		if (!LoadXmlDocument(std::filesystem::path(csproj), projectDocument)) {
-			return installed;
+		const std::string csproj = GetCsprojPath();
+		if (csproj.empty() || !File::Exists(csproj)) {
+			return {};
 		}
 
-		const auto centralPackageVersions = LoadCentralPackageVersions(std::filesystem::path(csproj));
-		const rapidxml::xml_node<>* root = projectDocument.Document.first_node("Project");
-		if (!root) {
-			return installed;
+		std::ifstream input(csproj);
+		if (!input.is_open()) {
+			return {};
 		}
+		const std::string xml((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+		input.close();
 
-		for (const auto* itemGroup = root->first_node("ItemGroup"); itemGroup; itemGroup = itemGroup->next_sibling("ItemGroup")) {
-			for (const auto* node = itemGroup->first_node(); node; node = node->next_sibling()) {
-				const std::string nodeName = node->name();
-				if (nodeName == "PackageReference") {
-					const std::string packageId = GetItemIdentity(node);
-					if (packageId.empty()) {
-						continue;
-					}
-
-					PackageInfo info;
-					info.Id = packageId;
-					info.Version = GetPackageVersion(node);
-					if (info.Version.empty()) {
-						if (const auto it = centralPackageVersions.find(packageId); it != centralPackageVersions.end()) {
-							info.Version = it->second;
-						}
-					}
-					info.IsInstalled = true;
-					info.InstalledVersion = info.Version;
-					info.SourceType = PackageSourceType::NuGet;
-					info.SourceName = "NuGet";
-					AddOrUpdateInstalledPackage(installed, std::move(info));
-					continue;
-				}
-
-				if (nodeName != "Reference") {
-					continue;
-				}
-
-				std::string name = GetSimpleAssemblyName(GetItemIdentity(node));
-				if (name.empty()) {
-					continue;
-				}
-
-				// Skip system references
-				if (name.find("System") == 0 || name.find("Microsoft") == 0)
-					continue;
-
-				PackageInfo info;
-				info.Id = name;
-				info.IsInstalled = true;
-				info.SourceType = PackageSourceType::GitHub;
-				info.SourceName = "Engine";
-				AddOrUpdateInstalledPackage(installed, std::move(info));
-			}
-		}
-
-		return installed;
+		// Hand the disk-loaded XML and central-version map to the pure parser.
+		// Keeping the disk I/O here means the parser stays unit-testable from a
+		// raw string without needing a real file or project on disk.
+		const auto centralVersions = LoadCentralPackageVersionsFromDisk(std::filesystem::path(csproj));
+		return ParseInstalledPackagesFromXml(xml, centralVersions);
 	}
 
 }

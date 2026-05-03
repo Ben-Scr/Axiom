@@ -4,6 +4,7 @@
 
 #include <imgui.h>
 
+#include <list>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -12,6 +13,10 @@ namespace Axiom {
 
 	class ThumbnailCache {
 	public:
+		// E31: hard cap so the cache cannot grow unbounded as the user navigates
+		// large project trees. Past this, the least-recently-used entry is evicted.
+		static constexpr size_t k_MaxEntries = 256;
+
 		void Initialize();
 		void Shutdown();
 
@@ -40,12 +45,24 @@ namespace Axiom {
 		static const char* GetAssetTypeLabel(AssetType type);
 
 	private:
+		// E31: classic LRU layout — m_LRU stores paths in access order (front =
+		// most recent). Each cache entry holds an iterator into that list so
+		// touching an entry on lookup is O(1) (splice to front + map lookup).
 		struct CachedThumbnail {
 			std::unique_ptr<Texture2D> Texture;
 			unsigned int GlHandle = 0;
+			std::list<std::string>::iterator LruIt;
 		};
 
+		// Touches a path to mark it most-recently-used. Caller must hold a valid
+		// iterator into m_Cache for the same path.
+		void TouchLru(std::unordered_map<std::string, CachedThumbnail>::iterator it);
+
+		// Evicts least-recently-used entries until size <= k_MaxEntries.
+		void EnforceCapacity();
+
 		std::unordered_map<std::string, CachedThumbnail> m_Cache;
+		std::list<std::string> m_LRU;
 	};
 
 } // namespace Axiom

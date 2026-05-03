@@ -24,9 +24,10 @@ project "Axiom-Editor"
     defines { "AIM_IMPORT_DLL" }
     includedirs { "src" }
     postbuildcommands { CopyAxiomAssets, CopyAxiomEngineDll, CopyGlfwDll, CopyGladDll }
+    if AxiomProfiler.Enabled then postbuildcommands { CopyTracyDll } end
 
     filter "system:windows"
-        buildoptions { "/utf-8" }
+        buildoptions { "/utf-8", "/FS" }
         systemversion "latest"
         defines { "AIM_PLATFORM_WINDOWS" }
         postbuildcommands {

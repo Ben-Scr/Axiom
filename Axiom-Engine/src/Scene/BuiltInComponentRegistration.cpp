@@ -5,6 +5,12 @@
 #include "Components/Components.hpp"
 #include "Scripting/ScriptComponent.hpp"
 
+// This file is the SINGLE source of truth for the engine's built-in component
+// list (display names, categories, subcategories, serialized names). The
+// editor's EditorComponentRegistration.cpp only attaches drawInspector
+// callbacks to entries declared here -- it must NOT re-declare component
+// metadata. Adding a new built-in component is a one-site change here, plus
+// (optionally) one inspector attachment in the editor file.
 namespace Axiom {
 	namespace {
 		template<typename T>

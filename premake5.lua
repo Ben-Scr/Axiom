@@ -49,6 +49,21 @@ newoption
     description = "Absolute path to an Axiom project. Adds <PATH>/Packages/<Name>/axiom-package.lua manifests to the package loader so project-local packages get built into the same solution."
 }
 
+newoption
+{
+    trigger = "no-profiler",
+    description = "Strip the Axiom profiler entirely from the build. Without this flag, Tracy is compiled into the engine, AXIOM_PROFILER_ENABLED is defined for engine/editor/runtime, and the in-engine ImGui Profiler panel is available. Pass --no-profiler for shipped runtime builds with strict size budgets."
+}
+
+-- Resolved early so subsequent dep-set wiring can branch on it. Default ON;
+-- explicit --no-profiler turns it off. The single boolean drives:
+--   - whether AXIOM_PROFILER_ENABLED is defined
+--   - whether the Tracy project is included in the build
+--   - whether the engine compiles src/Profiling/**
+--   - whether the editor compiles src/Gui/ProfilerPanel.*
+AxiomProfiler = {}
+AxiomProfiler.Enabled = not _OPTIONS["no-profiler"]
+
 require("premake/fix_csharp_platforms")
 include "Dependencies.lua"
 
@@ -111,7 +126,8 @@ Dependency.EngineSelectedModules = MergeDependencySets(
     AxiomModules.Render and Dependency.EngineCoreRender or nil,
     AxiomModules.Audio and Dependency.EngineCoreAudio or nil,
     AxiomModules.Physics and Dependency.EngineCorePhysics or nil,
-    AxiomModules.Scripting and Dependency.EngineCoreScripting or nil
+    AxiomModules.Scripting and Dependency.EngineCoreScripting or nil,
+    AxiomProfiler.Enabled and Dependency.Profiler or nil
 )
 
 Dependency.EditorRuntimeCommon = MergeDependencySets(
@@ -169,6 +185,17 @@ CopyGlfwDll = '{COPYFILE} "' ..
 CopyGladDll = '{COPYFILE} "' ..
     path.join(ROOT_DIR, "bin/" .. outputdir, "Glad", "Glad.dll") ..
     '" "%{cfg.targetdir}/Glad.dll"'
+
+-- Tracy is a SharedLib too (one client per process). Consumers ship the DLL.
+-- When --no-profiler is set this expands to a no-op string the postbuild
+-- list can still reference safely.
+if AxiomProfiler and AxiomProfiler.Enabled then
+    CopyTracyDll = '{COPYFILE} "' ..
+        path.join(ROOT_DIR, "bin/" .. outputdir, "Tracy", "Tracy.dll") ..
+        '" "%{cfg.targetdir}/Tracy.dll"'
+else
+    CopyTracyDll = "" -- no-op; consumer postbuild lists keep their structure
+end
 
 local function NormalizeRootPath(pathValue)
     if path.isabsolute(pathValue) then
@@ -277,6 +304,7 @@ if AxiomModules.Editor then
         UseDependencySet(Dependency.ImGui)
 
         filter "system:windows"
+            buildoptions { "/FS" }
             systemversion "latest"
 
         filter "configurations:Debug"
@@ -309,6 +337,10 @@ if AxiomModules.Physics then
     include "premake/dependencies/axiom_physics.lua"
 end
 
+if AxiomProfiler.Enabled then
+    include "premake/dependencies/tracy.lua"
+end
+
 include "Axiom-Engine"
 
 if AxiomModules.Scripting then
@@ -325,6 +357,12 @@ if AxiomModules.FullCompatibility then
     include "Axiom-Runtime"
 end
 
+group ""
+
+-- Tests live in their own group so they're easy to spot in the IDE solution
+-- explorer and trivial to disable by commenting out this block.
+group "Tests"
+    include "Tests/Axiom-Engine-Tests"
 group ""
 
 -- Load any axiom-package.lua manifests under packages/ and register their projects.

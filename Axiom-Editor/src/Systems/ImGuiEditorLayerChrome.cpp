@@ -194,15 +194,22 @@ namespace Axiom {
 			}
 		}
 
-		// Ctrl+S keyboard shortcut to save active scene (blocked during Play Mode)
+		// Ctrl+S keyboard shortcut. Routes to the prefab inspector when a prefab
+		// is the active inspector target; otherwise saves the active scene.
+		// Blocked during Play Mode either way.
 		if (ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S) && !Application::GetIsPlaying()) {
-			Scene* active = SceneManager::Get().GetActiveScene();
-			AxiomProject* project = ProjectManager::GetCurrentProject();
-			if (active && project) {
-				std::string scenePath = project->GetSceneFilePath(active->GetName());
-				SceneSerializer::SaveToFile(*active, scenePath);
-				project->LastOpenedScene = active->GetName();
-				project->Save();
+			if (m_PrefabInspector.IsOpen() && m_PrefabInspector.HasUnsavedChanges()) {
+				m_PrefabInspector.Save();
+			}
+			else {
+				Scene* active = SceneManager::Get().GetActiveScene();
+				AxiomProject* project = ProjectManager::GetCurrentProject();
+				if (active && project) {
+					std::string scenePath = project->GetSceneFilePath(active->GetName());
+					SceneSerializer::SaveToFile(*active, scenePath);
+					project->LastOpenedScene = active->GetName();
+					project->Save();
+				}
 			}
 		}
 
@@ -255,6 +262,52 @@ namespace Axiom {
 			ImGui::SameLine();
 			if (ImGui::Button("Cancel", ImVec2(100, 0))) {
 				m_ConfirmDialogPendingPath.clear();
+				ImGui::CloseCurrentPopup();
+			}
+			ImGui::EndPopup();
+		}
+
+		// Prefab save/discard modal — fired when the user picks a different
+		// asset while a dirty prefab is open in the inspector.
+		if (m_ShowPrefabSavePrompt) {
+			ImGui::OpenPopup("Save Prefab Changes?");
+			m_ShowPrefabSavePrompt = false;
+		}
+		if (ImGui::BeginPopupModal("Save Prefab Changes?", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+			std::string prefabName = std::filesystem::path(m_PrefabInspector.GetCurrentPath()).filename().string();
+			if (prefabName.empty()) prefabName = "the prefab";
+			ImGui::Text("Save changes to %s before switching?", prefabName.c_str());
+			ImGui::Spacing();
+
+			if (ImGui::Button("Save", ImVec2(100, 0))) {
+				m_PrefabInspector.Save();
+				if (!m_PendingPrefabSwitchPath.empty()) {
+					m_PrefabInspector.Open(m_PendingPrefabSwitchPath);
+					m_PrefabInspectorPath = m_PendingPrefabSwitchPath;
+					m_PendingPrefabSwitchPath.clear();
+				}
+				else {
+					m_PrefabInspector.Close();
+					m_PrefabInspectorPath.clear();
+				}
+				ImGui::CloseCurrentPopup();
+			}
+			ImGui::SameLine();
+			if (ImGui::Button("Don't Save", ImVec2(100, 0))) {
+				if (!m_PendingPrefabSwitchPath.empty()) {
+					m_PrefabInspector.Open(m_PendingPrefabSwitchPath);
+					m_PrefabInspectorPath = m_PendingPrefabSwitchPath;
+					m_PendingPrefabSwitchPath.clear();
+				}
+				else {
+					m_PrefabInspector.Close();
+					m_PrefabInspectorPath.clear();
+				}
+				ImGui::CloseCurrentPopup();
+			}
+			ImGui::SameLine();
+			if (ImGui::Button("Cancel", ImVec2(100, 0))) {
+				m_PendingPrefabSwitchPath.clear();
 				ImGui::CloseCurrentPopup();
 			}
 			ImGui::EndPopup();
@@ -315,6 +368,16 @@ namespace Axiom {
 		RenderBuildPanel();
 		RenderPlayerSettingsPanel();
 		RenderPackageManagerPanel();
+
+		// Profiler panel — Ctrl+F6 toggle, also reachable via Tools menu.
+		// Panel.Render checks pOpen and self-hides; calling unconditionally
+		// is fine and lets it manage its visibility-gates without us ifdef'ing.
+		if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_F6)) {
+			m_ShowProfiler = !m_ShowProfiler;
+		}
+		if (m_ShowProfiler) {
+			m_ProfilerPanel.Render(&m_ShowProfiler);
+		}
 
 		// Build progress overlay (same pattern as ScriptSystem compilation overlay)
 		if (m_BuildState > 0) {

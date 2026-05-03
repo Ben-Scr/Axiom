@@ -31,6 +31,7 @@ project "Axiom-Physics"
     }
 
     filter "system:windows"
+        buildoptions { "/FS" }
         systemversion "latest"
 
     filter "configurations:Debug"

@@ -73,6 +73,7 @@ public abstract class GameSystem
     public virtual void OnAwake() { }
     public virtual void OnStart() { }
     public virtual void OnUpdate() { }
+    public virtual void OnFixedUpdate() { }
     public virtual void OnDestroy() { }
 
     public virtual void OnEnable() { }

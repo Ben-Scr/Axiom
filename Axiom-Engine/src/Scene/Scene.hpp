@@ -22,6 +22,23 @@ namespace Axiom {
 	public:
 		Scene(const Scene&) = delete;
 
+		// ─── Editor-only access surface (H12) ────────────────────────────
+		// These methods exist for the editor's prefab/inspector machinery and
+		// have no use in a standalone runtime. They live on `Scene` for
+		// implementation simplicity (private state access) but should be
+		// considered editor-internal. A future refactor should push them
+		// behind a friend `SceneEditorAccess` struct in a header consumed
+		// only by Axiom-Editor; until then, treat as unstable in the public
+		// surface.
+
+		// Detached scene used by the editor (e.g. prefab inspector). Has no
+		// SceneDefinition, is not registered with SceneManager, will not tick,
+		// and component-construction hooks that touch global subsystems
+		// (physics worlds, audio, scripts) are gated off — see IsEditorPreview().
+		static std::unique_ptr<Scene> CreateDetachedEditorScene(const std::string& name);
+		bool IsEditorPreview() const { return m_IsEditorPreview; }
+		// ─── End editor-only access surface ──────────────────────────────
+
 		// Info: Creates an entity with a Transform2D component
 		Entity CreateEntity();
 		// Info: Creates an entity with a Transform2D and Name component
@@ -186,6 +203,10 @@ namespace Axiom {
 		const SceneDefinition* GetDefinition() const { return m_Definition; }
 		Camera2DComponent* GetMainCamera();
 		const Camera2DComponent* GetMainCamera() const;
+		// Returns the EntityHandle backing the main camera (or entt::null when
+		// none exists). Calls GetMainCamera() first so the cached
+		// `m_MainCameraEntity` is refreshed against the current registry state.
+		EntityHandle GetMainCameraEntity();
 		bool SetMainCamera(EntityHandle entity);
 
 		bool IsDirty() const { return m_Dirty; }
@@ -233,6 +254,7 @@ namespace Axiom {
 		void OnCamera2DComponentDestruct(entt::registry& registry, EntityHandle entity);
 		void OnDisabledTagConstruct(entt::registry& registry, EntityHandle entity);
 		void OnDisabledTagDestroy(entt::registry& registry, EntityHandle entity);
+		void OnStaticTagDestroy(entt::registry& registry, EntityHandle entity);
 
 		void OnParticleSystem2DComponentConstruct(entt::registry& registry, EntityHandle entity);
 		void OnParticleSystem2DComponentDestruct(entt::registry& registry, EntityHandle entity);
@@ -276,6 +298,7 @@ namespace Axiom {
 		bool m_IsLoaded = false;
 		bool m_Persistent = false;
 		bool m_Dirty = false;
+		bool m_IsEditorPreview = false;
 		EntityID m_NextRuntimeEntityID = 1;
 		std::unordered_map<EntityID, EntityHandle> m_RuntimeIdToEntity;
 		std::unordered_map<uint64_t, EntityHandle> m_SceneGuidToEntity;

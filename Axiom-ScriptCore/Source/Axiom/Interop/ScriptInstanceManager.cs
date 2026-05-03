@@ -124,7 +124,10 @@ internal static class ScriptInstanceManager
         public MethodInfo? StartMethod;
         public MethodInfo? UpdateMethod;
         public bool HasStarted;
+        public bool HasAwoken;
     }
+
+    private static readonly HashSet<int> s_GameSystemAwoken = new();
 
     private class ScriptClassInfo
     {
@@ -341,7 +344,8 @@ internal static class ScriptInstanceManager
                 Instance = instance,
                 StartMethod = classInfo.StartMethod,
                 UpdateMethod = classInfo.UpdateMethod,
-                HasStarted = false
+                HasStarted = false,
+                HasAwoken = false
             };
 
             return handle;
@@ -373,6 +377,21 @@ internal static class ScriptInstanceManager
     }
 
     [UnmanagedCallersOnly]
+    public static void InvokeAwake(int handle)
+    {
+        if (!s_Instances.TryGetValue(handle, out var data) || data.HasAwoken) return;
+
+        try
+        {
+            data.Instance.OnAwake();
+            data.HasAwoken = true;
+            s_Instances[handle] = data;
+        }
+        catch (TargetInvocationException ex) { Log.Error($"Exception in OnAwake(): {ex.InnerException}"); }
+        catch (Exception ex) { Log.Error($"Exception in OnAwake(): {ex}"); }
+    }
+
+    [UnmanagedCallersOnly]
     public static void InvokeUpdate(int handle)
     {
         if (!s_Instances.TryGetValue(handle, out var data)) return;
@@ -383,6 +402,18 @@ internal static class ScriptInstanceManager
         }
         catch (TargetInvocationException ex) { Log.Error($"Exception in OnUpdate(): {ex.InnerException}"); }
         catch (Exception ex) { Log.Error($"Exception in OnUpdate(): {ex}"); }
+    }
+
+    [UnmanagedCallersOnly]
+    public static void InvokeFixedUpdate(int handle)
+    {
+        if (!s_Instances.TryGetValue(handle, out var data)) return;
+        try
+        {
+            data.Instance.OnFixedUpdate();
+        }
+        catch (TargetInvocationException ex) { Log.Error($"Exception in OnFixedUpdate(): {ex.InnerException}"); }
+        catch (Exception ex) { Log.Error($"Exception in OnFixedUpdate(): {ex}"); }
     }
 
     [UnmanagedCallersOnly]
@@ -488,7 +519,11 @@ internal static class ScriptInstanceManager
     }
 
     [UnmanagedCallersOnly]
-    public static void DestroyGameSystemInstance(int handle) => s_GameSystems.Remove(handle);
+    public static void DestroyGameSystemInstance(int handle)
+    {
+        s_GameSystems.Remove(handle);
+        s_GameSystemAwoken.Remove(handle);
+    }
 
     [UnmanagedCallersOnly]
     public static void InvokeGameSystemStart(int handle)
@@ -499,11 +534,30 @@ internal static class ScriptInstanceManager
     }
 
     [UnmanagedCallersOnly]
+    public static void InvokeGameSystemAwake(int handle)
+    {
+        if (!s_GameSystems.TryGetValue(handle, out var system)) return;
+        if (!s_GameSystemAwoken.Add(handle)) return;
+        try { system.OnAwake(); }
+        catch (TargetInvocationException ex) { Log.Error($"Exception in GameSystem.OnAwake(): {ex.InnerException}"); }
+        catch (Exception ex) { Log.Error($"Exception in GameSystem.OnAwake(): {ex}"); }
+    }
+
+    [UnmanagedCallersOnly]
     public static void InvokeGameSystemUpdate(int handle)
     {
         if (!s_GameSystems.TryGetValue(handle, out var system)) return;
         try { system.OnUpdate(); }
         catch (Exception ex) { Log.Error($"Exception in GameSystem.OnUpdate(): {ex}"); }
+    }
+
+    [UnmanagedCallersOnly]
+    public static void InvokeGameSystemFixedUpdate(int handle)
+    {
+        if (!s_GameSystems.TryGetValue(handle, out var system)) return;
+        try { system.OnFixedUpdate(); }
+        catch (TargetInvocationException ex) { Log.Error($"Exception in GameSystem.OnFixedUpdate(): {ex.InnerException}"); }
+        catch (Exception ex) { Log.Error($"Exception in GameSystem.OnFixedUpdate(): {ex}"); }
     }
 
     [UnmanagedCallersOnly]
@@ -578,6 +632,15 @@ internal static class ScriptInstanceManager
     }
 
     [UnmanagedCallersOnly]
+    public static void InvokeGlobalSystemFixedUpdate(int handle)
+    {
+        if (!s_GlobalSystems.TryGetValue(handle, out var system)) return;
+        try { system.OnFixedUpdate(); }
+        catch (TargetInvocationException ex) { Log.Error($"Exception in GlobalSystem.OnFixedUpdate(): {ex.InnerException}"); }
+        catch (Exception ex) { Log.Error($"Exception in GlobalSystem.OnFixedUpdate(): {ex}"); }
+    }
+
+    [UnmanagedCallersOnly]
     public static void InvokeGlobalSystemEnable(int handle)
     {
         if (!s_GlobalSystems.TryGetValue(handle, out var system)) return;
@@ -611,6 +674,7 @@ internal static class ScriptInstanceManager
             {
                 s_Instances.Clear();
                 s_GameSystems.Clear();
+                s_GameSystemAwoken.Clear();
                 s_GlobalSystems.Clear();
                 s_ClassCache.Clear();
                 UnloadCurrentUserAssemblyContext();
@@ -640,6 +704,7 @@ internal static class ScriptInstanceManager
     {
         s_Instances.Clear();
         s_GameSystems.Clear();
+        s_GameSystemAwoken.Clear();
         s_GlobalSystems.Clear();
         s_ClassCache.Clear();
         ReleaseFieldJsonBuffer();

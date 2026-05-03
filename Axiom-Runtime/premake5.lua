@@ -18,6 +18,16 @@ project "Axiom-Runtime"
         "icon.rc"
     }
 
+    -- When the profiler is enabled the runtime hosts the same ProfilerPanel
+    -- the editor uses. We compile its .cpp into the runtime binary directly
+    -- (rather than splitting it into a third project) and add the editor's
+    -- src as an include dir so the panel header resolves. Stays out of the
+    -- runtime entirely when --no-profiler strips the macro.
+    if AxiomProfiler.Enabled then
+        files { path.join(ROOT_DIR, "Axiom-Editor/src/Gui/ProfilerPanel.cpp") }
+        includedirs { path.join(ROOT_DIR, "Axiom-Editor/src") }
+    end
+
     UseDependencySet(Dependency.EditorRuntimeCommon)
     defines(GetAxiomModuleDefines())
     defines { "AIM_IMPORT_DLL" }
@@ -29,9 +39,10 @@ project "Axiom-Runtime"
         CopyGlfwDll,
         CopyGladDll
     }
+    if AxiomProfiler.Enabled then postbuildcommands { CopyTracyDll } end
 
     filter "system:windows"
-        buildoptions { "/utf-8" }
+        buildoptions { "/utf-8", "/FS" }
         systemversion "latest"
         links { "%{Library.GDI32}" }
         defines { "AIM_PLATFORM_WINDOWS" }

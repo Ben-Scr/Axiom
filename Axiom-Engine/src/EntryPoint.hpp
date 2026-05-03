@@ -1,4 +1,13 @@
 #pragma once
+
+// E29: anti-multi-include sentinel — defines main()/WinMain() in this header,
+// so including in two TUs would cause duplicate-symbol linker errors.
+#if defined(AXIOM_ENTRY_POINT_DEFINED)
+#  error "EntryPoint.hpp must be included in exactly one translation unit. " \
+         "Duplicate inclusion would generate a duplicate main()/WinMain()."
+#endif
+#define AXIOM_ENTRY_POINT_DEFINED 1
+
 #include "Core/Base.hpp"
 #include "Core/Application.hpp"
 

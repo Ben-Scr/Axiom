@@ -15,6 +15,7 @@ IncludeDir["Glad"] = "External/glad/include"
 IncludeDir["DotNet"] = "External/dotnet"
 IncludeDir["AxiomEngine"] = "Axiom-Engine/src"
 IncludeDir["AxiomEngineLegacy"] = "Axiom-Engine/src"
+IncludeDir["Tracy"] = "External/tracy/public"
 
 local isWindowsTarget = os.target() == "windows"
 
@@ -121,6 +122,14 @@ Dependency["EngineCore"] =
         "%{IncludeDir.EnTT}",
         "%{IncludeDir.STB}",
         "%{IncludeDir.MagicEnum}",
+        -- Cereal: the wrapper Serialization/Cereal.hpp was removed (audit E5)
+        -- because it had zero callers. The include path stays available for
+        -- Packages/CsprojParser.cpp which still needs cereal/external/rapidxml
+        -- for .csproj XML parsing. We tried scoping this with a per-file
+        -- premake filter but it doesn't reliably emit per-file
+        -- AdditionalIncludeDirectories on vcxproj — keeping it global is the
+        -- pragmatic fix; it's a one-line cost for a header path that only
+        -- one .cpp actually consumes.
         "%{IncludeDir.Cereal}"
     },
 
@@ -239,13 +248,34 @@ Dependency["EngineCoreEditor"] =
     }
 }
 
+-- Tracy client — populated only when AxiomProfiler.Enabled. Engine.dll +
+-- editor.exe + runtime.exe all attach the same Tracy client SharedLib so
+-- there's exactly one client instance per process. Header `Tracy.hpp`
+-- sees TRACY_IMPORTS on consumer side -> dllimport, matching the
+-- TRACY_EXPORTS in the Tracy project itself.
+if AxiomProfiler and AxiomProfiler.Enabled then
+    Dependency["Profiler"] =
+    {
+        IncludeDirs = { "%{IncludeDir.Tracy}" },
+        DependsOn   = { "Tracy" },
+        Links       = { "Tracy" },
+        -- TRACY_ON_DEMAND must match the Tracy lib build (premake/dependencies/tracy.lua).
+        -- Mismatched on/off across consumer + lib produces ABI drift in the SourceLocationData
+        -- struct, which is hashed by Tracy at runtime — wrong size = corrupted zones.
+        Defines     = { "AXIOM_PROFILER_ENABLED", "TRACY_ENABLE", "TRACY_IMPORTS", "TRACY_ON_DEMAND" }
+    }
+else
+    Dependency["Profiler"] = { IncludeDirs = {}, DependsOn = {}, Links = {}, Defines = {} }
+end
+
 Dependency["EngineCoreAllModules"] = MergeDependencies(
     Dependency["EngineCore"],
     Dependency["EngineCoreRender"],
     Dependency["EngineCoreAudio"],
     Dependency["EngineCorePhysics"],
     Dependency["EngineCoreScripting"],
-    Dependency["EngineCoreEditor"]
+    Dependency["EngineCoreEditor"],
+    Dependency["Profiler"]
 )
 
 -- Explicit legacy/full-module compatibility path for consumers that opt into AXIOM_ALL_MODULES.

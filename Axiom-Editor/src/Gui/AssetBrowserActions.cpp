@@ -5,8 +5,11 @@
 #include "Editor/ExternalEditor.hpp"
 #include "Project/AxiomProject.hpp"
 #include "Project/ProjectManager.hpp"
+#include "Scene/Scene.hpp"
+#include "Scene/SceneManager.hpp"
 #include "Serialization/Directory.hpp"
 #include "Serialization/Path.hpp"
+#include "Serialization/SceneSerializer.hpp"
 
 #include <imgui.h>
 
@@ -75,6 +78,44 @@ namespace Axiom {
 	void AssetBrowser::CommitRename() {
 		std::string newName(m_RenameBuffer);
 		std::string oldName = std::filesystem::path(m_RenamePath).filename().string();
+
+		if (m_PendingScriptType == PendingScriptType::EntityPrefab) {
+			// Strip a trailing ".prefab" the user typed so we don't end up with "Foo.prefab.prefab".
+			std::string baseName = newName;
+			if (baseName.size() > 7) {
+				std::string lower = baseName;
+				std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+				if (lower.substr(lower.size() - 7) == ".prefab") {
+					baseName = baseName.substr(0, baseName.size() - 7);
+				}
+			}
+			if (baseName.empty()) {
+				baseName = "NewPrefab";
+			}
+
+			// Suffix " (N)" to dodge collisions with anything already in the folder.
+			std::filesystem::path targetPath = std::filesystem::path(m_PendingScriptDir) / (baseName + ".prefab");
+			std::error_code existsEc;
+			for (int n = 1; targetPath.string() != m_RenamePath
+				&& std::filesystem::exists(targetPath, existsEc) && n < 10000; ++n) {
+				targetPath = std::filesystem::path(m_PendingScriptDir) / (baseName + " (" + std::to_string(n) + ").prefab");
+				existsEc.clear();
+			}
+
+			const std::string finalPath = targetPath.string();
+			if (finalPath != m_RenamePath) {
+				std::error_code renameEc;
+				std::filesystem::rename(m_RenamePath, finalPath, renameEc);
+			}
+
+			m_SelectedPath = finalPath;
+			m_PendingScriptType = PendingScriptType::None;
+			m_PendingScriptDir.clear();
+			m_PendingPrefabSourceEntity = entt::null;
+			m_NeedsRefresh = true;
+			CancelRename();
+			return;
+		}
 
 		if (m_PendingScriptType != PendingScriptType::None) {
 			std::string className = newName;
@@ -250,6 +291,7 @@ namespace Axiom {
 			}
 			m_PendingScriptType = PendingScriptType::None;
 			m_PendingScriptDir.clear();
+			m_PendingPrefabSourceEntity = entt::null;
 			m_NeedsRefresh = true;
 		}
 
@@ -589,6 +631,82 @@ namespace Axiom {
 		m_SelectedPath = scenePath;
 		std::string name = std::filesystem::path(scenePath).filename().string();
 		BeginRename(scenePath, name);
+	}
+
+	void AssetBrowser::CreateFile(const std::string& parentDir, const std::string& baseName,
+		const std::string& extension, const std::string& defaultContent) {
+		// Normalize: extension may or may not include the leading dot.
+		const std::string ext = (extension.empty() || extension[0] == '.') ? extension : ("." + extension);
+
+		std::filesystem::path filePath = std::filesystem::path(parentDir) / (baseName + ext);
+		std::error_code existsEc;
+		for (int n = 1; std::filesystem::exists(filePath, existsEc) && n < 10000; ++n) {
+			filePath = std::filesystem::path(parentDir) / (baseName + " (" + std::to_string(n) + ")" + ext);
+			existsEc.clear();
+		}
+
+		const std::string finalPath = filePath.string();
+		std::ofstream file(finalPath, std::ios::binary);
+		if (file.is_open()) {
+			if (!defaultContent.empty()) {
+				file.write(defaultContent.data(), static_cast<std::streamsize>(defaultContent.size()));
+			}
+			file.close();
+		}
+
+		m_NeedsRefresh = true;
+		Refresh();
+
+		m_SelectedPath = finalPath;
+		BeginRename(finalPath, std::filesystem::path(finalPath).filename().string());
+	}
+
+	void AssetBrowser::CreateEntityPrefab(const std::string& parentDir, EntityHandle sourceEntity) {
+		const std::string baseName = "NewPrefab";
+		std::filesystem::path prefabPath = std::filesystem::path(parentDir) / (baseName + ".prefab");
+		std::error_code existsEc;
+		for (int n = 1; std::filesystem::exists(prefabPath, existsEc) && n < 10000; ++n) {
+			prefabPath = std::filesystem::path(parentDir) / (baseName + " (" + std::to_string(n) + ").prefab");
+			existsEc.clear();
+		}
+
+		const std::string finalPath = prefabPath.string();
+
+		if (sourceEntity != entt::null) {
+			Scene* activeScene = SceneManager::Get().GetActiveScene();
+			if (activeScene && activeScene->IsValid(sourceEntity)) {
+				SceneSerializer::SaveEntityToFile(*activeScene, sourceEntity, finalPath);
+			}
+		}
+		else {
+			// Minimal Transform2D-only prefab — matches what Scene::CreateEntity produces, so
+			// instantiating from this file gives a usable entity instead of a component-less one.
+			const std::string content =
+				"{\n"
+				"  \"version\": 1,\n"
+				"  \"type\": \"Prefab\",\n"
+				"  \"Entity\": {\n"
+				"    \"Transform2D\": { \"posX\": 0, \"posY\": 0, \"rotation\": 0, \"scaleX\": 1, \"scaleY\": 1 }\n"
+				"  },\n"
+				"  \"prefab\": {\n"
+				"    \"Transform2D\": { \"posX\": 0, \"posY\": 0, \"rotation\": 0, \"scaleX\": 1, \"scaleY\": 1 }\n"
+				"  }\n"
+				"}\n";
+			std::ofstream file(finalPath);
+			if (file.is_open()) {
+				file << content;
+				file.close();
+			}
+		}
+
+		m_PendingScriptType = PendingScriptType::EntityPrefab;
+		m_PendingScriptDir = parentDir;
+		m_PendingPrefabSourceEntity = sourceEntity;
+		m_NeedsRefresh = true;
+		Refresh();
+
+		m_SelectedPath = finalPath;
+		BeginRename(finalPath, std::filesystem::path(finalPath).filename().string());
 	}
 
 	void AssetBrowser::OpenAssetExternal(const DirectoryEntry& entry) {

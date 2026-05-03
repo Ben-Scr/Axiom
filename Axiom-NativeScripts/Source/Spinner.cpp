@@ -1,9 +1,11 @@
+#include <Components/General/Transform2DComponent.hpp>
 #include <Scripting/NativeScript.hpp>
 
 class Spinner : public Axiom::NativeScript {
 public:
 	void Update(float dt) override {
-		SetRotation(GetRotation() + 3.14159f * dt);
+		auto& transform = GetComponent<Axiom::Transform2DComponent>();
+		transform.SetRotation(transform.Rotation + 3.14159f * dt);
 	}
 };
 

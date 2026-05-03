@@ -24,6 +24,7 @@ project "Box2D"
     }
 
     filter "system:windows"
+        buildoptions { "/FS" }
         systemversion "latest"
 
     filter "configurations:Debug"

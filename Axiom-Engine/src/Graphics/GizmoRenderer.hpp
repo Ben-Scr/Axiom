@@ -26,8 +26,10 @@ namespace Axiom {
 
     private:
         static void BuildGeometry(GizmoLayerMask layerMask);
-        static void FlushGizmos();
-        static void FlushGizmosWithVP(const glm::mat4& vp);
+        // E18: single private flush helper takes an optional VP. nullopt means
+        // "use Camera2DComponent::Main()'s VP" (legacy FlushGizmos behavior);
+        // a value means "use the supplied VP" (legacy FlushGizmosWithVP).
+        static void FlushGizmosImpl(const glm::mat4* vpOverride);
 
         static bool m_IsInitialized;
         static std::unique_ptr<Shader> m_GizmoShader;
@@ -39,6 +41,10 @@ namespace Axiom {
         static unsigned int m_VAO;
         static unsigned int m_VBO;
         static unsigned int m_EBO;
+        // E18: track persistent VBO/EBO capacity (in bytes) so we can grow
+        // the buffer once and use glBufferSubData each frame.
+        static std::size_t m_VBOCapacityBytes;
+        static std::size_t m_EBOCapacityBytes;
         static int m_uMVP;
     };
 }

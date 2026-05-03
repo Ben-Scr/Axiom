@@ -53,6 +53,13 @@ internal unsafe struct ManagedCallbacksStruct
     public delegate* unmanaged<int, void> InvokeGlobalSystemEnable;
     public delegate* unmanaged<int, void> InvokeGlobalSystemDisable;
     public delegate* unmanaged<byte*, int> GlobalSystemClassExists;
+
+    // ── New lifecycle slots (appended for binary compat) ──
+    public delegate* unmanaged<int, void> InvokeAwake;
+    public delegate* unmanaged<int, void> InvokeFixedUpdate;
+    public delegate* unmanaged<int, void> InvokeGameSystemAwake;
+    public delegate* unmanaged<int, void> InvokeGameSystemFixedUpdate;
+    public delegate* unmanaged<int, void> InvokeGlobalSystemFixedUpdate;
 }
 
 /// <summary>
@@ -115,6 +122,13 @@ internal static class ScriptHostBridge
             managedCallbacks->InvokeGlobalSystemEnable = &ScriptInstanceManager.InvokeGlobalSystemEnable;
             managedCallbacks->InvokeGlobalSystemDisable = &ScriptInstanceManager.InvokeGlobalSystemDisable;
             managedCallbacks->GlobalSystemClassExists = &ScriptInstanceManager.GlobalSystemClassExists;
+
+            // ── New lifecycle slots (appended for binary compat) ──
+            managedCallbacks->InvokeAwake = &ScriptInstanceManager.InvokeAwake;
+            managedCallbacks->InvokeFixedUpdate = &ScriptInstanceManager.InvokeFixedUpdate;
+            managedCallbacks->InvokeGameSystemAwake = &ScriptInstanceManager.InvokeGameSystemAwake;
+            managedCallbacks->InvokeGameSystemFixedUpdate = &ScriptInstanceManager.InvokeGameSystemFixedUpdate;
+            managedCallbacks->InvokeGlobalSystemFixedUpdate = &ScriptInstanceManager.InvokeGlobalSystemFixedUpdate;
 
             ScriptInstanceManager.SetCoreAssembly(typeof(ScriptHostBridge).Assembly);
             return 0;

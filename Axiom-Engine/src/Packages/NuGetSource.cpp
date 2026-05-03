@@ -71,11 +71,18 @@ namespace Axiom {
 	PackageOperationResult NuGetSource::Install(const std::string& packageId,
 		const std::string& version, const std::string& csprojPath) {
 
-		AIM_CORE_INFO_TAG("NuGetSource", "Installing {} {}...", packageId, version);
+		// .NET 10's `dotnet remove` ignores its positional <PROJECT> argument and
+		// always searches the current working directory for a .csproj. Run from the
+		// project's parent dir and omit the explicit path so the directory search
+		// finds it. We use the same pattern for `dotnet add` for symmetry — it
+		// doesn't have the bug, but running both commands the same way keeps the
+		// install/remove flows consistent.
+		const std::filesystem::path projectDir = std::filesystem::path(csprojPath).parent_path();
+
+		AIM_CORE_INFO_TAG("NuGetSource", "Installing {} {} into {}", packageId, version, csprojPath);
 		std::vector<std::string> command = {
 			"dotnet",
 			"add",
-			csprojPath,
 			"package",
 			packageId
 		};
@@ -83,9 +90,13 @@ namespace Axiom {
 			command.push_back("--version");
 			command.push_back(version);
 		}
-		Process::Result result = Process::Run(command);
+		Process::Result result = Process::Run(command, projectDir);
 
 		if (!result.Succeeded()) {
+			AIM_CORE_ERROR_TAG("NuGetSource", "dotnet add package failed (exit code {})", result.ExitCode);
+			if (!result.Output.empty()) {
+				AIM_CORE_ERROR_TAG("NuGetSource", "{}", result.Output);
+			}
 			return { false, "dotnet add package failed (exit code " + std::to_string(result.ExitCode) + ")" };
 		}
 
@@ -95,16 +106,21 @@ namespace Axiom {
 	PackageOperationResult NuGetSource::Remove(const std::string& packageId,
 		const std::string& csprojPath) {
 
-		AIM_CORE_INFO_TAG("NuGetSource", "Removing {}...", packageId);
+		const std::filesystem::path projectDir = std::filesystem::path(csprojPath).parent_path();
+
+		AIM_CORE_INFO_TAG("NuGetSource", "Removing {} from {}", packageId, csprojPath);
 		Process::Result result = Process::Run({
 			"dotnet",
 			"remove",
-			csprojPath,
 			"package",
 			packageId
-		});
+		}, projectDir);
 
 		if (!result.Succeeded()) {
+			AIM_CORE_ERROR_TAG("NuGetSource", "dotnet remove package failed (exit code {})", result.ExitCode);
+			if (!result.Output.empty()) {
+				AIM_CORE_ERROR_TAG("NuGetSource", "{}", result.Output);
+			}
 			return { false, "dotnet remove package failed (exit code " + std::to_string(result.ExitCode) + ")" };
 		}
 

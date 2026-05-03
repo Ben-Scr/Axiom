@@ -33,6 +33,11 @@ namespace Axiom {
 		static void UnloadAudio(const AudioHandle& audioHandle);
 		static void UnloadAllAudio();
 
+		// Walks every live Scene's registry collecting AudioHandle values from
+		// components that hold them (AudioSourceComponent and any others). Frees
+		// every Audio entry not in that set. Returns the number of entries freed.
+		static size_t PurgeUnreferenced();
+
 
 		static void PlayAudioSource(AudioSourceComponent& source);
 		static void PauseAudioSource(AudioSourceComponent& source);

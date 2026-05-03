@@ -1,5 +1,6 @@
 #include <Axiom.hpp>
 #include "Core/Application.hpp"
+#include "RuntimeProfilerLayer.hpp"
 #include "Scene/SceneDefinition.hpp"
 #include "Scene/SceneManager.hpp"
 
@@ -85,6 +86,14 @@ public:
 		if (!ProjectManager::GetCurrentProject()) {
 			EntityHelper::CreateCamera2DEntity();
 		}
+
+		// Push the runtime profiler layer only when the project opted into it.
+		// (When --no-profiler was passed at premake time, the layer is built
+		// as a no-op shell, so this push costs essentially nothing.)
+		AxiomProject* project = ProjectManager::GetCurrentProject();
+		if (project && project->Profiler.EnableInRuntime) {
+			PushLayer<RuntimeProfilerLayer>("RuntimeProfiler");
+		}
 	}
 
 	void Update() override {}
@@ -101,6 +110,11 @@ Axiom::Application* Axiom::CreateApplication() {
 		auto project = std::make_unique<AxiomProject>(AxiomProject::Load(exeDir));
 		AIM_CORE_INFO_TAG("Runtime", "Loaded project: {} ({})", project->Name, project->RootDirectory);
 		ProjectManager::SetCurrentProject(std::move(project));
+	}
+	else {
+		// E30: no project file next to the executable — surface the fallback so
+		// a packaging mistake (missing axiom-project.json) is visible in logs.
+		AIM_CORE_WARN_TAG("Runtime", "axiom-project.json not found at '{}'; falling back to built-in sample scene", exeDir);
 	}
 
 	return new RuntimeApplication();

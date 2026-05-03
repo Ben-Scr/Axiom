@@ -1,6 +1,7 @@
 #include "pch.hpp"
 #include "Audio/Audio.hpp"
 
+#include <algorithm>
 #include <limits>
 
 namespace Axiom {
@@ -114,13 +115,25 @@ namespace Axiom {
 			m_FrameCount = frameCount;
 		}
 		else {
+			// E32: ma_decoder_get_length_in_pcm_frames failed or returned 0 —
+			// stream of unknown length (rare; e.g. some live/streaming sources).
+			// The known-length branch above is the fast path that reserves and
+			// decodes in one pass. Here we fall back to chunked decode but use
+			// exponential capacity growth so we don't reallocate on every chunk
+			// for large unknown-length files.
 			constexpr ma_uint64 chunkFrames = 4096;
+			const size_t chunkSampleCount = static_cast<size_t>(chunkFrames * static_cast<ma_uint64>(m_Channels));
 			std::vector<float> decodedFrames;
-			decodedFrames.reserve(static_cast<size_t>(chunkFrames * (m_Channels == 0 ? 1u : m_Channels)));
+			// Start at 16 chunks worth of capacity; std::vector's geometric
+			// growth on subsequent reserves keeps amortized cost O(N).
+			decodedFrames.reserve(chunkSampleCount * 16);
 
 			while (true) {
-				const size_t chunkSampleCount = static_cast<size_t>(chunkFrames * static_cast<ma_uint64>(m_Channels));
 				const size_t oldSize = decodedFrames.size();
+				if (oldSize + chunkSampleCount > decodedFrames.capacity()) {
+					decodedFrames.reserve(std::max(decodedFrames.capacity() * 2,
+						oldSize + chunkSampleCount));
+				}
 				decodedFrames.resize(oldSize + chunkSampleCount);
 
 				ma_uint64 framesRead = 0;

@@ -22,7 +22,7 @@ public class Entity : IEquatable<Entity>
 
     private readonly Dictionary<Type, Component> m_ComponentCache = new();
     private readonly ulong m_PrefabAssetGUID;
-    private Transform2DComponent? m_TransformComponent;
+    private Transform2D? m_TransformComponent;
 
     protected Entity()
     {
@@ -72,15 +72,15 @@ public class Entity : IEquatable<Entity>
         }
     }
 
-    public Transform2DComponent Transform
+    public Transform2D Transform
     {
         get
         {
             if (m_TransformComponent == null)
             {
-                m_TransformComponent = GetComponent<Transform2DComponent>();
+                m_TransformComponent = GetComponent<Transform2D>();
                 if (m_TransformComponent == null)
-                    throw new InvalidOperationException("Entity does not have a Transform2DComponent");
+                    throw new InvalidOperationException("Entity does not have a Transform2D component");
             }
             return m_TransformComponent;
         }
@@ -98,8 +98,6 @@ public class Entity : IEquatable<Entity>
         }
         set
         {
-            // Renaming prefab *assets* is out of scope — the asset's display name lives
-            // outside the entity world. Only live scene/runtime entities are mutable here.
             if (IsPrefabAsset)
                 return;
 
@@ -111,17 +109,17 @@ public class Entity : IEquatable<Entity>
 
     private static readonly Dictionary<Type, string> s_NativeComponentNames = new()
     {
-        { typeof(NameComponent),                  "Name" },
-        { typeof(Transform2DComponent),           "Transform 2D" },
-        { typeof(SpriteRendererComponent),        "Sprite Renderer" },
-        { typeof(Camera2DComponent),              "Camera 2D" },
-        { typeof(Rigidbody2DComponent),           "Rigidbody 2D" },
-        { typeof(BoxCollider2DComponent),         "Box Collider 2D" },
-        { typeof(AudioSourceComponent),           "Audio Source" },
-        { typeof(FastBody2DComponent),            "Fast Body 2D" },
-        { typeof(FastBoxCollider2DComponent),     "Fast Box Collider 2D" },
-        { typeof(FastCircleCollider2DComponent),  "Fast Circle Collider 2D" },
-        { typeof(ParticleSystem2DComponent),      "Particle System 2D" },
+        { typeof(NameComponent),         "Name" },
+        { typeof(Transform2D),           "Transform 2D" },
+        { typeof(SpriteRenderer),        "Sprite Renderer" },
+        { typeof(Camera2D),              "Camera 2D" },
+        { typeof(Rigidbody2D),           "Rigidbody 2D" },
+        { typeof(BoxCollider2D),         "Box Collider 2D" },
+        { typeof(AudioSource),           "Audio Source" },
+        { typeof(FastBody2D),            "Fast Body 2D" },
+        { typeof(FastBoxCollider2D),     "Fast Box Collider 2D" },
+        { typeof(FastCircleCollider2D),  "Fast Circle Collider 2D" },
+        { typeof(ParticleSystem2D),      "Particle System 2D" },
     };
 
     private static string? GetNativeName<T>() where T : Component, new() => GetComponentName(typeof(T));
@@ -145,7 +143,7 @@ public class Entity : IEquatable<Entity>
         if (m_ComponentCache.Remove(type, out Component? cached))
             cached.Invalidate();
 
-        if (type == typeof(Transform2DComponent))
+        if (type == typeof(Transform2D))
             m_TransformComponent = null;
 
         if (!s_NativeComponentNames.ContainsKey(type))

@@ -110,7 +110,11 @@ namespace Axiom {
 		RenderingSettings RenderingSettings;
 
 	private:
+		// E20: explicit-dt overload — preferred path, called by ParticleUpdateSystem
+		// once per frame. Original parameterless Update() forwards to it using the
+		// global Application time as a fallback.
 		void Update();
+		void Update(float deltaTime);
 		const Transform2DComponent* TryGetEmitterTransform() const;
 		std::vector<Particle> m_Particles;
 		std::vector<Burst> m_Bursts;

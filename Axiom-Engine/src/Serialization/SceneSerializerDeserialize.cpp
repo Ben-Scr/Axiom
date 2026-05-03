@@ -27,6 +27,9 @@
 #include "Audio/AudioManager.hpp"
 #include "Physics/PhysicsTypes.hpp"
 #include "Core/Log.hpp"
+#include "Scene/SceneManager.hpp"
+#include "Scene/ComponentRegistry.hpp"
+#include "Scene/ComponentInfo.hpp"
 
 #include <cmath>
 #include <cctype>
@@ -466,6 +469,38 @@ namespace Axiom {
 				}
 			}
 
+			// ── Generic registry-driven serialize for package components ──
+			// Walk every type registered with the ComponentRegistry that has
+			// a non-null `serialize` callback. Built-in components don't set
+			// the callback (they're hardcoded above) so this loop only fires
+			// for components added via Package::RegisterSerializableComponent.
+			// Skips serializedNames already present in entityValue so a future
+			// migration of a built-in to the generic path won't double-write.
+			{
+				Entity entityWrapper = scene.GetEntity(entity);
+				SceneManager* sceneManager = &SceneManager::Get();
+				if (sceneManager) {
+					sceneManager->GetComponentRegistry().ForEachComponentInfo(
+						[&](const std::type_index&, const ComponentInfo& info) {
+							if (!info.serialize || !info.has || info.serializedName.empty()) return;
+							if (!info.has(entityWrapper)) return;
+							if (entityValue.FindMember(info.serializedName.c_str())) return;
+							try {
+								Value v = info.serialize(entityWrapper);
+								entityValue.AddMember(info.serializedName, std::move(v));
+							} catch (const std::exception& e) {
+								AIM_CORE_ERROR_TAG("SceneSerializer",
+									"Package component '{}' serialize threw: {}",
+									info.serializedName, e.what());
+							} catch (...) {
+								AIM_CORE_ERROR_TAG("SceneSerializer",
+									"Package component '{}' serialize threw an unknown exception",
+									info.serializedName);
+							}
+						});
+				}
+			}
+
 			return entityValue;
 		}
 
@@ -499,6 +534,36 @@ namespace Axiom {
 			RemoveObjectMember(value, "SceneGUID");
 			RemoveObjectMember(value, "PrefabGUID");
 			RemoveObjectMember(value, "uuid");
+		}
+
+		bool JsonEquivalent(const Value& left, const Value& right) {
+			return Json::Stringify(left, false) == Json::Stringify(right, false);
+		}
+
+		// Per-field recursive diff. Mirrors the implementation in SceneSerializer.cpp;
+		// duplicated here so RefreshPrefabInstance can run in this translation unit
+		// alongside ApplyOverrides without exposing internals through the header.
+		void BuildOverridePatch(const Value& prefabValue, const Value& instanceValue,
+			const std::string& prefix, Value& overrides) {
+			if (prefabValue.IsObject() && instanceValue.IsObject()) {
+				for (const auto& [key, instanceMember] : instanceValue.GetObject()) {
+					const Value* prefabMember = prefabValue.FindMember(key);
+					const std::string path = prefix.empty() ? key : prefix + "." + key;
+					if (prefabMember && prefabMember->IsObject() && instanceMember.IsObject()) {
+						BuildOverridePatch(*prefabMember, instanceMember, path, overrides);
+						continue;
+					}
+
+					if (!prefabMember || !JsonEquivalent(*prefabMember, instanceMember)) {
+						overrides.AddMember(path, instanceMember);
+					}
+				}
+				return;
+			}
+
+			if (!JsonEquivalent(prefabValue, instanceValue)) {
+				overrides.AddMember(prefix, instanceValue);
+			}
 		}
 
 		std::vector<std::string> SplitOverridePath(const std::string& path) {
@@ -1150,6 +1215,38 @@ namespace Axiom {
 			}
 		}
 
+		// ── Generic registry-driven deserialize for package components ──
+		// Mirror of the SerializeEntity sweep. For every registered type that
+		// has a non-null `deserialize` callback, look up the serializedName
+		// in the entity JSON; if present, ensure the component is added and
+		// hand the JSON value off to the registered deserializer.
+		{
+			Entity entityWrapper = scene.GetEntity(entity);
+			SceneManager* sceneManager = &SceneManager::Get();
+			if (sceneManager) {
+				sceneManager->GetComponentRegistry().ForEachComponentInfo(
+					[&](const std::type_index&, const ComponentInfo& info) {
+						if (!info.deserialize || !info.has || !info.add || info.serializedName.empty()) return;
+						const Value* compValue = entityValue.FindMember(info.serializedName.c_str());
+						if (!compValue) return;
+						try {
+							if (!info.has(entityWrapper)) {
+								info.add(entityWrapper);
+							}
+							info.deserialize(entityWrapper, *compValue);
+						} catch (const std::exception& e) {
+							AIM_CORE_ERROR_TAG("SceneSerializer",
+								"Package component '{}' deserialize threw: {}",
+								info.serializedName, e.what());
+						} catch (...) {
+							AIM_CORE_ERROR_TAG("SceneSerializer",
+								"Package component '{}' deserialize threw an unknown exception",
+								info.serializedName);
+						}
+					});
+			}
+		}
+
 		return entity;
 	}
 
@@ -1414,6 +1511,40 @@ namespace Axiom {
 			return true;
 		}
 
+		// Fallthrough: unknown built-in name. Check the registry for a
+		// package-registered component whose serializedName matches. Lets
+		// per-component overrides (single-component reset/replay paths) reach
+		// package components the same way they reach built-ins.
+		{
+			Entity entityWrapper = scene.GetEntity(entity);
+			SceneManager* sceneManager = &SceneManager::Get();
+			if (sceneManager) {
+				bool handled = false;
+				sceneManager->GetComponentRegistry().ForEachComponentInfo(
+					[&](const std::type_index&, const ComponentInfo& info) {
+						if (handled) return;
+						if (!info.deserialize || !info.has || !info.add) return;
+						if (info.serializedName != componentName) return;
+						try {
+							if (!info.has(entityWrapper)) {
+								info.add(entityWrapper);
+							}
+							info.deserialize(entityWrapper, componentValue);
+							handled = true;
+						} catch (const std::exception& e) {
+							AIM_CORE_ERROR_TAG("SceneSerializer",
+								"Package component '{}' deserialize (single) threw: {}",
+								info.serializedName, e.what());
+						} catch (...) {
+							AIM_CORE_ERROR_TAG("SceneSerializer",
+								"Package component '{}' deserialize (single) threw an unknown exception",
+								info.serializedName);
+						}
+					});
+				if (handled) return true;
+			}
+		}
+
 		return false;
 	}
 
@@ -1524,6 +1655,67 @@ namespace Axiom {
 		scene.DestroyEntity(entity);
 		scene.MarkDirty();
 		return replacement;
+	}
+
+	EntityHandle SceneSerializer::RefreshPrefabInstance(Scene& scene, EntityHandle existing,
+		const Json::Value& previousSourceEntityValue) {
+		if (existing == entt::null || !scene.IsValid(existing)) return entt::null;
+		if (scene.GetEntityOrigin(existing) != EntityOrigin::Prefab) return entt::null;
+
+		const uint64_t prefabGuid = static_cast<uint64_t>(scene.GetPrefabGUID(existing));
+		if (prefabGuid == 0) return entt::null;
+
+		// Pull the post-save source from disk. If it can't be loaded the prefab
+		// is gone (orphan); leave the instance untouched rather than corrupting it.
+		Value newSourceValue;
+		if (!LoadPrefabEntityValue(prefabGuid, newSourceValue)) {
+			return existing;
+		}
+		RemoveEntityIdentityMembers(newSourceValue);
+
+		// Diff the live instance against the OLD source — these are the per-field
+		// overrides the user wants to keep across the prefab edit.
+		Value oldSource = previousSourceEntityValue;
+		RemoveEntityIdentityMembers(oldSource);
+
+		Value currentInstance = SerializeEntity(scene, existing);
+		RemoveEntityIdentityMembers(currentInstance);
+
+		Value overrides = Value::MakeObject();
+		BuildOverridePatch(oldSource, currentInstance, {}, overrides);
+
+		// Apply the captured overrides on top of the new source. The wrapper
+		// shape matches what ApplyOverrides expects (an object with an
+		// "Overrides" member keyed by dot-path).
+		Value finalValue = newSourceValue;
+		Value overridesWrapper = Value::MakeObject();
+		overridesWrapper.AddMember("Overrides", std::move(overrides));
+		ApplyOverrides(finalValue, overridesWrapper);
+
+		// Replace the live instance. DeserializeFullEntity preserves Origin and
+		// PrefabGUID via the explicit args, so the new entity remains a tracked
+		// instance of the same prefab.
+		scene.DestroyEntity(existing);
+		return DeserializeFullEntity(scene, finalValue, EntityOrigin::Prefab, prefabGuid);
+	}
+
+	bool SceneSerializer::ComputeInstanceOverrides(Scene& scene, EntityHandle entity, Json::Value& outOverrides) {
+		outOverrides = Json::Value::MakeObject();
+		if (entity == entt::null || !scene.IsValid(entity)) return false;
+		if (scene.GetEntityOrigin(entity) != EntityOrigin::Prefab) return false;
+
+		const uint64_t prefabGuid = static_cast<uint64_t>(scene.GetPrefabGUID(entity));
+		if (prefabGuid == 0) return false;
+
+		Value sourceValue;
+		if (!LoadPrefabEntityValue(prefabGuid, sourceValue)) return false;
+		RemoveEntityIdentityMembers(sourceValue);
+
+		Value currentInstance = SerializeEntity(scene, entity);
+		RemoveEntityIdentityMembers(currentInstance);
+
+		BuildOverridePatch(sourceValue, currentInstance, {}, outOverrides);
+		return true;
 	}
 
 	EntityHandle SceneSerializer::LoadEntityFromFile(Scene& scene, const std::string& path) {

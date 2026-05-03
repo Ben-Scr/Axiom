@@ -36,7 +36,17 @@ namespace Axiom {
 	}
 
 	void ParticleSystem2DComponent::Update() {
-		float deltaTime = Application::GetInstance()->GetTime().GetDeltaTime();
+		// E20: fallback path — global time lookup retained for callers that
+		// don't have a dt handy (none in the engine after this fix, but keep
+		// for binary compatibility with packages/scripts).
+		Update(Application::GetInstance()->GetTime().GetDeltaTime());
+	}
+
+	void ParticleSystem2DComponent::Update(float deltaTime) {
+		// E20: dt-aware path — ParticleUpdateSystem passes the system's dt
+		// once per frame, eliminating the per-particle-system Application
+		// indirection (was Application::GetInstance()->GetTime().GetDeltaTime()
+		// per Update() call).
 		if (deltaTime == 0.f) return;
 
 		if (m_IsEmitting) {
@@ -78,7 +88,13 @@ namespace Axiom {
 		if (m_Particles.size() >= maxParticles)
 			return;
 
-		m_Particles.reserve(Clamp<uint32_t>(m_Particles.size() + count, 0, maxParticles));
+		// E20: reserve to MaxParticles once on first emission to eliminate
+		// the per-Emit growth-and-reallocate pattern. The previous incremental
+		// reserve (size + count) reallocated repeatedly as the buffer grew,
+		// invalidating Particle pointers and stalling the simulation loop.
+		if (m_Particles.capacity() < maxParticles) {
+			m_Particles.reserve(maxParticles);
+		}
 
 		while (count > 0) {
 			Particle particle;

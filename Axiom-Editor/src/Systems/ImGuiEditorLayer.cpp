@@ -30,6 +30,8 @@
 #include "Packages/GitHubSource.hpp"
 #include "Editor/ExternalEditor.hpp"
 #include "Gui/EditorIcons.hpp"
+#include "Gui/EditorTheme.hpp"
+#include "Assets/AssetRegistry.hpp"
 #include "Scripting/ScriptEngine.hpp"
 #include "Scripting/ScriptSystem.hpp"
 #include "Scripting/ScriptDiscovery.hpp"
@@ -167,6 +169,11 @@ namespace Axiom {
 			Log::OnLog.Remove(m_LogSubscriptionId);
 		}
 
+		// Profiler panel — initialize once when the editor layer attaches.
+		// Lazy first-render still loads project settings, so doing this
+		// before a project is loaded is fine.
+		m_ProfilerPanel.Initialize();
+
 		ClearLogEntries();
 		m_LogDispatchState = std::make_shared<LogDispatchState>();
 		std::weak_ptr<LogDispatchState> weakLogDispatchState = m_LogDispatchState;
@@ -184,6 +191,7 @@ namespace Axiom {
 
 	void ImGuiEditorLayer::OnDetach(Application& app) {
 		(void)app;
+		m_ProfilerPanel.Shutdown();
 		Application::SetGameInputEnabled(true);
 		Gizmo::SetShowInRuntime(true);
 		if (m_LogSubscriptionId.value != 0) {
@@ -227,16 +235,23 @@ namespace Axiom {
 			return;
 		}
 
-		if (input.GetKey(KeyCode::LeftControl) && input.GetKeyDown(KeyCode::C) && hasEntitySelection) {
+		// Use ImGui's KeyCtrl + IsKeyPressed instead of the raw Input wrapper —
+		// the engine's KeyCode::LeftControl misses RIGHT Ctrl (and Cmd on macOS),
+		// which is why the prior code silently failed for users on RHS keyboards.
+		// IsKeyPressed(_, repeat=false) also prevents auto-repeat from firing
+		// the action multiple times when the key is held. Same pattern as the
+		// Save shortcut wired up in ImGuiEditorLayerChrome.cpp.
+		const ImGuiIO& io = ImGui::GetIO();
+		if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_C, false) && hasEntitySelection) {
 			CopySelectedEntities(scene);
 		}
-		if (input.GetKey(KeyCode::LeftControl) && input.GetKeyDown(KeyCode::V)) {
+		if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_V, false)) {
 			PasteEntities(scene);
 		}
 		if (!hasEntitySelection) {
 			return;
 		}
-		if (input.GetKey(KeyCode::LeftControl) && input.GetKeyDown(KeyCode::D)) {
+		if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_D, false)) {
 			DuplicateSelectedEntity(scene);
 		}
 		if (input.GetKeyDown(KeyCode::Delete)) {
@@ -371,6 +386,14 @@ namespace Axiom {
 				ImGui::EndMenu();
 			}
 
+			ImGui::EndMenu();
+		}
+
+		// Tools — runtime/diagnostic utilities. Profiler panel is the
+		// first inhabitant; later additions (memory tracker, log filter,
+		// etc.) belong here too.
+		if (ImGui::BeginMenu("Tools")) {
+			ImGui::MenuItem("Profiler", "Ctrl+F6", &m_ShowProfiler);
 			ImGui::EndMenu();
 		}
 
@@ -759,6 +782,29 @@ namespace Axiom {
 		std::snprintf(m_EntityRenameBuffer, sizeof(m_EntityRenameBuffer), "%s", entity.GetName().c_str());
 	}
 
+	void ImGuiEditorLayer::UnpackSelectedPrefabs(Scene& scene) {
+		const std::vector<EntityHandle> selectedEntities = GetSelectedEntities(scene);
+		if (selectedEntities.empty()) {
+			return;
+		}
+
+		// Reusing SetEntityMetaData(EntityOrigin::Scene) is the canonical
+		// reverse of the create-prefab path: it clears PrefabGUID, drops the
+		// PrefabInstanceComponent, allocates a fresh SceneGUID, and marks
+		// the scene dirty when not playing — so unpack is the exact inverse
+		// of "drag entity to Asset Browser".
+		bool anyUnpacked = false;
+		for (EntityHandle entity : selectedEntities) {
+			if (!scene.IsValid(entity)) continue;
+			if (!scene.HasComponent<PrefabInstanceComponent>(entity)) continue;
+			scene.SetEntityMetaData(entity, EntityOrigin::Scene);
+			anyUnpacked = true;
+		}
+		if (anyUnpacked) {
+			scene.MarkDirty();
+		}
+	}
+
 	void ImGuiEditorLayer::CopySelectedEntities(Scene& scene) {
 		const std::vector<EntityHandle> selectedEntities = GetSelectedEntities(scene);
 		if (selectedEntities.empty()) {
@@ -1011,6 +1057,19 @@ namespace Axiom {
 					if (entityIsDisabled)
 						ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.5f, 0.5f));
 
+					// Prefab-instance tint: amber if the source GUID can't be resolved
+					// (orphaned), accent-blue otherwise. Engine is flat today so all
+					// prefab-origin entities get the same color — no root vs child
+					// distinction is possible until parent/child components land.
+					bool entityIsPrefabTinted = false;
+					if (!entityIsDisabled && scene.GetEntityOrigin(entityHandle) == EntityOrigin::Prefab) {
+						const uint64_t prefabGuid = static_cast<uint64_t>(scene.GetPrefabGUID(entityHandle));
+						const bool resolvable = prefabGuid != 0 && !AssetRegistry::ResolvePath(prefabGuid).empty();
+						ImGui::PushStyleColor(ImGuiCol_Text,
+							resolvable ? EditorTheme::Colors::PrefabInstance : EditorTheme::Colors::PrefabOrphan);
+						entityIsPrefabTinted = true;
+					}
+
 					if (m_RenamingEntity == entityHandle) {
 						m_EntityRenameFrameCounter++;
 
@@ -1137,9 +1196,28 @@ namespace Axiom {
 							BeginRenameSelectedEntity(scene);
 						}
 
+						// "Unpack Prefab" only shows up when at least one
+						// selected entity is currently a prefab instance —
+						// no point cluttering the menu otherwise.
+						bool anySelectedIsPrefabInstance = false;
+						for (EntityHandle h : GetSelectedEntities(scene)) {
+							if (scene.HasComponent<PrefabInstanceComponent>(h)) {
+								anySelectedIsPrefabInstance = true;
+								break;
+							}
+						}
+						if (anySelectedIsPrefabInstance) {
+							ImGui::Separator();
+							if (ImGui::MenuItem("Unpack Prefab")) {
+								UnpackSelectedPrefabs(scene);
+							}
+						}
+
 						ImGui::EndPopup();
 					}
 
+					if (entityIsPrefabTinted)
+						ImGui::PopStyleColor();
 					if (entityIsDisabled)
 						ImGui::PopStyleColor();
 
@@ -1242,10 +1320,30 @@ namespace Axiom {
 			ImGui::PopID();
 		}
 
+		// Pre-collect available systems so the button can be disabled when nothing
+		// can be added — avoids the empty-popup sliver that looks broken.
+		std::vector<EditorScriptDiscovery::ScriptEntry> scriptEntries;
+		EditorScriptDiscovery::CollectProjectScriptEntries(scriptEntries);
+		size_t availableSystemCount = 0;
+		for (const auto& entry : scriptEntries) {
+			if (entry.IsGameSystem && !scene.HasGameSystem(entry.ClassName)) {
+				++availableSystemCount;
+			}
+		}
+		const bool hasAvailableSystem = availableSystemCount > 0;
+
 		float buttonWidth = ImGui::GetContentRegionAvail().x;
+		if (!hasAvailableSystem) ImGui::BeginDisabled();
 		if (ImGui::Button("+ Add System", ImVec2(buttonWidth, 0))) {
 			ImGui::OpenPopup("AddSystemPopup");
 			m_SystemSearchBuffer[0] = '\0';
+		}
+		if (!hasAvailableSystem) {
+			ImGui::EndDisabled();
+			// AllowWhenDisabled so hover still fires after BeginDisabled.
+			if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+				ImGui::SetTooltip("No game systems available.\nCreate one via Asset Browser > Create > Scripting > GameSystem (C#).");
+			}
 		}
 
 		if (ImGui::BeginPopup("AddSystemPopup")) {
@@ -1257,8 +1355,6 @@ namespace Axiom {
 			std::string filter(m_SystemSearchBuffer);
 			std::transform(filter.begin(), filter.end(), filter.begin(), ::tolower);
 
-			std::vector<EditorScriptDiscovery::ScriptEntry> scriptEntries;
-			EditorScriptDiscovery::CollectProjectScriptEntries(scriptEntries);
 			for (const auto& scriptEntry : scriptEntries) {
 				if (!scriptEntry.IsGameSystem || scene.HasGameSystem(scriptEntry.ClassName)) {
 					continue;
@@ -1287,7 +1383,10 @@ namespace Axiom {
 	void ImGuiEditorLayer::RenderInspectorPanel(Scene& scene) {
 		ImGui::Begin("Inspector");
 
-		if (m_SelectedEntity == entt::null || !scene.IsValid(m_SelectedEntity)) {
+		// Materialize the selection set (filters dropped entities). When N == 0
+		// fall through to the asset / scene-systems panels exactly like before.
+		std::vector<EntityHandle> selectedHandles = GetSelectedEntities(scene);
+		if (selectedHandles.empty()) {
 			m_SelectedEntity = entt::null;
 			if (m_IsSceneNodeSelected) {
 				RenderSceneSystemsInspector(scene);
@@ -1301,45 +1400,99 @@ namespace Axiom {
 			return;
 		}
 
-		Entity entity = scene.GetEntity(m_SelectedEntity);
+		// Stable Entity wrappers for the selection — reused for the component
+		// intersection and passed to every multi-edit inspector below.
+		std::vector<Entity> selectedEntities;
+		selectedEntities.reserve(selectedHandles.size());
+		for (EntityHandle h : selectedHandles) {
+			selectedEntities.push_back(scene.GetEntity(h));
+		}
+		std::span<const Entity> entitySpan(selectedEntities);
+		Entity entity = selectedEntities[0]; // primary, used for the drag-source label and prefab buttons
 
-		// ── Entity Header: Name + Toggles + UUID ──────────────────
+		// Keep m_SelectedEntity pointed at a valid handle — some callers
+		// (prefab Apply / Revert, focus / duplicate / rename helpers) still
+		// index it directly.
+		if (!scene.IsValid(m_SelectedEntity)) {
+			m_SelectedEntity = entity.GetHandle();
+		}
 
-		// Editable Name
-		std::string entityName = entity.HasComponent<NameComponent>()
-			? entity.GetComponent<NameComponent>().Name : "Entity";
-		char nameBuf[256];
-		std::snprintf(nameBuf, sizeof(nameBuf), "%s", entityName.c_str());
+		// ── Entity Header: Name + Toggles ──────────────────
+
+		// Editable Name. With multi-select, mixed names display "—" via the
+		// hint and edits propagate to all entities (creating NameComponent
+		// when missing).
+		bool nameUniform = true;
+		std::string firstName = entity.HasComponent<NameComponent>()
+			? entity.GetComponent<NameComponent>().Name : std::string("Entity");
+		for (std::size_t i = 1; i < selectedEntities.size(); ++i) {
+			std::string n = selectedEntities[i].HasComponent<NameComponent>()
+				? selectedEntities[i].GetComponent<NameComponent>().Name : std::string("Entity");
+			if (n != firstName) { nameUniform = false; break; }
+		}
+		char nameBuf[256]{};
+		if (nameUniform) {
+			std::snprintf(nameBuf, sizeof(nameBuf), "%s", firstName.c_str());
+		}
 		ImGui::SetNextItemWidth(-1);
-		if (ImGui::InputText("##EntityName", nameBuf, sizeof(nameBuf), ImGuiInputTextFlags_EnterReturnsTrue)) {
-			if (entity.HasComponent<NameComponent>()) {
-				entity.GetComponent<NameComponent>().Name = nameBuf;
-			} else {
-				scene.AddComponent<NameComponent>(m_SelectedEntity, std::string(nameBuf));
+		const bool nameSubmitted = nameUniform
+			? ImGui::InputText("##EntityName", nameBuf, sizeof(nameBuf), ImGuiInputTextFlags_EnterReturnsTrue)
+			: ImGui::InputTextWithHint("##EntityName", "-", nameBuf, sizeof(nameBuf), ImGuiInputTextFlags_EnterReturnsTrue);
+		if (nameSubmitted) {
+			std::string newName(nameBuf);
+			for (Entity& e : selectedEntities) {
+				if (e.HasComponent<NameComponent>()) {
+					e.GetComponent<NameComponent>().Name = newName;
+				}
+				else {
+					scene.AddComponent<NameComponent>(e.GetHandle(), newName);
+				}
 			}
 			scene.MarkDirty();
 		}
 
-		// Toggles row: Enabled + Static
+		// Toggles row: Enabled + Static. Tri-state when the underlying tag
+		// presence differs across the selection. Editing applies to all.
 		{
-			bool isDisabled = entity.HasComponent<DisabledTag>();
-			bool isEnabled = !isDisabled;
-			if (ImGui::Checkbox("Enabled", &isEnabled)) {
-				if (isEnabled && entity.HasComponent<DisabledTag>())
-					entity.RemoveComponent<DisabledTag>();
-				else if (!isEnabled && !entity.HasComponent<DisabledTag>())
-					entity.AddComponent<DisabledTag>();
+			constexpr int kMixedValueFlag = 1 << 12;
+
+			auto sampleHas = [&](auto checkFn) -> std::pair<bool, bool> {
+				bool first = checkFn(selectedEntities[0]);
+				bool uniform = true;
+				for (std::size_t i = 1; i < selectedEntities.size(); ++i) {
+					if (checkFn(selectedEntities[i]) != first) {
+						uniform = false;
+						break;
+					}
+				}
+				return { first, uniform };
+			};
+
+			auto enabledSample = sampleHas([](Entity& e) { return !e.HasComponent<DisabledTag>(); });
+			bool isEnabled = enabledSample.first;
+			if (!enabledSample.second) ImGui::PushItemFlag(static_cast<ImGuiItemFlags>(kMixedValueFlag), true);
+			const bool enabledChanged = ImGui::Checkbox("Enabled", &isEnabled);
+			if (!enabledSample.second) ImGui::PopItemFlag();
+			if (enabledChanged) {
+				for (Entity& e : selectedEntities) {
+					if (isEnabled && e.HasComponent<DisabledTag>()) e.RemoveComponent<DisabledTag>();
+					else if (!isEnabled && !e.HasComponent<DisabledTag>()) e.AddComponent<DisabledTag>();
+				}
 				scene.MarkDirty();
 			}
 
 			ImGui::SameLine();
 
-			bool isStatic = entity.HasComponent<StaticTag>();
-			if (ImGui::Checkbox("Static", &isStatic)) {
-				if (isStatic && !entity.HasComponent<StaticTag>())
-					entity.AddComponent<StaticTag>();
-				else if (!isStatic && entity.HasComponent<StaticTag>())
-					entity.RemoveComponent<StaticTag>();
+			auto staticSample = sampleHas([](Entity& e) { return e.HasComponent<StaticTag>(); });
+			bool isStatic = staticSample.first;
+			if (!staticSample.second) ImGui::PushItemFlag(static_cast<ImGuiItemFlags>(kMixedValueFlag), true);
+			const bool staticChanged = ImGui::Checkbox("Static", &isStatic);
+			if (!staticSample.second) ImGui::PopItemFlag();
+			if (staticChanged) {
+				for (Entity& e : selectedEntities) {
+					if (isStatic && !e.HasComponent<StaticTag>()) e.AddComponent<StaticTag>();
+					else if (!isStatic && e.HasComponent<StaticTag>()) e.RemoveComponent<StaticTag>();
+				}
 				scene.MarkDirty();
 			}
 		}
@@ -1391,14 +1544,115 @@ namespace Axiom {
 
 		std::type_index pendingRemoval = typeid(void);
 
+		// Prefab override state for the inspector header / per-component badges.
+		// Computed once per frame for the primary entity when the selection is
+		// a single prefab instance. Multi-select + prefab overrides is out of
+		// scope for v1 — when more than one entity is selected the UI behaves
+		// as if no overrides exist (consistent with mixed-value semantics).
+		Json::Value prefabOverrides = Json::Value::MakeObject();
+		const bool isSinglePrefabInstance = selectedEntities.size() == 1
+			&& scene.GetEntityOrigin(entity.GetHandle()) == EntityOrigin::Prefab
+			&& static_cast<uint64_t>(scene.GetPrefabGUID(entity.GetHandle())) != 0;
+		bool prefabSourceResolvable = false;
+		if (isSinglePrefabInstance) {
+			prefabSourceResolvable = SceneSerializer::ComputeInstanceOverrides(
+				scene, entity.GetHandle(), prefabOverrides);
+		}
+
+		// Top-of-inspector prefab actions (only when the source resolves; orphans
+		// can't apply or revert because we have no source to diff against).
+		if (isSinglePrefabInstance && prefabSourceResolvable) {
+			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.42f, 0.66f, 0.95f, 1.0f));
+			ImGui::TextUnformatted("Prefab Instance");
+			ImGui::PopStyleColor();
+			if (ImGui::SmallButton("Apply All")) {
+				// Capture old source BEFORE the apply, then push instance state to disk
+				// and propagate to other live instances preserving their overrides.
+				const std::string prefabPath = AssetRegistry::ResolvePath(
+					static_cast<uint64_t>(scene.GetPrefabGUID(entity.GetHandle())));
+				Json::Value previousSourceEntity;
+				bool havePrev = false;
+				if (!prefabPath.empty() && File::Exists(prefabPath)) {
+					Json::Value previousRoot;
+					std::string parseError;
+					if (Json::TryParse(File::ReadAllText(prefabPath), previousRoot, &parseError) && previousRoot.IsObject()) {
+						if (const Json::Value* eb = previousRoot.FindMember("Entity")) { previousSourceEntity = *eb; havePrev = true; }
+						else if (const Json::Value* lb = previousRoot.FindMember("prefab")) { previousSourceEntity = *lb; havePrev = true; }
+					}
+				}
+				if (SceneSerializer::ApplyPrefabInstanceOverrides(scene, entity.GetHandle()) && havePrev) {
+					const uint64_t prefabGuid = static_cast<uint64_t>(scene.GetPrefabGUID(entity.GetHandle()));
+					SceneManager::Get().ForeachLoadedScene([&](Scene& s) {
+						std::vector<EntityHandle> targets;
+						auto view = s.GetRegistry().view<EntityMetaDataComponent>();
+						for (entt::entity e2 : view) {
+							const auto& meta = view.get<EntityMetaDataComponent>(e2).MetaData;
+							if (meta.Origin != EntityOrigin::Prefab) continue;
+							if (static_cast<uint64_t>(meta.PrefabGUID) != prefabGuid) continue;
+							if (e2 == entity.GetHandle() && &s == &scene) continue; // skip the just-applied entity
+							targets.push_back(e2);
+						}
+						bool anyRefreshed = false;
+						for (EntityHandle t : targets) {
+							if (SceneSerializer::RefreshPrefabInstance(s, t, previousSourceEntity) != entt::null) {
+								anyRefreshed = true;
+							}
+						}
+						if (anyRefreshed) s.MarkDirty();
+					});
+				}
+			}
+			ImGui::SameLine();
+			if (ImGui::SmallButton("Revert All")) {
+				EntityHandle replacement = SceneSerializer::RevertPrefabInstanceOverride(scene, entity.GetHandle(), {});
+				if (replacement != entt::null) {
+					SelectEntity(replacement);
+					m_EntityOrder.clear();
+				}
+			}
+			ImGui::Separator();
+		}
+		else if (isSinglePrefabInstance) {
+			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.70f, 0.30f, 1.0f));
+			ImGui::TextUnformatted("Prefab Instance (orphaned — source missing)");
+			ImGui::PopStyleColor();
+			ImGui::Separator();
+		}
+
+		// Lambda: do any override paths fall under this component's serializedName?
+		auto componentHasOverrides = [&](const std::string& serializedName) -> bool {
+			if (!prefabSourceResolvable || serializedName.empty()) return false;
+			const std::string prefix = serializedName + ".";
+			for (const auto& [path, _] : prefabOverrides.GetObject()) {
+				if (path == serializedName || path.compare(0, prefix.size(), prefix) == 0) return true;
+			}
+			return false;
+		};
+
+		// Collect components per their presence across the selection. Only
+		// components present on EVERY selected entity are shown; components
+		// present on some-but-not-all are listed in a muted footer line.
+		std::vector<std::string> hiddenPartialComponents;
+
 		registry.ForEachComponentInfo([&](const std::type_index& typeId, const ComponentInfo& info) {
 			if (info.category != ComponentCategory::Component) return;
 			if (info.displayName == "Name") return; // Shown in entity header
-			if (!info.has(entity)) return;
+
+			// Set-intersection check: skip when not all entities have it. If
+			// some have it and others don't, remember it for the footer.
+			std::size_t haveCount = 0;
+			for (const Entity& e : selectedEntities) {
+				if (info.has(e)) ++haveCount;
+			}
+			if (haveCount == 0) return;
+			if (haveCount < selectedEntities.size()) {
+				hiddenPartialComponents.push_back(info.displayName);
+				return;
+			}
 
 			// Scripts render their own per-script sections — skip the outer wrapper
 			if (info.displayName == "Scripts") {
-				if (info.drawInspector) info.drawInspector(entity);
+				if (info.drawInspector) info.drawInspector(entitySpan);
 				return;
 			}
 
@@ -1418,6 +1672,13 @@ namespace Axiom {
 				&& clipboardPayload.Data.IsObject();
 			const bool canSerializeComponent = !info.serializedName.empty();
 
+			const std::string componentSerializedName = info.serializedName;
+			const bool thisComponentOverridden = componentHasOverrides(componentSerializedName);
+
+			bool revertComponentRequested = false;
+			bool applyComponentRequested = false;
+			std::string revertFieldRequested; // empty = none
+
 			bool open = ImGuiUtils::BeginComponentSection(info.displayName.c_str(), removeRequested, [&]() {
 				if (ImGui::MenuItem("Copy Component", nullptr, false, canSerializeComponent)) {
 					copyRequested = true;
@@ -1428,9 +1689,47 @@ namespace Axiom {
 				if (ImGui::MenuItem("Reset Component", nullptr, false, canSerializeComponent)) {
 					resetRequested = true;
 				}
+				// Prefab override actions — only meaningful when this entity is a
+				// prefab instance whose source resolves AND this component has
+				// at least one diff against the source.
+				if (isSinglePrefabInstance && prefabSourceResolvable && thisComponentOverridden) {
+					ImGui::Separator();
+					if (ImGui::BeginMenu("Revert Field")) {
+						const std::string prefix = componentSerializedName + ".";
+						for (const auto& [path, _] : prefabOverrides.GetObject()) {
+							if (path != componentSerializedName && path.compare(0, prefix.size(), prefix) != 0) continue;
+							const char* leaf = path.c_str() + (path.size() > prefix.size() ? prefix.size() : 0);
+							if (ImGui::MenuItem(leaf)) {
+								revertFieldRequested = path;
+							}
+						}
+						ImGui::EndMenu();
+					}
+					if (ImGui::MenuItem("Revert Component")) {
+						revertComponentRequested = true;
+					}
+					if (ImGui::MenuItem("Apply Component")) {
+						applyComponentRequested = true;
+					}
+				}
 			});
 
-			// Component drag source on the header (attaches to the CollapsingHeader item)
+			// Override badge — colored dot drawn next to the section header to
+			// surface the diff at a glance. Sourced from EditorTheme so future
+			// theme changes don't require touching the inspector.
+			if (thisComponentOverridden) {
+				ImGui::SameLine();
+				ImGui::PushStyleColor(ImGuiCol_Text, EditorTheme::Colors::OverrideMarker);
+				ImGui::TextUnformatted(" *");
+				ImGui::PopStyleColor();
+				if (ImGui::IsItemHovered()) {
+					ImGui::SetTooltip("Component has per-field overrides relative to the source prefab.");
+				}
+			}
+
+			// Component drag source on the header. References the primary
+			// entity — useful when dragging onto a script field, since that
+			// field would only be able to hold one component reference anyway.
 			if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
 				const uint64_t entityRuntimeId = entity.GetRuntimeID();
 				std::string refStr = std::to_string(entityRuntimeId) + ":" + info.displayName;
@@ -1442,8 +1741,11 @@ namespace Axiom {
 			if (removeRequested) {
 				pendingRemoval = typeId;
 			}
+			// Copy serializes the primary entity. Paste / Reset apply to ALL
+			// selected entities — that matches the rest of the multi-edit
+			// behavior (each entity that lacks the component gets it added).
 			if (copyRequested && canSerializeComponent) {
-				Json::Value componentValue = SceneSerializer::SerializeComponent(scene, m_SelectedEntity, info.serializedName);
+				Json::Value componentValue = SceneSerializer::SerializeComponent(scene, entity.GetHandle(), info.serializedName);
 				if (!componentValue.IsNull()) {
 					Json::Value root = Json::Value::MakeObject();
 					root.AddMember("type", Json::Value("ComponentClipboard"));
@@ -1454,34 +1756,125 @@ namespace Axiom {
 				}
 			}
 			if (pasteRequested && canPasteComponent) {
-				if (!pastedComponentInfo->has(entity)) {
-					pastedComponentInfo->add(entity);
+				bool anyApplied = false;
+				for (const Entity& e : selectedEntities) {
+					if (!pastedComponentInfo->has(e)) {
+						pastedComponentInfo->add(e);
+					}
+					if (SceneSerializer::DeserializeComponent(scene, e.GetHandle(),
+						clipboardPayload.SerializedName, clipboardPayload.Data)) {
+						anyApplied = true;
+					}
 				}
-				if (SceneSerializer::DeserializeComponent(scene, m_SelectedEntity, clipboardPayload.SerializedName, clipboardPayload.Data)) {
-					scene.MarkDirty();
-				}
+				if (anyApplied) scene.MarkDirty();
 			}
 			if (resetRequested && canSerializeComponent) {
-				if (SceneSerializer::ResetComponent(scene, m_SelectedEntity, info.serializedName)) {
-					scene.MarkDirty();
+				bool anyReset = false;
+				for (const Entity& e : selectedEntities) {
+					if (SceneSerializer::ResetComponent(scene, e.GetHandle(), info.serializedName)) {
+						anyReset = true;
+					}
+				}
+				if (anyReset) scene.MarkDirty();
+			}
+
+			// Prefab override operations — single-instance only (multi-select
+			// composition is intentionally deferred). Revert paths destroy and
+			// re-create the entity, so the selection handle is refreshed below.
+			if (!revertFieldRequested.empty()) {
+				EntityHandle replacement = SceneSerializer::RevertPrefabInstanceOverride(
+					scene, entity.GetHandle(), revertFieldRequested);
+				if (replacement != entt::null) {
+					SelectEntity(replacement);
+					m_EntityOrder.clear();
+				}
+			}
+			if (revertComponentRequested) {
+				// Revert every override path under this component by walking the
+				// captured overrides set. Each revert call destroys + recreates,
+				// so we iterate paths first and only refresh the selection once.
+				const std::string prefix = componentSerializedName + ".";
+				std::vector<std::string> paths;
+				for (const auto& [path, _] : prefabOverrides.GetObject()) {
+					if (path == componentSerializedName || path.compare(0, prefix.size(), prefix) == 0) {
+						paths.push_back(path);
+					}
+				}
+				EntityHandle current = entity.GetHandle();
+				for (const std::string& p : paths) {
+					EntityHandle replacement = SceneSerializer::RevertPrefabInstanceOverride(scene, current, p);
+					if (replacement != entt::null) current = replacement;
+				}
+				SelectEntity(current);
+				m_EntityOrder.clear();
+			}
+			if (applyComponentRequested) {
+				// "Apply Component" pushes the whole instance state to source
+				// (no per-component partial save in v1) then propagates with
+				// override-preservation, matching Apply All. The granularity
+				// difference vs Apply All is purely UX framing.
+				const std::string prefabPath = AssetRegistry::ResolvePath(
+					static_cast<uint64_t>(scene.GetPrefabGUID(entity.GetHandle())));
+				Json::Value previousSourceEntity;
+				bool havePrev = false;
+				if (!prefabPath.empty() && File::Exists(prefabPath)) {
+					Json::Value previousRoot;
+					std::string parseError;
+					if (Json::TryParse(File::ReadAllText(prefabPath), previousRoot, &parseError) && previousRoot.IsObject()) {
+						if (const Json::Value* eb = previousRoot.FindMember("Entity")) { previousSourceEntity = *eb; havePrev = true; }
+						else if (const Json::Value* lb = previousRoot.FindMember("prefab")) { previousSourceEntity = *lb; havePrev = true; }
+					}
+				}
+				if (SceneSerializer::ApplyPrefabInstanceOverrides(scene, entity.GetHandle()) && havePrev) {
+					const uint64_t prefabGuid = static_cast<uint64_t>(scene.GetPrefabGUID(entity.GetHandle()));
+					SceneManager::Get().ForeachLoadedScene([&](Scene& s) {
+						std::vector<EntityHandle> targets;
+						auto view = s.GetRegistry().view<EntityMetaDataComponent>();
+						for (entt::entity e2 : view) {
+							const auto& meta = view.get<EntityMetaDataComponent>(e2).MetaData;
+							if (meta.Origin != EntityOrigin::Prefab) continue;
+							if (static_cast<uint64_t>(meta.PrefabGUID) != prefabGuid) continue;
+							if (e2 == entity.GetHandle() && &s == &scene) continue;
+							targets.push_back(e2);
+						}
+						bool anyRefreshed = false;
+						for (EntityHandle t : targets) {
+							if (SceneSerializer::RefreshPrefabInstance(s, t, previousSourceEntity) != entt::null) {
+								anyRefreshed = true;
+							}
+						}
+						if (anyRefreshed) s.MarkDirty();
+					});
 				}
 			}
 
 			if (open) {
 				if (info.drawInspector) {
-					info.drawInspector(entity);
+					info.drawInspector(entitySpan);
 				}
 				ImGuiUtils::EndComponentSection();
 			}
 		});
 
 		if (pendingRemoval != typeid(void)) {
+			// Remove from EVERY selected entity that has it.
 			registry.ForEachComponentInfo([&](const std::type_index& typeId, const ComponentInfo& info) {
-				if (typeId == pendingRemoval && info.remove) {
-					info.remove(entity);
+				if (typeId != pendingRemoval || !info.remove) return;
+				for (const Entity& e : selectedEntities) {
+					if (info.has(e)) info.remove(e);
 				}
 			});
 			scene.MarkDirty();
+		}
+
+		if (!hiddenPartialComponents.empty()) {
+			std::string text = "Hidden: ";
+			for (std::size_t i = 0; i < hiddenPartialComponents.size(); ++i) {
+				if (i > 0) text += ", ";
+				text += hiddenPartialComponents[i];
+			}
+			text += " - not on all selected";
+			ImGui::TextDisabled("%s", text.c_str());
 		}
 
 		ImGui::Spacing();
@@ -1493,6 +1886,23 @@ namespace Axiom {
 			ImGui::OpenPopup("AddComponentPopup");
 			m_ComponentSearchBuffer[0] = '\0';
 		}
+
+		// Add Component is offered as long as at least one selected entity is
+		// missing it (so the menu doesn't go empty when the selection happens
+		// to overlap on every component). Adding writes to every selected
+		// entity that doesn't already have the component.
+		auto componentMissingFromAny = [&](const ComponentInfo& info) -> bool {
+			for (const Entity& e : selectedEntities) {
+				if (!info.has(e)) return true;
+			}
+			return false;
+		};
+		auto addComponentToAll = [&](const ComponentInfo& info) {
+			for (const Entity& e : selectedEntities) {
+				if (!info.has(e)) info.add(e);
+			}
+			scene.MarkDirty();
+		};
 
 		if (ImGui::BeginPopup("AddComponentPopup")) {
 			ImGui::SetNextItemWidth(-1);
@@ -1512,15 +1922,14 @@ namespace Axiom {
 				registry.ForEachComponentInfo([&](const std::type_index&, const ComponentInfo& info) {
 					if (info.category != ComponentCategory::Component) return;
 					if (info.displayName == "Scripts") return;
-					if (info.has(entity)) return;
+					if (!componentMissingFromAny(info)) return;
 
 					std::string lowerName = info.displayName;
 					std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(), ::tolower);
 					if (lowerName.find(filter) == std::string::npos) return;
 
 					if (ImGuiUtils::MenuItemEllipsis(info.displayName, info.displayName.c_str(), nullptr, false, true, 260.0f)) {
-						info.add(entity);
-						scene.MarkDirty();
+						addComponentToAll(info);
 					}
 				});
 
@@ -1539,11 +1948,13 @@ namespace Axiom {
 					const std::string label = BuildScriptMenuLabel(scriptEntry);
 					const std::string path = scriptEntry.Path.string();
 					if (ImGuiUtils::MenuItemEllipsis(label, path.c_str(), nullptr, false, true, 260.0f)) {
-						if (scriptEntry.IsManagedComponent) {
-							AttachManagedComponentToEntity(entity, scene, scriptEntry);
-						}
-						else {
-							AttachScriptToEntity(entity, scene, scriptEntry);
+						for (const Entity& e : selectedEntities) {
+							if (scriptEntry.IsManagedComponent) {
+								AttachManagedComponentToEntity(const_cast<Entity&>(e), scene, scriptEntry);
+							}
+							else {
+								AttachScriptToEntity(const_cast<Entity&>(e), scene, scriptEntry);
+							}
 						}
 					}
 				}
@@ -1565,7 +1976,7 @@ namespace Axiom {
 				registry.ForEachComponentInfo([&](const std::type_index&, const ComponentInfo& info) {
 					if (info.category != ComponentCategory::Component) return;
 					if (info.displayName == "Scripts") return;
-					if (info.has(entity)) return;
+					if (!componentMissingFromAny(info)) return;
 
 					std::string sub = info.subcategory.empty() ? "General" : info.subcategory;
 					auto it = categoryIndex.find(sub);
@@ -1583,8 +1994,7 @@ namespace Axiom {
 					if (ImGui::TreeNode(subcategory.c_str())) {
 						for (const auto* info : components) {
 							if (ImGuiUtils::MenuItemEllipsis(info->displayName, info->displayName.c_str(), nullptr, false, true, 260.0f)) {
-								info->add(entity);
-								scene.MarkDirty();
+								addComponentToAll(*info);
 							}
 						}
 						ImGui::TreePop();
@@ -1605,14 +2015,24 @@ namespace Axiom {
 							if (!scriptEntry.IsManagedComponent || scriptEntry.IsGameSystem || scriptEntry.IsGlobalSystem) {
 								continue;
 							}
-							if (entity.HasComponent<ScriptComponent>()
-								&& entity.GetComponent<ScriptComponent>().HasManagedComponent(scriptEntry.ClassName)) {
-								continue;
+							// Hide entries already attached to every entity in
+							// the selection — leave it visible if at least one
+							// entity is missing it.
+							bool missingFromAny = false;
+							for (const Entity& e : selectedEntities) {
+								if (!e.HasComponent<ScriptComponent>()
+									|| !e.GetComponent<ScriptComponent>().HasManagedComponent(scriptEntry.ClassName)) {
+									missingFromAny = true;
+									break;
+								}
 							}
+							if (!missingFromAny) continue;
 							const std::string label = BuildScriptMenuLabel(scriptEntry);
 							const std::string path = scriptEntry.Path.string();
 							if (ImGuiUtils::MenuItemEllipsis(label, path.c_str(), nullptr, false, true, 260.0f)) {
-								AttachManagedComponentToEntity(entity, scene, scriptEntry);
+								for (const Entity& e : selectedEntities) {
+									AttachManagedComponentToEntity(const_cast<Entity&>(e), scene, scriptEntry);
+								}
 							}
 						}
 						ImGui::TreePop();
@@ -1629,7 +2049,9 @@ namespace Axiom {
 							const std::string label = BuildScriptMenuLabel(scriptEntry);
 							const std::string path = scriptEntry.Path.string();
 							if (ImGuiUtils::MenuItemEllipsis(label, path.c_str(), nullptr, false, true, 260.0f)) {
-								AttachScriptToEntity(entity, scene, scriptEntry);
+								for (const Entity& e : selectedEntities) {
+									AttachScriptToEntity(const_cast<Entity&>(e), scene, scriptEntry);
+								}
 							}
 						}
 						ImGui::TreePop();
@@ -1650,11 +2072,13 @@ namespace Axiom {
 					if (scriptEntry.IsGameSystem || scriptEntry.IsGlobalSystem) {
 						continue;
 					}
-					if (scriptEntry.IsManagedComponent) {
-						AttachManagedComponentToEntity(entity, scene, scriptEntry);
-					}
-					else {
-						AttachScriptToEntity(entity, scene, scriptEntry);
+					for (const Entity& e : selectedEntities) {
+						if (scriptEntry.IsManagedComponent) {
+							AttachManagedComponentToEntity(const_cast<Entity&>(e), scene, scriptEntry);
+						}
+						else {
+							AttachScriptToEntity(const_cast<Entity&>(e), scene, scriptEntry);
+						}
 					}
 				}
 			}

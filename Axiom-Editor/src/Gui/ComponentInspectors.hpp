@@ -1,20 +1,22 @@
 #pragma once
 #include "Scene/Entity.hpp"
 
+#include <span>
+
 namespace Axiom {
 
-	void DrawNameComponentInspector(Entity entity);
-	void DrawTransform2DInspector(Entity entity);
-	void DrawRigidbody2DInspector(Entity entity);
-	void DrawSpriteRendererInspector(Entity entity);
-	void DrawCamera2DInspector(Entity entity);
-	void DrawParticleSystem2DInspector(Entity entity);
-	void DrawBoxCollider2DInspector(Entity entity);
-	void DrawAudioSourceInspector(Entity entity);
+	void DrawNameComponentInspector(std::span<const Entity> entities);
+	void DrawTransform2DInspector(std::span<const Entity> entities);
+	void DrawRigidbody2DInspector(std::span<const Entity> entities);
+	void DrawSpriteRendererInspector(std::span<const Entity> entities);
+	void DrawCamera2DInspector(std::span<const Entity> entities);
+	void DrawParticleSystem2DInspector(std::span<const Entity> entities);
+	void DrawBoxCollider2DInspector(std::span<const Entity> entities);
+	void DrawAudioSourceInspector(std::span<const Entity> entities);
 
 	// Axiom-Physics inspectors
-	void DrawFastBody2DInspector(Entity entity);
-	void DrawFastBoxCollider2DInspector(Entity entity);
-	void DrawFastCircleCollider2DInspector(Entity entity);
+	void DrawFastBody2DInspector(std::span<const Entity> entities);
+	void DrawFastBoxCollider2DInspector(std::span<const Entity> entities);
+	void DrawFastCircleCollider2DInspector(std::span<const Entity> entities);
 
 } // namespace Axiom

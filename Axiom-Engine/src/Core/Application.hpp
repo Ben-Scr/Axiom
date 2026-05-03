@@ -102,11 +102,20 @@ namespace Axiom {
 		static bool IsPaused() { return s_Instance ? s_Instance->IsEnginePaused() : false; }
 		static bool IsShuttingDown() { return s_Instance ? s_Instance->m_IsShuttingDown : false; }
 
+		// ─── Editor-only access surface (H12) ────────────────────────────
+		// The methods below exist to let an editor host pause gameplay and
+		// gate game-input independently of the editor UI. They are no-ops in
+		// a standalone runtime but ship in the engine DLL today. A future
+		// refactor should push them behind a friend `ApplicationEditorAccess`
+		// struct in a header consumed only by Axiom-Editor; until then, treat
+		// as unstable in the public surface.
+
 		/// Pauses only gameplay (scene updates, physics, audio) while keeping the editor responsive.
 		static void SetPlaymodePaused(bool paused) { if (s_Instance) s_Instance->m_IsPlaymodePaused = paused; }
 		static bool IsPlaymodePaused() { return s_Instance ? s_Instance->m_IsPlaymodePaused : false; }
 		static void SetGameInputEnabled(bool enabled) { if (s_Instance) s_Instance->m_IsGameInputEnabled = enabled; }
 		static bool IsGameInputEnabled() { return s_Instance ? s_Instance->m_IsGameInputEnabled : true; }
+		// ─── End editor-only access surface ──────────────────────────────
 
 		/// Signals a quit request that can be intercepted (e.g. to show a save dialog).
 		static void RequestQuit();
@@ -191,6 +200,12 @@ namespace Axiom {
 		std::vector<std::string> m_PendingFileDrops;
 		double m_FixedUpdateAccumulator;
 		std::chrono::steady_clock::time_point m_LastFrameTime = Clock::now();
+		// Set at the end of each frame (after EndFrame returns). The next
+		// frame's main loop reads this to compute the "VSync" bucket =
+		// time spent between frames (sleep / spin / SwapBuffers wait).
+		// Default-constructed (epoch) on first frame, in which case the
+		// vsync bucket reads as 0 for that frame.
+		std::chrono::steady_clock::time_point m_LastFrameEndTime{};
 		LayerStack m_LayerStack;
 		EventBus m_EventBus;
 

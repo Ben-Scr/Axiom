@@ -16,17 +16,46 @@
 #include "Systems/AudioUpdateSystem.hpp"
 #include "Systems/ParticleUpdateSystem.hpp"
 #include "Core/Application.hpp"
+#include "Core/ApplicationConfig.hpp"
 #include "Events/SceneEvents.hpp"
+#include "Graphics/TextureManager.hpp"
+#include "Audio/AudioManager.hpp"
 #include "Serialization/Json.hpp"
 #include "Serialization/SceneSerializer.hpp"
 
 
 namespace Axiom {
 	namespace {
+		// Reach the live ApplicationConfig via Application::GetInstance().
+		// GetConfiguration() returns by value (the user-supplied virtual), so we
+		// also return by value here — taking a reference to the temporary would
+		// dangle past the function return. Pulling the config in here (rather
+		// than threading it through RegisterScene) keeps the public API stable.
+		ApplicationConfig GetActiveAppConfig() {
+			Application* app = Application::GetInstance();
+			return app ? app->GetConfiguration() : ApplicationConfig{};
+		}
+
 		void AddStandardSceneSystems(SceneDefinition& definition) {
-			definition.AddSystem<ParticleUpdateSystem>();
-			definition.AddSystem<ScriptSystem>();
-			definition.AddSystem<AudioUpdateSystem>();
+			const ApplicationConfig config = GetActiveAppConfig();
+
+			// ParticleUpdateSystem only does useful work when there's a renderer
+			// to issue draws — skip it for headless / non-rendering apps.
+			if (config.EnableRenderer2D) {
+				definition.AddSystem<ParticleUpdateSystem>();
+			}
+
+			// ScriptSystem.Awake bails when scripting is off, but adding the
+			// system at all still has bookkeeping cost in every scene; gate it.
+			if (config.EnableScripting) {
+				definition.AddSystem<ScriptSystem>();
+			}
+
+			// AudioUpdateSystem is a no-op without an AudioManager, but its
+			// per-frame Update still walks the entity registry — gate it.
+			if (config.EnableAudio) {
+				definition.AddSystem<AudioUpdateSystem>();
+			}
 		}
 	}
 
@@ -48,17 +77,9 @@ namespace Axiom {
 
 		m_IsInitialized = true;
 		RegisterCoreComponents();
-		InitializeStartupScenes();
-
-		if (m_LoadedScenes.empty() && !m_SceneDefinitionOrder.empty()) {
-			const std::string& fallbackScene = m_SceneDefinitionOrder.front();
-			if (LoadScene(fallbackScene).expired()) {
-				AIM_CORE_ERROR_TAG("SceneManager", "Failed to load fallback scene '{}'", fallbackScene);
-			}
-			else {
-				AIM_CORE_WARN_TAG("SceneManager", "Loaded fallback scene '{}'", fallbackScene);
-			}
-		}
+		// Startup scenes are loaded by Application AFTER PackageHost::LoadAll
+		// so that package-registered component types (e.g. Tilemap2DComponent)
+		// are present in the registry before scene deserialization runs.
 	}
 
 	void SceneManager::RegisterCoreComponents() {
@@ -381,6 +402,27 @@ namespace Axiom {
 			ReleaseScene(it);
 			it = m_LoadedScenes.begin();
 		}
+
+		// Partial-fix for the H2 asset-leak issue: between scene changes
+		// (the !includePersistent path — full unload happens via Shutdown
+		// instead), sweep the asset tables for entries no live Scene's
+		// component still references and free them. This is a defensive
+		// linear scan, not reference counting, but it stops the monotonic
+		// growth across reloads. We deliberately skip the includePersistent
+		// path because that's the Shutdown route and the manager-level
+		// Shutdowns already nuke their own state.
+		if (!includePersistent) {
+			Application* app = Application::GetInstance();
+			if (app) {
+				const ApplicationConfig config = app->GetConfiguration();
+				if (config.EnableTextureManager) {
+					TextureManager::PurgeUnreferenced();
+				}
+				if (config.EnableAudio) {
+					AudioManager::PurgeUnreferenced();
+				}
+			}
+		}
 	}
 
 	std::vector<std::weak_ptr<Scene>> SceneManager::GetLoadedScenes() {
@@ -461,6 +503,11 @@ namespace Axiom {
 	}
 
 	void SceneManager::InitializeStartupScenes() {
+		if (!m_IsInitialized) {
+			AIM_CORE_ERROR_TAG("SceneManager", "InitializeStartupScenes called before Initialize");
+			return;
+		}
+
 		for (const std::string& name : m_SceneDefinitionOrder) {
 			auto definitionIt = m_SceneDefinitions.find(name);
 			if (definitionIt == m_SceneDefinitions.end()) {
@@ -484,6 +531,16 @@ namespace Axiom {
 			}
 			catch (...) {
 				AIM_CORE_ERROR_TAG("SceneManager", "Failed to load startup scene '{}'", name);
+			}
+		}
+
+		if (m_LoadedScenes.empty() && !m_SceneDefinitionOrder.empty()) {
+			const std::string& fallbackScene = m_SceneDefinitionOrder.front();
+			if (LoadScene(fallbackScene).expired()) {
+				AIM_CORE_ERROR_TAG("SceneManager", "Failed to load fallback scene '{}'", fallbackScene);
+			}
+			else {
+				AIM_CORE_WARN_TAG("SceneManager", "Loaded fallback scene '{}'", fallbackScene);
 			}
 		}
 	}

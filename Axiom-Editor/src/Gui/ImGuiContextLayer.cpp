@@ -3,10 +3,13 @@
 #include "Core/Application.hpp"
 #include "Core/Assert.hpp"
 #include "Core/Window.hpp"
+#include "Packages/PackageImGuiBridge.hpp"
 
 #include <imgui.h>
 #include <backends/imgui_impl_glfw.h>
 #include <backends/imgui_impl_opengl3.h>
+
+#include <algorithm>
 
 namespace Axiom {
 
@@ -23,14 +26,48 @@ namespace Axiom {
 		IMGUI_CHECKVERSION();
 		ImGui::CreateContext();
 
+		// Publish our ImGui context + allocator to package DLLs. Without
+		// this, any package that links ImGui statically (every engine_core
+		// package today) gets its own null GImGui and crashes on the first
+		// inspector ImGui call. Packages pick this up lazily on first use
+		// via PackageImGuiBridge::GetContext.
+		{
+			ImGuiMemAllocFunc allocFn = nullptr;
+			ImGuiMemFreeFunc  freeFn = nullptr;
+			void* userData = nullptr;
+			ImGui::GetAllocatorFunctions(&allocFn, &freeFn, &userData);
+			PackageImGuiBridge::Publish(
+				reinterpret_cast<void*>(ImGui::GetCurrentContext()),
+				reinterpret_cast<void*>(allocFn),
+				reinterpret_cast<void*>(freeFn),
+				userData);
+		}
+
 		ImGuiIO& io = ImGui::GetIO();
 		io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
-		io.ConfigWindowsResizeFromEdges = false;
+		// Edge-resize left at default (true). Forcing it false combined with the
+		// transparent ResizeGrip colors below made undocked floating windows
+		// effectively non-resizable.
+
+		// One-time HiDPI scale captured from the window's monitor. Applied below
+		// to the default font and to the theme via ScaleAllSizes. Mid-session
+		// monitor moves are not handled — wire glfwSetWindowContentScaleCallback
+		// if that becomes a real symptom.
+		float xScale = 1.0f, yScale = 1.0f;
+		glfwGetWindowContentScale(glfwWindow, &xScale, &yScale);
+		const float dpiScale = std::max(1.0f, xScale);
+
+		ImFontConfig fontCfg;
+		fontCfg.SizePixels = 13.0f * dpiScale;
+		io.Fonts->AddFontDefault(&fontCfg);
 
 		AIM_VERIFY(ImGui_ImplGlfw_InitForOpenGL(glfwWindow, true), "Failed to init glfw for imgui!");
 		AIM_VERIFY(ImGui_ImplOpenGL3_Init("#version 330 core"), "Failed to init openGL3 for imgui!");
 
 		ApplyAxiomTheme();
+		// Must run after the theme — ScaleAllSizes is multiplicative on the
+		// current style values.
+		ImGui::GetStyle().ScaleAllSizes(dpiScale);
 
 		m_IsInitialized = true;
 	}
@@ -43,6 +80,7 @@ namespace Axiom {
 
 		ImGui_ImplOpenGL3_Shutdown();
 		ImGui_ImplGlfw_Shutdown();
+		PackageImGuiBridge::Clear();
 		ImGui::DestroyContext();
 
 		m_IsInitialized = false;

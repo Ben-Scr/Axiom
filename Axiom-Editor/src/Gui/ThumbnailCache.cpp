@@ -7,15 +7,32 @@ namespace Axiom {
 
 	void ThumbnailCache::Initialize() {
 		m_Cache.clear();
+		m_LRU.clear();
 	}
 
 	void ThumbnailCache::Shutdown() {
 		Clear();
 	}
 
+	void ThumbnailCache::TouchLru(std::unordered_map<std::string, CachedThumbnail>::iterator it) {
+		// E31: O(1) splice — moves the existing list node to the front without
+		// invalidating the iterator stored in the cache entry.
+		m_LRU.splice(m_LRU.begin(), m_LRU, it->second.LruIt);
+	}
+
+	void ThumbnailCache::EnforceCapacity() {
+		// E31: evict least-recently-used (back of list) until under the cap.
+		while (m_Cache.size() > k_MaxEntries && !m_LRU.empty()) {
+			const std::string& victim = m_LRU.back();
+			m_Cache.erase(victim);
+			m_LRU.pop_back();
+		}
+	}
+
 	unsigned int ThumbnailCache::GetThumbnail(const std::string& absolutePath) {
 		auto it = m_Cache.find(absolutePath);
 		if (it != m_Cache.end()) {
+			TouchLru(it); // E31: lookup counts as recent use
 			return it->second.GlHandle;
 		}
 
@@ -37,20 +54,27 @@ namespace Axiom {
 			true
 		);
 
+		// E31: insert path at front of LRU first, then store the iterator on the
+		// cache entry so subsequent lookups can splice without re-finding.
+		auto lruIt = m_LRU.insert(m_LRU.begin(), absolutePath);
+
 		if (!tex->IsValid()) {
 			// Cache a null entry so we don't retry
-			m_Cache[absolutePath] = { nullptr, 0 };
+			m_Cache[absolutePath] = { nullptr, 0, lruIt };
+			EnforceCapacity();
 			return 0;
 		}
 
 		unsigned int handle = tex->GetHandle();
-		m_Cache[absolutePath] = { std::move(tex), handle };
+		m_Cache[absolutePath] = { std::move(tex), handle, lruIt };
+		EnforceCapacity();
 		return handle;
 	}
 
 	Texture2D* ThumbnailCache::GetCacheEntry(const std::string& absolutePath) {
 		auto it = m_Cache.find(absolutePath);
 		if (it != m_Cache.end() && it->second.Texture) {
+			TouchLru(it); // E31: lookup counts as recent use
 			return it->second.Texture.get();
 		}
 		return nullptr;
@@ -59,12 +83,14 @@ namespace Axiom {
 	void ThumbnailCache::Invalidate(const std::string& absolutePath) {
 		auto it = m_Cache.find(absolutePath);
 		if (it != m_Cache.end()) {
+			m_LRU.erase(it->second.LruIt); // E31: keep LRU and map in sync
 			m_Cache.erase(it);
 		}
 	}
 
 	void ThumbnailCache::Clear() {
 		m_Cache.clear();
+		m_LRU.clear();
 	}
 
 	AssetType ThumbnailCache::GetAssetType(const std::string& extension) {

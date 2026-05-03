@@ -49,6 +49,19 @@ namespace Axiom {
 		// is set. Empty vector + missing JSON field == legacy "scan everything" mode.
 		std::vector<std::string> Packages;
 
+		// Profiler — per-project preferences. Read at Load(), written at Save().
+		// All fields are optional in axiom-project.json; missing values keep the
+		// defaults below. The "ModuleEnabled" map is only populated for modules
+		// the user has explicitly toggled (so newly-added engine modules default
+		// to enabled without forcing a settings migration).
+		struct ProfilerSettings {
+			bool EnableInRuntime = false; // Ctrl+F6 panel in shipped runtime; off by default
+			bool TrackInBackground = false; // collect even with the panel closed
+			int  SamplingHz = 60;
+			int  TrackingSpan = 200;
+			std::vector<std::pair<std::string, bool>> ModuleEnabled;
+		} Profiler;
+
 		std::string GetUserAssemblyOutputPath(std::string_view configuration = {}) const;
 		std::string GetNativeDllPath() const;
 		std::string GetSceneFilePath(const std::string& sceneName) const;
@@ -93,6 +106,14 @@ namespace Axiom {
 
 		// Run MSBuild on the engine's Axiom.sln. Returns process result. Caller should
 		// call RegenerateSolutionForProject first if the project's package list changed.
+		//
+		// IMPORTANT: by default this builds the WHOLE solution — including Axiom-Engine,
+		// Axiom-Editor, Axiom-Launcher, Axiom-Runtime. If the *running process* has any
+		// of those DLLs loaded (it always does — the launcher has Axiom-Engine.dll
+		// loaded for its own runtime), MSBuild's link step will fail with LNK1104 on
+		// the locked .ilk/.dll. For the common project-create / project-open path,
+		// prefer the overload taking explicit targets and pass only the project-local
+		// package projects (`Pkg.<Name>.Native`, `Pkg.<Name>`).
 		struct BuildResult {
 			bool   Succeeded = false;
 			int    ExitCode = -1;
@@ -100,6 +121,19 @@ namespace Axiom {
 		};
 		static BuildResult BuildSolution(const std::string& configuration = "Debug",
 			const std::string& platform = "x64");
+
+		// Selective build: passes -t:<target1>;<target2>;... to MSBuild so only the
+		// listed projects get built. Empty target list is a no-op (returns Success
+		// with no MSBuild invocation). Use this for project-local-package builds
+		// where the engine itself is already up to date and shouldn't be relinked.
+		static BuildResult BuildSolutionTargets(const std::vector<std::string>& targets,
+			const std::string& configuration = "Debug",
+			const std::string& platform = "x64");
+
+		// Enumerate names of axiom-package.lua manifests under <projectRoot>/Packages/.
+		// Returns the directory names (which is the package name by convention).
+		// Empty vector when the project has no Packages/ subdir or no manifests in it.
+		static std::vector<std::string> EnumerateProjectLocalPackages(const std::string& projectRoot);
 
 		// Convenience: regenerate + build for a project in one call. Stops early on
 		// regen failure; build runs only if regen succeeds (or if premake was missing,

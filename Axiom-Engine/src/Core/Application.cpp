@@ -13,8 +13,25 @@
 #include "Audio/AudioManager.hpp"
 #include "Events/EventDispatcher.hpp"
 #include "Events/WindowEvents.hpp"
+#include "Graphics/TextureManager.hpp"
 #include "Physics/PhysicsSystem2D.hpp"
+#include "Profiling/Profiler.hpp"
+#include "Scene/Scene.hpp"
 #include "Scripting/ScriptEngine.hpp"
+
+#ifdef AIM_PLATFORM_WINDOWS
+// E21: bring in windows.h + winmm for timeBeginPeriod/timeEndPeriod (used to
+// raise the system timer resolution to 1ms during the app lifetime so the
+// frame-cap sleep_until below stops undershooting). winmm.lib is already
+// linked by the project; psapi is only needed by the profiler block.
+#  include <windows.h>
+#  include <timeapi.h>
+#  pragma comment(lib, "winmm.lib")
+#  ifdef AXIOM_PROFILER_ENABLED
+#    include <psapi.h>
+#    pragma comment(lib, "psapi.lib")
+#  endif
+#endif
 #include <Utils/Timer.hpp>
 #include <Utils/StringHelper.hpp>
 
@@ -91,22 +108,36 @@ namespace Axiom {
 				}
 				auto now = Clock::now();
 
+				// "VSync" bucket — accumulates time spent waiting between frames.
+				// Two contributors: the soft frame-cap idle below (when v-sync is
+				// off) and the hard SwapBuffers wait (when v-sync is on). Since
+				// SwapBuffers happens inside RenderPipelineOnly which we don't
+				// instrument, we approximate by measuring the gap between when
+				// last frame's render completed and when we resume here. That
+				// gap is what the user perceives as "the frame is paced".
+				const auto vsyncStart = m_LastFrameEndTime != Clock::time_point{}
+					? m_LastFrameEndTime
+					: now;
+
 				// CPU idling for runtime fps caps. The editor renders Game View pacing separately.
+				// E21: replaced the previous "sleep_until(target - 10ms) + busy yield"
+				// pattern with a single sleep_until(target - 1ms). On Windows the
+				// system timer resolution is raised to 1ms via timeBeginPeriod(1)
+				// in Initialize() (released in Shutdown()), so sleep_until's
+				// undershoot collapses to ~1ms — well within tolerance for a
+				// frame cap and far cheaper than a per-iteration yield syscall.
 				if (m_Configuration.UseTargetFrameRateForMainLoop && targetFps > 0.0f && (!m_Window->IsVsync() || IsEnginePaused()))
 				{
 					auto const nextFrameTime = m_LastFrameTime + targetFrameTime;
-					auto const idleStart = Clock::now();
 
-					if (now + std::chrono::milliseconds(10) < nextFrameTime)
-						std::this_thread::sleep_until(nextFrameTime - std::chrono::milliseconds(10));
-
-					while (Clock::now() < nextFrameTime) {
-						std::this_thread::yield();
+					if (now + std::chrono::milliseconds(1) < nextFrameTime) {
+						std::this_thread::sleep_until(nextFrameTime - std::chrono::milliseconds(1));
 					}
 				}
 
 
 				auto frameStart = Clock::now();
+				const float vsyncMs = std::chrono::duration<float, std::milli>(frameStart - vsyncStart).count();
 				float deltaTime = std::chrono::duration<float>(frameStart - m_LastFrameTime).count();
 
 				if (deltaTime >= 0.25f) {
@@ -115,6 +146,17 @@ namespace Axiom {
 				}
 
 				try {
+					// One zone per whole frame. The macro expands to a Tracy
+					// ZoneScopedN("Frame") AND an in-engine ring-buffer push
+					// (the panel reads from the latter). Both are no-ops
+					// when the profiler is stripped.
+					AXIOM_PROFILE_SCOPE("Frame");
+
+					// FPS + Frame Time both derived from this single dt so
+					// they can never drift apart — no separate measurement
+					// for either.
+					Profiler::PushFrameDelta(deltaTime);
+
 					m_Time.Update(deltaTime);
 
 					m_FixedUpdateAccumulator += m_Time.GetDeltaTime();
@@ -139,6 +181,65 @@ namespace Axiom {
 
 					m_LastFrameTime = frameStart;
 					m_Time.AdvanceFrameCount();
+
+#ifdef AXIOM_PROFILER_ENABLED
+					// VSync (between-frame idle) — measured at top of next frame
+					// against m_LastFrameEndTime. Small enough that we don't want
+					// to gate it; the profiler's per-module cadence handles that.
+					AXIOM_PROFILE_VALUE("VSync", vsyncMs);
+
+					// Memory category. Total Memory = process working set;
+					// Texture Memory = sum of loaded texture pixels (RGBA8);
+					// Object Count = live entity count across all loaded scenes.
+#  ifdef AIM_PLATFORM_WINDOWS
+					{
+						PROCESS_MEMORY_COUNTERS pmc{};
+						if (GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc))) {
+							AXIOM_PROFILE_VALUE("Total Memory", float(pmc.WorkingSetSize / (1024 * 1024)));
+						}
+					}
+#  endif
+					{
+						const std::size_t textureBytes = TextureManager::GetTotalTextureMemoryBytes();
+						AXIOM_PROFILE_VALUE("Texture Memory", float(textureBytes / (1024 * 1024)));
+					}
+
+					// Object Count: sum of live entities across loaded scenes.
+					{
+						std::size_t totalEntities = 0;
+						if (m_SceneManager) {
+							m_SceneManager->ForeachLoadedScene([&totalEntities](Scene& scene) {
+								auto& entityStorage = scene.GetRegistry().storage<entt::entity>();
+								totalEntities += entityStorage.free_list();
+							});
+						}
+						AXIOM_PROFILE_VALUE("Object Count", float(totalEntities));
+					}
+
+					// Audio category.
+					AXIOM_PROFILE_VALUE("Playing Sources", float(AudioManager::GetActiveSoundCount()));
+
+					// "Others" residual: total Frame Time minus the four named
+					// CPU buckets we already attributed. Surfaces work that's
+					// not in Render/Scripts/Physics/VSync — engine overhead,
+					// glfwPollEvents, Time::Update, layer dispatching, etc.
+					{
+						const float frameMs    = Profiler::GetCurrentValue("Frame Time");
+						const float renderMs   = Profiler::GetCurrentValue("Rendering");
+						const float scriptsMs  = Profiler::GetCurrentValue("Scripts");
+						const float physicsMs  = Profiler::GetCurrentValue("Physics");
+						const float others = frameMs - renderMs - scriptsMs - physicsMs - vsyncMs;
+						AXIOM_PROFILE_VALUE("Others", std::max(0.0f, others));
+					}
+#endif
+
+					// End-of-frame Tracy mark + sampling-cadence advance.
+					AXIOM_PROFILE_FRAME("Frame");
+
+					// Stamp end-of-frame for next iteration's VSync measurement.
+					// Has to be the very last thing in the try block — anything
+					// after it eats into the bucket.
+					m_LastFrameEndTime = Clock::now();
 				}
 				catch (const std::exception& e) {
 					m_IsRenderingFrame = false;
@@ -160,8 +261,21 @@ namespace Axiom {
 	}
 
 	void Application::Initialize() {
+#ifdef AIM_PLATFORM_WINDOWS
+		// E21: raise the Windows system timer resolution to 1ms once at app
+		// init so sleep_until in the frame-cap path is accurate. Paired with
+		// timeEndPeriod(1) in Shutdown(). Do NOT call this per frame.
+		timeBeginPeriod(1);
+#endif
 		m_Configuration = GetConfiguration();
 		SetName(m_Configuration.WindowSpecification.Title);
+
+		// Profiler comes up first — it has no GL/window dependencies and
+		// every later subsystem can already emit AXIOM_PROFILE_SCOPE marks
+		// during its own init. Stripped builds skip this entire block.
+#ifdef AXIOM_PROFILER_ENABLED
+		Profiler::Initialize();
+#endif
 
 		Timer timer = Timer();
 		Window::Initialize();
@@ -174,15 +288,17 @@ namespace Axiom {
 		OpenGL::Initialize(GLInitSpecifications(Color::Background(), GLCullingMode::GLBack));
 		AIM_INFO_TAG("OpenGL", "Initialization took " + StringHelper::ToString(timer));
 
-		timer.Reset();
-		m_Renderer2D = std::make_unique<Renderer2D>();
-		m_Renderer2D->Initialize();
-		m_Renderer2D->SetSceneProvider([this](const std::function<void(const Scene&)>& fn) {
-			if (m_SceneManager) {
-				m_SceneManager->ForeachLoadedScene(fn);
-			}
-			});
-		AIM_INFO_TAG("Renderer2D", "Initialization took " + StringHelper::ToString(timer));
+		if (m_Configuration.EnableRenderer2D) {
+			timer.Reset();
+			m_Renderer2D = std::make_unique<Renderer2D>();
+			m_Renderer2D->Initialize();
+			m_Renderer2D->SetSceneProvider([this](const std::function<void(const Scene&)>& fn) {
+				if (m_SceneManager) {
+					m_SceneManager->ForeachLoadedScene(fn);
+				}
+				});
+			AIM_INFO_TAG("Renderer2D", "Initialization took " + StringHelper::ToString(timer));
+		}
 
 		if (m_Configuration.EnableGizmoRenderer) {
 			timer.Reset();
@@ -205,9 +321,11 @@ namespace Axiom {
 			AIM_INFO_TAG("PhysicsSystem", "Initialization took " + StringHelper::ToString(timer));
 		}
 
-		timer.Reset();
-		TextureManager::Initialize();
-		AIM_INFO_TAG("TextureManager", "Initialization took " + StringHelper::ToString(timer));
+		if (m_Configuration.EnableTextureManager) {
+			timer.Reset();
+			TextureManager::Initialize();
+			AIM_INFO_TAG("TextureManager", "Initialization took " + StringHelper::ToString(timer));
+		}
 
 		if (m_Configuration.EnableAudio) {
 			timer.Reset();
@@ -240,15 +358,25 @@ namespace Axiom {
 			}
 		}
 
-		// Load Axiom packages discovered next to the running executable. Each package's
-		// AxiomPackage_OnLoad runs once here so packages can register with engine
-		// subsystems (script bindings, component types, etc.) before Start().
-		PackageHost::LoadAll();
+		if (m_Configuration.EnablePackageHost) {
+			// Load Axiom packages discovered next to the running executable. Each package's
+			// AxiomPackage_OnLoad runs once here so packages can register with engine
+			// subsystems (script bindings, component types, etc.) before Start().
+			// MUST run before InitializeStartupScenes so package-registered
+			// component types are present when scene deserialization runs.
+			PackageHost::LoadAll();
+		}
+
+		// Load startup scenes AFTER package registration so package components
+		// (e.g. Tilemap2DComponent) round-trip through the deserialize sweep
+		// in SceneSerializerDeserialize.cpp.
+		m_SceneManager->InitializeStartupScenes();
 
 		ScriptEngine::RaiseApplicationStart();
 	}
 
 	void Application::BeginFrame() {
+		AXIOM_PROFILE_SCOPE("Application::BeginFrame");
 		m_IsRenderingFrame = true;
 
 		CoreInput();
@@ -296,6 +424,7 @@ namespace Axiom {
 	}
 
 	void Application::EndFrame() {
+		AXIOM_PROFILE_SCOPE("Application::EndFrame");
 		if (!IsEnginePaused()) {
 			RenderPipelineOnly();
 		}
@@ -385,6 +514,10 @@ namespace Axiom {
 
 		if (m_SceneManager) m_SceneManager->FixedUpdateScenes();
 		if (m_PhysicsSystem2D) m_PhysicsSystem2D->FixedUpdate(m_Time.GetFixedDeltaTime());
+		// H7: GlobalSystem.OnFixedUpdate dispatch — paired with the per-scene
+		// FixedUpdate above. Runs after physics so global systems observe
+		// transforms already synced from the physics step.
+		ScriptEngine::FixedUpdateGlobalSystems();
 	}
 
 	void Application::EndFixedFrame() { }
@@ -502,10 +635,16 @@ namespace Axiom {
 		m_EventBus.Clear();
 		m_LayerStack.Clear();
 
+		// H10: PackageHost::UnloadAll() must run AFTER every subsystem that
+		// could call into package code. Packages may register components,
+		// script bindings, or other callbacks; FreeLibrary'ing them while
+		// any subsystem still holds those callbacks is a recipe for use-
+		// after-unmap. Order here: scenes/scripts down first (they invoke
+		// on_destroy hooks that may live in package code), then engine
+		// resource managers, then PackageHost::UnloadAll() *last*.
 		if (m_SceneManager) m_SceneManager->Shutdown();
 		if (ScriptEngine::IsInitialized()) ScriptEngine::Shutdown();
-		PackageHost::UnloadAll();
-		TextureManager::Shutdown();
+		if (m_Configuration.EnableTextureManager) TextureManager::Shutdown();
 
 		if (m_PhysicsSystem2D) m_PhysicsSystem2D->Shutdown();
 		if (m_GuiRenderer) m_GuiRenderer->Shutdown();
@@ -514,6 +653,10 @@ namespace Axiom {
 
 		if (AudioManager::IsInitialized())
 			AudioManager::Shutdown();
+
+		// H10: PackageHost teardown is the last subsystem call. By this
+		// point no engine callback table or registry holds package code.
+		if (m_Configuration.EnablePackageHost) PackageHost::UnloadAll();
 
 		if (m_Window) {
 			m_Window->SetEventCallback({});
@@ -528,6 +671,18 @@ namespace Axiom {
 		m_Renderer2D.reset();
 		m_PhysicsSystem2D.reset();
 		m_Window.reset();
+
+#ifdef AXIOM_PROFILER_ENABLED
+		// Profiler comes down last so anything destructed above could still
+		// emit AXIOM_PROFILE_SCOPE marks during teardown without segfaulting
+		// on the static module table.
+		Profiler::Shutdown();
+#endif
+
+#ifdef AIM_PLATFORM_WINDOWS
+		// E21: pair to the timeBeginPeriod(1) in Initialize().
+		timeEndPeriod(1);
+#endif
 
 		m_ShouldQuit = false;
 		m_QuitRequested = false;

@@ -53,6 +53,14 @@ namespace Axiom {
 		}
 
 		static AABB FromTransform(const Transform2DComponent& transform) {
+			// E15: fast-path the rotation == 0 case (overwhelmingly common for
+			// sprites/particles). The exact-zero check skips IsAxisAligned's
+			// fmod + 5-element abs loop entirely; AABB collapses to
+			// Position +/- Scale*0.5.
+			if (transform.Rotation == 0.0f) {
+				const Vec2 halfExtents{ transform.Scale.x * 0.5f, transform.Scale.y * 0.5f };
+				return { transform.Position - halfExtents, transform.Position + halfExtents };
+			}
 			if (IsAxisAligned(transform.Rotation)) {
 				return AABB::Create(
 					Vec2(transform.Position.x, transform.Position.y),

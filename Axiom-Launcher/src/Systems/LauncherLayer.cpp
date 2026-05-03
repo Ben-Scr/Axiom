@@ -193,9 +193,7 @@ namespace Axiom {
 	// ── Lifecycle ───────────────────────────────────────────────────
 
 	void LauncherLayer::OnAttach(Application& app) {
-		if (app.GetRenderer2D()) {
-			app.GetRenderer2D()->SetSkipBeginFrameRender(true);
-		}
+		(void)app;
 		Application::SetIsPlaying(false);
 
 		m_Registry.Load();
@@ -277,16 +275,34 @@ namespace Axiom {
 				updateProgress(0.05f, "Creating project...");
 				AxiomProject project = AxiomProject::Create(name, location, updateProgress);
 
+				// Project-local packages affect the engine solution, so we regenerate. If
+				// the project has no packages, regen is still cheap and keeps the solution
+				// in sync with the latest engine package set — no rebuild follows.
 				updateProgress(0.55f, "Regenerating engine solution...");
 				AxiomProject::RegenerateResult regen = AxiomProject::RegenerateSolutionForProject(project.RootDirectory);
 				if (!regen.Succeeded && regen.ExitCode != -1) {
 					AIM_WARN_TAG("Launcher", "Solution regeneration returned non-zero ({}); continuing anyway.", regen.ExitCode);
 				}
 
-				updateProgress(0.65f, "Building engine solution (this may take a moment)...");
-				AxiomProject::BuildResult engineBuild = AxiomProject::BuildSolution();
-				if (!engineBuild.Succeeded) {
-					AIM_WARN_TAG("Launcher", "Engine solution build failed (exit code {}); continuing anyway. Build manually via Visual Studio for full functionality.", engineBuild.ExitCode);
+				// CRITICAL: do NOT call BuildSolution() here — that would try to relink
+				// Axiom-Engine.dll while the launcher process holds it loaded, failing with
+				// LNK1104 on the locked .ilk. Engine binaries are already present from
+				// Setup.bat / Visual Studio. Build only the project-local package projects
+				// (if any) — those are new artifacts the engine doesn't have yet.
+				const std::vector<std::string> packageNames =
+					AxiomProject::EnumerateProjectLocalPackages(project.RootDirectory);
+				if (!packageNames.empty()) {
+					updateProgress(0.65f, "Building project-local packages...");
+					std::vector<std::string> targets;
+					targets.reserve(packageNames.size() * 2);
+					for (const std::string& pkg : packageNames) {
+						targets.push_back("Pkg." + pkg + ".Native");
+						targets.push_back("Pkg." + pkg);
+					}
+					AxiomProject::BuildResult pkgBuild = AxiomProject::BuildSolutionTargets(targets);
+					if (!pkgBuild.Succeeded) {
+						AIM_WARN_TAG("Launcher", "Project-local package build failed (exit code {}); continuing anyway.", pkgBuild.ExitCode);
+					}
 				}
 
 				updateProgress(0.90f, "Compiling starter scripts...");
@@ -927,11 +943,25 @@ namespace Axiom {
 			return;
 		}
 
-		setStage("Building engine solution (incremental MSBuild)...", 0.40f);
-		AxiomProject::BuildResult build = AxiomProject::BuildSolution();
-		if (!build.Succeeded) {
-			fail("Engine build failed (MSBuild exit code " + std::to_string(build.ExitCode) + ").");
-			return;
+		// Build ONLY the project-local packages — never the engine itself. The launcher
+		// has Axiom-Engine.dll loaded; rebuilding it from this same process would fail
+		// with LNK1104 on the locked .ilk file. Engine binaries are already in place
+		// from Setup.bat. Projects without packages need zero MSBuild work.
+		const std::vector<std::string> packageNames =
+			AxiomProject::EnumerateProjectLocalPackages(entry.path);
+		if (!packageNames.empty()) {
+			setStage("Building project-local packages...", 0.40f);
+			std::vector<std::string> targets;
+			targets.reserve(packageNames.size() * 2);
+			for (const std::string& pkg : packageNames) {
+				targets.push_back("Pkg." + pkg + ".Native");
+				targets.push_back("Pkg." + pkg);
+			}
+			AxiomProject::BuildResult build = AxiomProject::BuildSolutionTargets(targets);
+			if (!build.Succeeded) {
+				fail("Project package build failed (MSBuild exit code " + std::to_string(build.ExitCode) + ").");
+				return;
+			}
 		}
 
 		setStage("Launching editor...", 0.90f);

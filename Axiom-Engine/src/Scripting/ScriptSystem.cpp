@@ -8,6 +8,7 @@
 #include "Physics/Collision2D.hpp"
 #include "Core/Log.hpp"
 #include "Core/Application.hpp"
+#include "Profiling/Profiler.hpp"
 #include "Serialization/Path.hpp"
 #include "Project/ProjectManager.hpp"
 
@@ -17,6 +18,9 @@
 #include <exception>
 #include <filesystem>
 #include <optional>
+#include <regex>
+#include <sstream>
+#include <string>
 
 #if defined(AIM_PLATFORM_WINDOWS)
 #define WIN32_LEAN_AND_MEAN
@@ -749,11 +753,53 @@ namespace Axiom {
 	void ScriptSystem::Awake(Scene& scene)
 	{
 		m_LastScene = &scene;
+
+		// Per-binary scripting opt-out. Processes that aren't going to run
+		// game logic (the launcher in particular) set EnableScripting=false
+		// in their ApplicationConfig — that lets us skip CoreCLR init and,
+		// crucially, NOT load Axiom-ScriptCore.dll. Loading the DLL holds an
+		// OS file lock for the process's lifetime, which blocks the editor
+		// from rebuilding ScriptCore while the launcher is still running.
+		auto* app = Application::GetInstance();
+		if (app && !app->GetConfiguration().EnableScripting) {
+			return;
+		}
+
 		++m_ActiveSystemCount;
 		if (m_PollingOwner == nullptr) {
 			m_PollingOwner = this;
 		}
 		if (m_ActiveSystemCount > 1) {
+			// Subsequent scenes still need OnAwake fired for their own
+			// ScriptComponents. The engine and assemblies are already
+			// initialized by the first scene's Awake.
+			if (ScriptEngine::IsInitialized())
+			{
+				ScriptSceneScope sceneScope(scene);
+				auto awakeView = scene.GetRegistry().view<ScriptComponent>(entt::exclude<DisabledTag>);
+				for (auto [entity, scriptComp] : awakeView.each())
+				{
+					for (auto& instance : scriptComp.Scripts)
+					{
+						if (instance.GetClassName().empty()) continue;
+						if (instance.GetType() == ScriptType::Native) continue;
+
+						if (!instance.IsBound()) {
+							instance.Bind(entity);
+						}
+						if (!instance.HasManagedInstance() && ScriptEngine::ClassExists(instance.GetClassName()))
+						{
+							uint32_t handle = ScriptEngine::CreateScriptInstance(instance.GetClassName(), entity);
+							if (handle != 0) {
+								instance.SetGCHandle(handle);
+							}
+						}
+						if (instance.HasManagedInstance()) {
+							ScriptEngine::InvokeAwake(instance.GetGCHandle());
+						}
+					}
+				}
+			}
 			return;
 		}
 
@@ -909,12 +955,55 @@ namespace Axiom {
 		}
 
 		AIM_INFO_TAG("ScriptSystem", "Script system initialized");
+
+		// ── EntityScript OnAwake dispatch (first scene to initialize) ─
+		// Bind any ScriptComponent instances eagerly so OnAwake fires before
+		// the first Update. The C# side guards against double-fire via its
+		// own per-instance HasAwoken flag, so re-entry from script reload is
+		// safe.
+		if (ScriptEngine::IsInitialized())
+		{
+			ScriptSceneScope sceneScope(scene);
+			auto awakeView = scene.GetRegistry().view<ScriptComponent>(entt::exclude<DisabledTag>);
+			for (auto [entity, scriptComp] : awakeView.each())
+			{
+				for (auto& instance : scriptComp.Scripts)
+				{
+					if (instance.GetClassName().empty()) continue;
+					if (instance.GetType() == ScriptType::Native) continue;
+
+					if (!instance.IsBound()) {
+						instance.Bind(entity);
+					}
+					if (!instance.HasManagedInstance() && ScriptEngine::ClassExists(instance.GetClassName()))
+					{
+						uint32_t handle = ScriptEngine::CreateScriptInstance(instance.GetClassName(), entity);
+						if (handle != 0) {
+							instance.SetGCHandle(handle);
+						}
+					}
+					if (instance.HasManagedInstance()) {
+						ScriptEngine::InvokeAwake(instance.GetGCHandle());
+					}
+				}
+			}
+		}
 	}
 
 	// ── C# rebuild ─────────────────────────────────────────────────────
 
 	void ScriptSystem::RebuildAndReloadScripts()
 	{
+		// Drop rebuild requests once the application has begun shutting down.
+		// FileWatcher events can fire during teardown (the OS is still
+		// notifying us about file changes that happened before Stop()), and
+		// kicking off MSBuild here just produces the lock-contention bug
+		// where MSBuild can't write the new .dll because we (or our peer
+		// process) still has it loaded.
+		if (Application::IsShuttingDown()) {
+			m_RebuildQueued = false;
+			return;
+		}
 		if (m_RebuildTask) {
 			m_RebuildQueued = true;
 			return;
@@ -944,6 +1033,11 @@ namespace Axiom {
 
 	void ScriptSystem::RebuildAndReloadNativeScripts()
 	{
+		// See RebuildAndReloadScripts — same shutdown-window race.
+		if (Application::IsShuttingDown()) {
+			m_NativeRebuildQueued = false;
+			return;
+		}
 		if (m_NativeRebuildTask) {
 			m_NativeRebuildQueued = true;
 			return;
@@ -1263,8 +1357,38 @@ namespace Axiom {
 			{
 				m_LastRebuildFailed = true;
 				AIM_ERROR_TAG("ScriptSystem", "C# build failed (exit code {})", result.ExitCode);
+				// E28: Split dotnet build output into structured per-diagnostic log entries
+				// instead of dumping the entire stdout as one wall-of-text error.
 				if (!result.Output.empty()) {
-					AIM_ERROR_TAG("ScriptSystem", "{}", result.Output);
+					static const std::regex s_ErrorPattern(R"(error CS\d+:)");
+					static const std::regex s_WarningPattern(R"(warning CS\d+:)");
+
+					std::istringstream stream(result.Output);
+					std::string line;
+					std::string otherLines;
+					while (std::getline(stream, line)) {
+						if (!line.empty() && line.back() == '\r') {
+							line.pop_back();
+						}
+						if (line.empty()) {
+							continue;
+						}
+						if (std::regex_search(line, s_ErrorPattern)) {
+							AIM_ERROR_TAG("ScriptSystem", "{}", line);
+						}
+						else if (std::regex_search(line, s_WarningPattern)) {
+							AIM_WARN_TAG("ScriptSystem", "{}", line);
+						}
+						else {
+							if (!otherLines.empty()) {
+								otherLines.push_back('\n');
+							}
+							otherLines.append(line);
+						}
+					}
+					if (!otherLines.empty()) {
+						AIM_TRACE_TAG("ScriptSystem", "dotnet build output:\n{}", otherLines);
+					}
 				}
 			}
 
@@ -1351,6 +1475,7 @@ namespace Axiom {
 
 	void ScriptSystem::Update(Scene& scene)
 	{
+		AXIOM_PROFILE_SCOPE("Scripts");
 		m_LastScene = &scene;
 		ScriptSceneScope sceneScope(scene);
 		const bool managedRuntimeReady = ScriptEngine::IsInitialized();
@@ -1468,6 +1593,44 @@ namespace Axiom {
 						instance.Unbind();
 						continue;
 					}
+				}
+			}
+		}
+	}
+
+	// H7: FixedUpdate dispatch — fires OnFixedUpdate on every bound script
+	// instance. Mirrors the structure of Update but skips the bind/start
+	// bookkeeping, since FixedUpdate only runs after Update has already
+	// brought the instance through Bind / OnStart at least once. Instances
+	// that haven't started yet are silently skipped this tick; they'll fire
+	// their first OnFixedUpdate the tick after their first OnStart lands.
+	void ScriptSystem::FixedUpdate(Scene& scene)
+	{
+		AXIOM_PROFILE_SCOPE("Scripts.FixedUpdate");
+		const bool managedRuntimeReady = ScriptEngine::IsInitialized();
+		const float fixedDt = Application::GetInstance() ? Application::GetInstance()->GetTime().GetFixedDeltaTime() : 0.0f;
+
+		auto view = scene.GetRegistry().view<ScriptComponent>(entt::exclude<DisabledTag>);
+		for (auto [entity, scriptComp] : view.each())
+		{
+			for (auto& instance : scriptComp.Scripts)
+			{
+				if (instance.GetClassName().empty() || !instance.IsBound() || !instance.HasStarted()) continue;
+
+				if (instance.GetType() == ScriptType::Managed)
+				{
+					if (!managedRuntimeReady || !instance.HasManagedInstance()) continue;
+					ScriptEngine::InvokeFixedUpdate(instance.GetGCHandle());
+				}
+				else if (instance.GetType() == ScriptType::Native)
+				{
+					if (IsTaskRunning(m_NativeRebuildTask) || !instance.HasNativeInstance()) continue;
+					NativeScript* nativeInstance = instance.GetNativePtr();
+					if (!nativeInstance) continue;
+					// Native scripts don't have OnFixedUpdate yet (mirrors C# side
+					// being the first-class scripting surface); this is the
+					// future hook site. (void) silences -Wunused.
+					(void)fixedDt;
 				}
 			}
 		}

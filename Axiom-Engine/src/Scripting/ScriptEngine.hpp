@@ -75,9 +75,17 @@ namespace Axiom {
 
 		static void InitializeGlobalSystems(const std::vector<std::string>& classNames);
 		static void UpdateGlobalSystems();
+		static void FixedUpdateGlobalSystems();
 		static void ShutdownGlobalSystems();
 		static void SetGlobalSystemEnabled(const std::string& className, bool enabled);
 		static bool GlobalSystemClassExists(const std::string& className);
+
+		// ── New lifecycle thunks (appended for binary compat) ──
+		static void InvokeAwake(uint32_t handle);
+		static void InvokeFixedUpdate(uint32_t handle);
+		static void InvokeGameSystemAwake(uint32_t handle);
+		static void InvokeGameSystemFixedUpdate(uint32_t handle);
+		static void InvokeGlobalSystemFixedUpdate(uint32_t handle);
 
 		static const ManagedCallbacks& GetCallbacks() { return s_Callbacks; }
 

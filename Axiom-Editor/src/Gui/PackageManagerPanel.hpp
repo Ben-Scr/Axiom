@@ -37,12 +37,17 @@ namespace Axiom {
 		// Floating add-package windows opened from the "+" button's drop-down menu.
 		void RenderGitInstallWindow();
 		void RenderNuGetInstallWindow();
+		// "Create new package" wizard — wraps `scripts/NewPackage.py` so the editor
+		// and CLI go through the exact same scaffolding code path.
+		void RenderNewPackageWindow();
+		void HandleNewPackageCreate();
 		// Disk-install runs inline (folder picker → install → done), no window.
 		void HandleDiskInstall();
 
 		// ── Installed tab sections ─────────────────────────────────────────────────
 		void RenderInstalledAxiomPackagesSection();
 		void RenderInstalledUserPackagesSection();
+		void RenderInstalledNuGetPackagesSection();
 
 		// ── Shared helpers ─────────────────────────────────────────────────────────
 		void RefreshManifestsIfDirty();
@@ -120,7 +125,22 @@ namespace Axiom {
 		// Floating-window state for the "+" menu options.
 		bool m_ShowGitInstallWindow = false;
 		bool m_ShowNuGetInstallWindow = false;
+		bool m_ShowNewPackageWindow = false;
 		char m_GitHubUrlBuffer[512]{};
+
+		// "Create new package" wizard state. Layer flags map onto
+		// scripts/NewPackage.py's --layers tokens; the target radio decides
+		// whether the package is created in the engine packages tree or under
+		// the active project's Packages/ folder (the latter is force-disabled
+		// when no project is open).
+		char m_NewPackageNameBuffer[128]{};
+		char m_NewPackageDescriptionBuffer[256]{};
+		bool m_NewPackageLayerNative = true;
+		bool m_NewPackageLayerStandalone = false;
+		bool m_NewPackageLayerCsharp = false;
+		int  m_NewPackageTarget = 0; // 0 = engine packages/, 1 = <project>/Packages/
+		bool m_NewPackageIsCreating = false;
+		std::string m_NewPackageError;
 
 		// Status strip at the bottom of the panel
 		std::string m_StatusMessage;

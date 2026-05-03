@@ -11,6 +11,7 @@
 #include "Core/Log.hpp"
 #include "Editor/ExternalEditor.hpp"
 #include <imgui.h>
+#include <imgui_internal.h>
 #include <algorithm>
 #include "Gui/EditorIcons.hpp"
 #include <cctype>
@@ -142,7 +143,7 @@ namespace Axiom {
 		if (ext == ".cs")                                                    return "asset_cs";
 		if (ext == ".cpp" || ext == ".c" || ext == ".h" || ext == ".hpp")    return "asset_cpp";
 		if (ext == ".scene" || ext == ".axiom")                               return "asset_scene";
-		if (ext == ".prefab")                                                return "asset_scene";
+		if (ext == ".prefab")                                                return "asset_prefab";
 		if (ext == ".txt" || ext == ".cfg" || ext == ".ini" ||
 			ext == ".yaml" || ext == ".toml" || ext == ".xml" ||
 			ext == ".json" || ext == ".lua")                                 return "asset_txt";
@@ -201,6 +202,58 @@ namespace Axiom {
 			return m_SelectedPath == path;
 		}
 		return std::find(m_SelectedPaths.begin(), m_SelectedPaths.end(), path) != m_SelectedPaths.end();
+	}
+
+	bool AssetBrowser::IsPathInCutClipboard(const std::string& path) const {
+		if (!m_AssetClipboardCut) return false;
+		return std::find(m_AssetClipboardPaths.begin(), m_AssetClipboardPaths.end(), path) != m_AssetClipboardPaths.end();
+	}
+
+	bool AssetBrowser::TryCreatePrefabFromHierarchyDrop(const ImGuiPayload* payload, const std::string& targetDirectory) {
+		if (!payload || payload->DataSize != sizeof(int) + sizeof(uint32_t)) {
+			return false;
+		}
+
+		// Hierarchy panel drag payload — must match ImGuiEditorLayer.cpp.
+		struct HierarchyDragData { int Index; uint32_t EntityHandle; };
+		const auto* dragData = static_cast<const HierarchyDragData*>(payload->Data);
+		const entt::entity entityHandle = static_cast<entt::entity>(dragData->EntityHandle);
+
+		Scene* scene = SceneManager::Get().GetActiveScene();
+		if (!scene || !scene->IsValid(entityHandle)) {
+			return false;
+		}
+
+		std::string entityName = "Entity";
+		if (scene->HasComponent<NameComponent>(entityHandle)) {
+			const std::string& sourceName = scene->GetComponent<NameComponent>(entityHandle).Name;
+			if (!sourceName.empty()) entityName = sourceName;
+		}
+
+		// Append " (N)" until the path is free — never silently overwrite an
+		// existing prefab. Cap at 10,000 to keep us out of an infinite loop
+		// if the directory state is unreadable.
+		std::filesystem::path prefabPath = std::filesystem::path(targetDirectory) / (entityName + ".prefab");
+		std::error_code existsEc;
+		for (int n = 1; std::filesystem::exists(prefabPath, existsEc) && n < 10000; ++n) {
+			prefabPath = std::filesystem::path(targetDirectory) / (entityName + " (" + std::to_string(n) + ").prefab");
+			existsEc.clear();
+		}
+
+		if (!SceneSerializer::SaveEntityToFile(*scene, entityHandle, prefabPath.string())) {
+			return false;
+		}
+
+		// Convert the source entity into an instance of the prefab we just
+		// wrote — same code path the loader uses when instantiating a prefab,
+		// so PrefabInstanceComponent and the entity's metadata stay in sync
+		// with future Apply / Revert workflows.
+		const uint64_t prefabGuid = AssetRegistry::GetOrCreateAssetUUID(prefabPath.string());
+		if (prefabGuid != 0) {
+			scene->SetEntityMetaData(entityHandle, EntityOrigin::Prefab, AssetGUID(prefabGuid));
+		}
+		scene->MarkDirty();
+		return true;
 	}
 
 	std::vector<std::string> AssetBrowser::GetSelectedPaths() const {
@@ -416,10 +469,31 @@ namespace Axiom {
 	}
 
 	void AssetBrowser::RenderBreadcrumb() {
+		// Build the full segment list: [Assets, intermediate..., current].
+		// Each entry holds the visible label and the absolute path the entry
+		// navigates to.
+		struct BreadcrumbSegment {
+			std::string Label;
+			std::string FullPath;
+		};
+
 		std::filesystem::path root(m_RootDirectory);
 		std::filesystem::path current(m_CurrentDirectory);
 		std::filesystem::path relative = std::filesystem::relative(current, root);
 
+		std::vector<BreadcrumbSegment> segments;
+		segments.push_back({ "Assets", m_RootDirectory });
+		if (relative != "." && !relative.empty()) {
+			std::filesystem::path accumulated = root;
+			for (const auto& seg : relative) {
+				accumulated /= seg;
+				segments.push_back({ seg.string(), accumulated.string() });
+			}
+		}
+
+		// Back button (when not at root). Sits before the breadcrumb proper —
+		// budget computation happens AFTER it so the back button doesn't eat
+		// into the breadcrumb's width budget.
 		if (m_CurrentDirectory != m_RootDirectory) {
 			if (ImGui::SmallButton("<")) {
 				NavigateUp();
@@ -428,42 +502,137 @@ namespace Axiom {
 			ImGui::SameLine();
 		}
 
-		if (ImGui::SmallButton("Assets")) {
-			NavigateTo(m_RootDirectory);
-			return;
+		// Width budget. Measured fresh every frame so resizing the panel
+		// re-computes which segments fit.
+		const ImGuiStyle& style = ImGui::GetStyle();
+		const float refreshButtonReserved = 30.0f + style.ItemSpacing.x;
+		const float available = std::max(0.0f, ImGui::GetContentRegionAvail().x - refreshButtonReserved);
+
+		auto buttonWidth = [&style](const std::string& label) -> float {
+			return ImGui::CalcTextSize(label.c_str()).x + style.FramePadding.x * 2.0f;
+		};
+		const float separatorWidth = style.ItemSpacing.x + ImGui::CalcTextSize("/").x + style.ItemSpacing.x;
+		const float truncationButtonWidth = buttonWidth("...");
+
+		// Decide which segments are visible. Always show first (root) and
+		// last (current); fill intermediates from the deepest end backward
+		// while they still fit alongside the truncation marker.
+		std::vector<bool> visible(segments.size(), false);
+		bool showTruncation = false;
+
+		if (segments.size() == 1) {
+			visible[0] = true;
 		}
+		else {
+			// First try: do all segments fit without any truncation marker?
+			float total = buttonWidth(segments[0].Label);
+			for (std::size_t i = 1; i < segments.size(); ++i) {
+				total += separatorWidth + buttonWidth(segments[i].Label);
+			}
 
-		if (relative != "." && !relative.empty()) {
-			std::filesystem::path accumulated = root;
-			for (const auto& segment : relative) {
-				accumulated /= segment;
-				ImGui::SameLine();
-				ImGui::TextUnformatted("/");
-				ImGui::SameLine();
+			if (total <= available) {
+				std::fill(visible.begin(), visible.end(), true);
+			}
+			else {
+				visible.front() = true;
+				visible.back() = true;
 
-				std::string segStr = segment.string();
-				std::string accStr = accumulated.string();
-				bool truncated = false;
-				const std::string displaySegment = ImGuiUtils::Ellipsize(segStr, 140.0f, &truncated);
+				// Fixed budget cost: Assets / ... / Current.
+				const float fixedCost = buttonWidth(segments.front().Label)
+					+ separatorWidth + truncationButtonWidth
+					+ separatorWidth + buttonWidth(segments.back().Label);
 
-				if (accStr == m_CurrentDirectory) {
-					ImGui::TextUnformatted(displaySegment.c_str());
-					if (truncated && ImGui::IsItemHovered()) {
-						ImGui::SetTooltip("%s", segStr.c_str());
+				float remaining = available - fixedCost;
+
+				// Greedily include intermediates closest to current first,
+				// stopping the moment one doesn't fit (matches the spec's
+				// "Assets / ... / Textures / Diffuse" example, which keeps
+				// segments contiguous with the deepest directory).
+				if (remaining > 0.0f) {
+					for (std::size_t k = segments.size() - 1; k-- > 1; ) {
+						const float extra = separatorWidth + buttonWidth(segments[k].Label);
+						if (extra <= remaining) {
+							visible[k] = true;
+							remaining -= extra;
+						}
+						else {
+							break;
+						}
 					}
 				}
-				else {
-					if (ImGui::SmallButton((displaySegment + "##" + accStr).c_str())) {
-						NavigateTo(accStr);
-						return;
-					}
-					if (truncated && ImGui::IsItemHovered()) {
-						ImGui::SetTooltip("%s", segStr.c_str());
-					}
+
+				// At least one intermediate had to be hidden — show the marker.
+				for (std::size_t i = 1; i + 1 < segments.size(); ++i) {
+					if (!visible[i]) { showTruncation = true; break; }
 				}
 			}
 		}
 
+		// ── Render ───────────────────────────────────────────────────
+
+		auto isCurrent = [this](const BreadcrumbSegment& s) {
+			return s.FullPath == m_CurrentDirectory;
+		};
+
+		// Root.
+		if (isCurrent(segments[0])) {
+			ImGui::TextUnformatted(segments[0].Label.c_str());
+		}
+		else if (ImGui::SmallButton(segments[0].Label.c_str())) {
+			NavigateTo(segments[0].FullPath);
+			return;
+		}
+
+		// Truncation marker. Sits between root and the first visible
+		// intermediate (or current). Clicking opens a popup listing every
+		// hidden ancestor as a navigation target — the user keeps a way to
+		// reach those directories even when they don't fit on the bar.
+		if (showTruncation) {
+			ImGui::SameLine();
+			ImGui::TextUnformatted("/");
+			ImGui::SameLine();
+			if (ImGui::SmallButton("...##BreadcrumbTrunc")) {
+				ImGui::OpenPopup("BreadcrumbHidden");
+			}
+			if (ImGui::IsItemHovered()) {
+				ImGui::SetTooltip("Hidden directories");
+			}
+			if (ImGui::BeginPopup("BreadcrumbHidden")) {
+				for (std::size_t i = 1; i + 1 < segments.size(); ++i) {
+					if (visible[i]) continue;
+					// Append the full path as the ID suffix so duplicate folder
+					// names (e.g. multiple "New Folder" ancestors) don't collide.
+					const std::string itemId = segments[i].Label + "##" + segments[i].FullPath;
+					if (ImGui::MenuItem(itemId.c_str())) {
+						NavigateTo(segments[i].FullPath);
+						ImGui::EndPopup();
+						return;
+					}
+				}
+				ImGui::EndPopup();
+			}
+		}
+
+		// Visible intermediates and current — same separator pattern as
+		// before so the layout is unchanged when nothing's hidden.
+		for (std::size_t i = 1; i < segments.size(); ++i) {
+			if (!visible[i]) continue;
+			ImGui::SameLine();
+			ImGui::TextUnformatted("/");
+			ImGui::SameLine();
+			if (isCurrent(segments[i])) {
+				ImGui::TextUnformatted(segments[i].Label.c_str());
+			}
+			else {
+				const std::string id = segments[i].Label + "##" + segments[i].FullPath;
+				if (ImGui::SmallButton(id.c_str())) {
+					NavigateTo(segments[i].FullPath);
+					return;
+				}
+			}
+		}
+
+		// Refresh button (right-aligned, unchanged).
 		ImGui::SameLine(ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX() - 30.0f);
 		{
 			unsigned int refreshIcon = EditorIcons::Get("redo", 16);
@@ -482,6 +651,15 @@ namespace Axiom {
 
 	void AssetBrowser::RenderGrid() {
 		ImGui::BeginChild("AssetGrid", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_None);
+
+		// Snapshot the child window's full screen rect — used at the bottom
+		// of this function to register a panel-wide HIERARCHY_ENTITY drop
+		// target via BeginDragDropTargetCustom. That rect covers every gap
+		// between tiles AND the empty area below the last row, so a Hierarchy
+		// drag onto truly empty Asset Browser space lands the prefab in the
+		// current directory just like a drop onto a tile does.
+		ImGuiWindow* const gridWindow = ImGui::GetCurrentWindow();
+		const ImRect gridChildRect = gridWindow->Rect();
 
 		const float cellSize = m_TileSize + m_TilePadding;
 		const float panelWidth = ImGui::GetContentRegionAvail().x;
@@ -527,24 +705,24 @@ namespace Axiom {
 
 		RenderGridContextMenu();
 
-		// Accept entity drops from hierarchy panel to save as prefab
-		if (ImGui::BeginDragDropTarget()) {
-			if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("HIERARCHY_ENTITY")) {
-				struct HierarchyDragData { int Index; uint32_t EntityHandle; };
-				auto* dragData = static_cast<const HierarchyDragData*>(payload->Data);
-				entt::entity entityHandle = static_cast<entt::entity>(dragData->EntityHandle);
-
-				Scene* activeScene = SceneManager::Get().GetActiveScene();
-				if (activeScene && activeScene->IsValid(entityHandle)) {
-					std::string entityName = "Entity";
-					if (activeScene->HasComponent<NameComponent>(entityHandle))
-						entityName = activeScene->GetComponent<NameComponent>(entityHandle).Name;
-					std::string prefabPath = (std::filesystem::path(m_CurrentDirectory) / (entityName + ".prefab")).string();
-					SceneSerializer::SaveEntityToFile(*activeScene, entityHandle, prefabPath);
-					m_NeedsRefresh = true;
+		// Panel-wide HIERARCHY_ENTITY drop target. The default
+		// BeginDragDropTarget() binds to the previously-submitted item (the
+		// last tile), so it never fires when the cursor is in the empty area
+		// to the right of a partial row or below the last row. Using a
+		// custom rect over the entire child window catches every gap.
+		// Tile-specific drop targets above already set themselves as the
+		// active target while the cursor is over them — IsAnyItemHovered()
+		// gates this so we don't override that more-specific drop.
+		if (!ImGui::IsAnyItemHovered()) {
+			const ImGuiID dropZoneId = ImGui::GetID("##AssetGridEmptySpaceDrop");
+			if (ImGui::BeginDragDropTargetCustom(gridChildRect, dropZoneId)) {
+				if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("HIERARCHY_ENTITY")) {
+					if (TryCreatePrefabFromHierarchyDrop(payload, m_CurrentDirectory)) {
+						m_NeedsRefresh = true;
+					}
 				}
+				ImGui::EndDragDropTarget();
 			}
-			ImGui::EndDragDropTarget();
 		}
 
 		ImGui::EndChild();
@@ -555,6 +733,7 @@ namespace Axiom {
 		ImGui::PushID(index);
 
 		const bool isSelected = IsPathSelected(entry.Path);
+		const bool isCut = IsPathInCutClipboard(entry.Path);
 
 		ImGui::BeginGroup();
 
@@ -564,6 +743,14 @@ namespace Axiom {
 			ImVec2 bgMin(cursorPos.x - 2, cursorPos.y - 2);
 			ImVec2 bgMax(cursorPos.x + m_TileSize + 2, cursorPos.y + m_TileSize + ImGui::GetTextLineHeightWithSpacing() + 2);
 			ImGui::GetWindowDrawList()->AddRectFilled(bgMin, bgMax, IM_COL32(60, 100, 160, 180), 4.0f);
+		}
+
+		// Dim cut items so the user can see at a glance that Ctrl+X took
+		// effect. Matches the Windows Explorer / VS convention (~55% alpha).
+		// Pushed AFTER the selection rect so a selected-but-cut tile keeps
+		// its highlight at full color, then dims only the icon + label.
+		if (isCut) {
+			ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.55f);
 		}
 
 		ImVec2 iconPos = cursorPos;
@@ -686,6 +873,10 @@ namespace Axiom {
 
 		ImGui::EndGroup();
 
+		if (isCut) {
+			ImGui::PopStyleVar();
+		}
+
 		if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
 			m_PressedPath = entry.Path;
 		}
@@ -725,6 +916,21 @@ namespace Axiom {
 		HandleDragSource(entry);
 		if (entry.IsDirectory) {
 			HandleDropTarget(entry);
+		}
+		else {
+			// Hierarchy entity dropped onto any non-folder tile lands in the
+			// current directory — same place the empty-space drop and the
+			// external-image drop both go. Matches the user's mental model
+			// that the entire Asset Browser panel is one drop zone, with
+			// folders being the only "more specific" target.
+			if (ImGui::BeginDragDropTarget()) {
+				if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("HIERARCHY_ENTITY")) {
+					if (TryCreatePrefabFromHierarchyDrop(payload, m_CurrentDirectory)) {
+						m_NeedsRefresh = true;
+					}
+				}
+				ImGui::EndDragDropTarget();
+			}
 		}
 
 		ImGui::PopID();
@@ -783,30 +989,66 @@ namespace Axiom {
 			}
 
 			if (ImGui::BeginMenu("Create")) {
-				if (ImGui::MenuItem("EntityScript (C#)")) {
-					CreateScript(m_CurrentDirectory);
+				if (ImGui::MenuItem("Entity Prefab")) {
+					CreateEntityPrefab(m_CurrentDirectory);
 				}
-				if (ImGui::MenuItem("Component (C#)")) {
-					CreateCSharpComponent(m_CurrentDirectory);
+				if (ImGui::BeginMenu("Scripting")) {
+					if (ImGui::MenuItem("EntityScript (C#)")) {
+						CreateScript(m_CurrentDirectory);
+					}
+					if (ImGui::MenuItem("Component (C#)")) {
+						CreateCSharpComponent(m_CurrentDirectory);
+					}
+					if (ImGui::MenuItem("GameSystem (C#)")) {
+						CreateGameSystem(m_CurrentDirectory);
+					}
+					if (ImGui::MenuItem("GlobalSystem (C#)")) {
+						CreateGlobalSystem(m_CurrentDirectory);
+					}
+					if (ImGui::MenuItem("Component (C++)")) {
+						CreateNativeComponent(m_CurrentDirectory);
+					}
+					ImGui::EndMenu();
 				}
-				if (ImGui::MenuItem("GameSystem (C#)")) {
-					CreateGameSystem(m_CurrentDirectory);
-				}
-				if (ImGui::MenuItem("GlobalSystem (C#)")) {
-					CreateGlobalSystem(m_CurrentDirectory);
-				}
-				if (ImGui::MenuItem("Component (C++)")) {
-					CreateNativeComponent(m_CurrentDirectory);
+				if (ImGui::BeginMenu("File")) {
+					// Common loose file formats. Default content is the minimal
+					// well-formed payload for the format (or empty when there's
+					// no canonical "empty"). Extensions match the icon mapping
+					// in GetFileTypeIconName so the new file picks up its icon
+					// on the next refresh.
+					if (ImGui::MenuItem("Text File")) {
+						CreateFile(m_CurrentDirectory, "NewFile", ".txt", "");
+					}
+					if (ImGui::MenuItem("JSON File")) {
+						CreateFile(m_CurrentDirectory, "NewFile", ".json", "{\n}\n");
+					}
+					if (ImGui::MenuItem("XML File")) {
+						CreateFile(m_CurrentDirectory, "NewFile", ".xml",
+							"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<root>\n</root>\n");
+					}
+					if (ImGui::MenuItem("YAML File")) {
+						CreateFile(m_CurrentDirectory, "NewFile", ".yaml", "");
+					}
+					if (ImGui::MenuItem("TOML File")) {
+						CreateFile(m_CurrentDirectory, "NewFile", ".toml", "");
+					}
+					if (ImGui::MenuItem("INI File")) {
+						CreateFile(m_CurrentDirectory, "NewFile", ".ini", "");
+					}
+					if (ImGui::MenuItem("Markdown File")) {
+						CreateFile(m_CurrentDirectory, "NewFile", ".md", "");
+					}
+					if (ImGui::MenuItem("Lua File")) {
+						CreateFile(m_CurrentDirectory, "NewFile", ".lua", "");
+					}
+					if (ImGui::MenuItem("Binary File")) {
+						CreateFile(m_CurrentDirectory, "NewFile", ".bin", "");
+					}
+					ImGui::EndMenu();
 				}
 				ImGui::Separator();
 				if (ImGui::MenuItem("Scene")) {
 					CreateScene(m_CurrentDirectory);
-				}
-				if (ImGui::MenuItem("Entity")) {
-					if (Scene* scene = SceneManager::Get().GetActiveScene()) {
-						scene->CreateEntity("Entity");
-						scene->MarkDirty();
-					}
 				}
 				if (ImGui::MenuItem("Folder")) {
 					CreateFolder(m_CurrentDirectory);
@@ -832,10 +1074,14 @@ namespace Axiom {
 				SetSingleSelection(entry.Path, index);
 			}
 
-			if (ImGui::MenuItem("Copy Asset", "Ctrl+C")) {
+			if (ImGui::MenuItem("Copy", "Ctrl+C")) {
 				CopySelectedAssets(false);
 			}
-			if (ImGui::MenuItem("Open Asset")) {
+						if (ImGui::MenuItem("Copy Path")) {
+				CopyPathToClipboard(entry.Path);
+			}
+
+			if (ImGui::MenuItem("Open")) {
 				OpenAssetPath(entry.Path);
 				ImGui::EndPopup();
 				return;
@@ -858,9 +1104,6 @@ namespace Axiom {
 			}
 			if (ImGui::MenuItem("Duplicate", "Ctrl+D")) {
 				DuplicateSelectedAssets();
-			}
-			if (ImGui::MenuItem("Copy Path")) {
-				CopyPathToClipboard(entry.Path);
 			}
 
 			ImGui::EndPopup();
@@ -895,6 +1138,13 @@ namespace Axiom {
 						}
 						m_NeedsRefresh = true;
 					}
+				}
+			}
+			// Hierarchy entity dropped directly onto a folder tile — save the
+			// prefab inside THAT folder, not the current directory.
+			else if (const ImGuiPayload* entityPayload = ImGui::AcceptDragDropPayload("HIERARCHY_ENTITY")) {
+				if (TryCreatePrefabFromHierarchyDrop(entityPayload, entry.Path)) {
+					m_NeedsRefresh = true;
 				}
 			}
 			ImGui::EndDragDropTarget();
