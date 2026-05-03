@@ -65,11 +65,11 @@ namespace Axiom {
 		Stop();
 	}
 
-	void FileWatcher::Watch(const std::string& path, const std::string& pattern, Callback callback) {
-		Watch(std::vector<std::string>{ path }, std::vector<std::string>{ pattern }, std::move(callback));
+	void FileWatcher::Watch(const std::string& path, const std::string& pattern, Callback callback, bool recursive) {
+		Watch(std::vector<std::string>{ path }, std::vector<std::string>{ pattern }, std::move(callback), recursive);
 	}
 
-	void FileWatcher::Watch(const std::vector<std::string>& paths, const std::vector<std::string>& patterns, Callback callback) {
+	void FileWatcher::Watch(const std::vector<std::string>& paths, const std::vector<std::string>& patterns, Callback callback, bool recursive) {
 		Stop();
 
 		ConfigurePatterns(patterns);
@@ -86,7 +86,7 @@ namespace Axiom {
 			std::error_code ec;
 			const bool exists = std::filesystem::exists(path, ec);
 			const bool isDirectory = exists ? std::filesystem::is_directory(path, ec) : LooksLikeDirectory(path);
-			m_Targets.push_back({ NormalizeWatchTargetPath(path), isDirectory });
+			m_Targets.push_back({ NormalizeWatchTargetPath(path), isDirectory, isDirectory && recursive });
 		}
 
 		if (m_Targets.empty() || !m_Callback) {
@@ -189,7 +189,11 @@ namespace Axiom {
 				continue;
 			}
 
-			NativeWatchRoot root{ NormalizeWatchTargetPath(rootPath), target.IsDirectory };
+			// File targets watch their parent dir non-recursively (we only
+			// care about the file itself); directory targets honor the
+			// caller-supplied Recursive flag.
+			const bool wantRecursive = target.IsDirectory && target.Recursive;
+			NativeWatchRoot root{ NormalizeWatchTargetPath(rootPath), wantRecursive };
 			const std::string key = NormalizeKey(root.Path);
 			auto [it, inserted] = rootsByKey.emplace(key, root);
 			if (!inserted) {
@@ -283,6 +287,19 @@ namespace Axiom {
 	FileWatcher::Snapshot FileWatcher::BuildSnapshot() const {
 		Snapshot snapshot;
 
+		auto recordFile = [&](const std::filesystem::directory_entry& entry, std::error_code& ec) {
+			if (!entry.is_regular_file(ec) || ec || !MatchesFile(entry.path())) {
+				ec.clear();
+				return;
+			}
+			const std::string key = NormalizeKey(entry.path());
+			const std::filesystem::file_time_type writeTime = entry.last_write_time(ec);
+			if (!ec) {
+				snapshot[key] = writeTime;
+			}
+			ec.clear();
+		};
+
 		for (const WatchTarget& target : m_Targets) {
 			std::error_code ec;
 			if (target.IsDirectory) {
@@ -290,33 +307,39 @@ namespace Axiom {
 					continue;
 				}
 
-				for (std::filesystem::recursive_directory_iterator it(target.Path, kDirectoryOptions, ec), end;
-					 it != end;
-					 it.increment(ec)) {
-					if (ec) {
-						ec.clear();
-						continue;
-					}
-
-					if (it->is_directory(ec)) {
-						if (!ec && ShouldIgnoreDirectory(it->path())) {
-							it.disable_recursion_pending();
+				if (target.Recursive) {
+					for (std::filesystem::recursive_directory_iterator it(target.Path, kDirectoryOptions, ec), end;
+						 it != end;
+						 it.increment(ec)) {
+						if (ec) {
+							ec.clear();
+							continue;
 						}
-						ec.clear();
-						continue;
-					}
 
-					if (!it->is_regular_file(ec) || ec || !MatchesFile(it->path())) {
-						ec.clear();
-						continue;
-					}
+						if (it->is_directory(ec)) {
+							if (!ec && ShouldIgnoreDirectory(it->path())) {
+								it.disable_recursion_pending();
+							}
+							ec.clear();
+							continue;
+						}
 
-					const std::string key = NormalizeKey(it->path());
-					const std::filesystem::file_time_type writeTime = it->last_write_time(ec);
-					if (!ec) {
-						snapshot[key] = writeTime;
+						recordFile(*it, ec);
 					}
-					ec.clear();
+				} else {
+					for (std::filesystem::directory_iterator it(target.Path, kDirectoryOptions, ec), end;
+						 it != end;
+						 it.increment(ec)) {
+						if (ec) {
+							ec.clear();
+							continue;
+						}
+						if (it->is_directory(ec)) {
+							ec.clear();
+							continue;
+						}
+						recordFile(*it, ec);
+					}
 				}
 
 				continue;

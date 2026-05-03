@@ -2,6 +2,8 @@
 #include "Components/Physics/Rigidbody2DComponent.hpp"
 #include "Components/General/Transform2DComponent.hpp"
 #include "Physics/Box2DWorld.hpp"
+#include "Physics/PhysicsSystem2D.hpp"
+#include "Physics/CollisionDispatcher.hpp"
 
 namespace Axiom {
 	void Rigidbody2DComponent::SetBodyType(BodyType bodyType) {
@@ -53,6 +55,11 @@ namespace Axiom {
 		auto massData = b2Body_GetMassData(m_BodyId);
 		massData.mass = mass;
 		b2Body_SetMassData(m_BodyId, massData);
+		// Recompute inertia from attached shapes' geometry+density so rotational
+		// dynamics match the new mass. Without this, mass was overwritten while
+		// rotationalInertia stayed at its old value (computed for the previous
+		// mass), producing visually wrong rotation under torque.
+		b2Body_ApplyMassFromShapes(m_BodyId);
 	}
 	float Rigidbody2DComponent::GetMass() const { return b2Body_GetMass(m_BodyId); }
 
@@ -96,6 +103,25 @@ namespace Axiom {
 
 	void Rigidbody2DComponent::Destroy() {
 		if (IsValid()) {
+			// Unregister every attached shape from the contact dispatcher before
+			// the body (and its shapes) are destroyed. Without this, the
+			// dispatcher's m_begin/m_end/m_hit/m_activeContacts retain stale
+			// b2ShapeIds; if Box2D recycles a stored id for a future shape,
+			// callbacks fire on the wrong entity.
+			if (PhysicsSystem2D::IsInitialized()) {
+				constexpr int kInlineShapes = 8;
+				b2ShapeId stack[kInlineShapes];
+				const int count = b2Body_GetShapeCount(m_BodyId);
+				auto& dispatcher = PhysicsSystem2D::GetMainPhysicsWorld().GetDispatcher();
+				if (count <= kInlineShapes) {
+					b2Body_GetShapes(m_BodyId, stack, count);
+					for (int i = 0; i < count; ++i) dispatcher.UnregisterShape(stack[i]);
+				} else {
+					std::vector<b2ShapeId> heap(static_cast<size_t>(count));
+					b2Body_GetShapes(m_BodyId, heap.data(), count);
+					for (int i = 0; i < count; ++i) dispatcher.UnregisterShape(heap[i]);
+				}
+			}
 			b2DestroyBody(m_BodyId);
 		}
 

@@ -41,10 +41,27 @@ namespace Axiom {
 		void DestroyBody(EntityHandle entity);
 		AxiomPhys::Body* GetBody(EntityHandle entity);
 
-		// Collider attachment
+		// Collider attachment. Two collider kinds can coexist on a single
+		// entity at the storage level: the inspector's component-conflict
+		// system blocks user-driven dual-collider setups, but programmatic
+		// adds (scripts, deserialised legacy scenes) used to overwrite the
+		// existing entry and leave the user-component's pointer dangling.
+		// Keying by (entity, kind) keeps both alive and removable
+		// independently.
+		enum class FastColliderKind : uint8_t {
+			Box,
+			Circle,
+		};
+
 		AxiomPhys::BoxCollider* CreateBoxCollider(EntityHandle entity, const Vec2& halfExtents);
 		AxiomPhys::CircleCollider* CreateCircleCollider(EntityHandle entity, float radius);
-		void DestroyCollider(EntityHandle entity);
+		// Destroy a specific collider kind on the entity. Called from the
+		// matching FastBoxCollider2D / FastCircleCollider2D destroy hook so
+		// removing one component never invalidates the other.
+		void DestroyCollider(EntityHandle entity, FastColliderKind kind);
+		// Destroy every collider on this entity. Used by DestroyBody (which
+		// must clean up all attachments before the body itself goes away).
+		void DestroyAllCollidersOnEntity(EntityHandle entity);
 
 		// Contact callbacks per entity
 		void RegisterContactCallback(EntityHandle entity, AxiomContactCallback callback);
@@ -57,9 +74,27 @@ namespace Axiom {
 
 		AxiomPhys::PhysicsWorld m_World;
 
-		// Ownership: bodies and colliders keyed by entity
+		// Composite (entity, kind) key for the collider map. Packed into a
+		// uint64 for cheap hashing.
+		struct ColliderKey {
+			uint32_t entity;
+			FastColliderKind kind;
+			bool operator==(const ColliderKey& o) const noexcept {
+				return entity == o.entity && kind == o.kind;
+			}
+		};
+		struct ColliderKeyHash {
+			size_t operator()(const ColliderKey& k) const noexcept {
+				const uint64_t packed =
+					(static_cast<uint64_t>(k.entity) << 8) |
+					static_cast<uint64_t>(static_cast<uint8_t>(k.kind));
+				return std::hash<uint64_t>{}(packed);
+			}
+		};
+
+		// Ownership: bodies keyed by entity, colliders keyed by (entity, kind)
 		std::unordered_map<uint32_t, std::unique_ptr<AxiomPhys::Body>> m_Bodies;
-		std::unordered_map<uint32_t, std::unique_ptr<AxiomPhys::Collider>> m_Colliders;
+		std::unordered_map<ColliderKey, std::unique_ptr<AxiomPhys::Collider>, ColliderKeyHash> m_Colliders;
 
 		// Entity lookup from Body pointer (reverse map)
 		std::unordered_map<AxiomPhys::Body*, EntityHandle> m_BodyToEntity;

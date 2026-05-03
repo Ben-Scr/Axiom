@@ -22,6 +22,15 @@ static std::string s_ProjectPath;
 
 class EditorApplication : public Application {
 public:
+	EditorApplication() {
+		// Mark this Application instance as the editor host so engine
+		// code (and C# scripts via Application.IsEditor) can branch on
+		// runtime context. The flag is the runtime sibling of the
+		// compile-time AXIOM_EDITOR define already passed to scripts
+		// loaded by the editor.
+		SetEditorHost(true);
+	}
+
 	ApplicationConfig GetConfiguration() const override {
 		ApplicationConfig config;
 		std::string title = "Axiom Editor " + std::string(AIM_VERSION);

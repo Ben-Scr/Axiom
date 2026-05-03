@@ -9,6 +9,7 @@
 #include "Scene/Scene.hpp"
 #include "Scene/SceneManager.hpp"
 
+#include <algorithm>
 #include <unordered_set>
 
 namespace Axiom {
@@ -38,6 +39,19 @@ namespace Axiom {
 		};
 
 		std::unordered_map<TextureLookupKey, TextureHandle, TextureLookupKeyHash> s_TextureLookup;
+
+		struct ReferenceProviderEntry {
+			uint32_t Token = 0;
+			TextureManager::ReferenceProvider Fn;
+		};
+		std::vector<ReferenceProviderEntry>& GetReferenceProviders() {
+			static std::vector<ReferenceProviderEntry> s_Providers;
+			return s_Providers;
+		}
+		uint32_t& NextReferenceProviderToken() {
+			static uint32_t s_NextToken = 0;
+			return s_NextToken;
+		}
 
 		std::string NormalizeTexturePath(const std::filesystem::path& path) {
 			std::error_code ec;
@@ -153,6 +167,9 @@ namespace Axiom {
 		while (!s_FreeIndices.empty()) {
 			s_FreeIndices.pop();
 		}
+		// Drop external reference providers so their captures (often holding
+		// scene/registry references) can't outlive the manager.
+		GetReferenceProviders().clear();
 
 		s_IsInitialized = false;
 	}
@@ -291,6 +308,22 @@ namespace Axiom {
 		entry.WrapU = Wrap::Clamp;
 		entry.WrapV = Wrap::Clamp;
 		s_FreeIndices.push(handle.index);
+	}
+
+	TextureHandle TextureManager::GetTextureHandle(const std::string& name, Filter filter, Wrap u, Wrap v) {
+		if (!s_IsInitialized) {
+			AIM_CORE_ERROR("[{}] TextureManager isn't initialized", ErrorCodeToString(AxiomErrorCode::NotInitialized));
+			return TextureHandle::Invalid();
+		}
+
+		auto handle = FindTextureByPath(name, filter, u, v);
+
+		if (handle.index == k_InvalidIndex) {
+			AIM_CORE_WARN("[{}] Texture with name '{}' doesn't exist for the requested sampler settings", ErrorCodeToString(AxiomErrorCode::InvalidArgument), name);
+			return TextureHandle::Invalid();
+		}
+
+		return handle;
 	}
 
 	TextureHandle TextureManager::GetTextureHandle(const std::string& name) {
@@ -467,6 +500,24 @@ namespace Axiom {
 		return { k_InvalidIndex, 0 };
 	}
 
+	uint32_t TextureManager::AddReferenceProvider(ReferenceProvider provider) {
+		if (!provider) return 0;
+		auto& providers = GetReferenceProviders();
+		auto& nextToken = NextReferenceProviderToken();
+		const uint32_t token = ++nextToken;
+		providers.push_back({ token, std::move(provider) });
+		return token;
+	}
+
+	void TextureManager::RemoveReferenceProvider(uint32_t token) {
+		if (token == 0) return;
+		auto& providers = GetReferenceProviders();
+		providers.erase(
+			std::remove_if(providers.begin(), providers.end(),
+				[token](const ReferenceProviderEntry& e) { return e.Token == token; }),
+			providers.end());
+	}
+
 	size_t TextureManager::PurgeUnreferenced() {
 		if (!s_IsInitialized) {
 			AIM_CORE_WARN("TextureManager isn't initialized");
@@ -479,6 +530,25 @@ namespace Axiom {
 		// ParticleSystem2DComponent (m_TextureHandle), and ImageComponent.
 		std::unordered_set<TextureHandle> referenced;
 		referenced.reserve(s_Textures.size());
+
+		// Ask external providers (editor caches, package panels, etc.) to
+		// emit the handles they currently hold. Wrapped per-provider so a
+		// misbehaving callback can't crash the purge.
+		const ReferenceEmitter emit = [&referenced](TextureHandle h) {
+			if (h.IsValid()) referenced.insert(h);
+		};
+		for (const auto& entry : GetReferenceProviders()) {
+			if (!entry.Fn) continue;
+			try {
+				entry.Fn(emit);
+			} catch (const std::exception& e) {
+				AIM_CORE_ERROR_TAG("TextureManager",
+					"Reference provider (token {}) threw: {}", entry.Token, e.what());
+			} catch (...) {
+				AIM_CORE_ERROR_TAG("TextureManager",
+					"Reference provider (token {}) threw an unknown exception", entry.Token);
+			}
+		}
 
 		SceneManager::Get().ForeachLoadedScene([&referenced](Scene& scene) {
 			entt::registry& registry = scene.GetRegistry();

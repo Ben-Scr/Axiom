@@ -23,6 +23,17 @@ namespace Axiom::Json {
 		using Object = std::vector<std::pair<std::string, Value>>;
 		using Array = std::vector<Value>;
 
+		// Internal representation kind for Number values. Public IsNumber()
+		// stays true for all three so existing callers work unchanged. The
+		// distinction only matters when round-tripping integers larger than
+		// 2^53 (UUIDs / AssetGUIDs) — storing those as `double` loses
+		// precision; the integer kinds preserve the exact value.
+		enum class NumberKind {
+			Double,
+			Int64,
+			UInt64
+		};
+
 		Value() = default;
 		Value(std::nullptr_t);
 		Value(bool value);
@@ -37,6 +48,7 @@ namespace Axiom::Json {
 		static Value MakeArray();
 
 		Type GetType() const { return m_Type; }
+		NumberKind GetNumberKind() const { return m_NumberKind; }
 		bool IsNull() const { return m_Type == Type::Null; }
 		bool IsBool() const { return m_Type == Type::Bool; }
 		bool IsNumber() const { return m_Type == Type::Number; }
@@ -67,8 +79,11 @@ namespace Axiom::Json {
 
 	private:
 		Type m_Type = Type::Null;
+		NumberKind m_NumberKind = NumberKind::Double;
 		bool m_Bool = false;
 		double m_Number = 0.0;
+		int64_t m_Int64 = 0;
+		uint64_t m_UInt64 = 0;
 		std::string m_String;
 		Object m_Object;
 		Array m_Array;

@@ -1,5 +1,6 @@
 #include "pch.hpp"
 #include "Project/AxiomProject.hpp"
+#include "Project/ProjectManager.hpp"
 #include "Serialization/Path.hpp"
 #include "Serialization/Directory.hpp"
 #include "Serialization/File.hpp"
@@ -290,6 +291,21 @@ AXIOM_NATIVE_SCRIPT_EXPORT void AxiomDestroyScript(Axiom::NativeScript* script) 
 				? std::string()
 				: MakeRelativePathOrEmpty(std::filesystem::path(project.NativeScriptsDir), engineRoot);
 
+			// Build the user's custom-defines block. Empty when the project
+			// hasn't added any — the placeholder substitution then drops the
+			// line entirely (no useless empty target_compile_definitions
+			// call in the generated CMakeLists).
+			std::string customDefinesBlock;
+			if (!project.CustomDefines.empty()) {
+				customDefinesBlock = "target_compile_definitions(${PROJECT_NAME} PRIVATE";
+				for (const std::string& d : project.CustomDefines) {
+					if (d.empty()) continue;
+					customDefinesBlock += " ";
+					customDefinesBlock += d;
+				}
+				customDefinesBlock += ")";
+			}
+
 			std::string axiomRootBootstrap = R"(set(AXIOM_DIR "$ENV{AXIOM_DIR}" CACHE PATH "Path to the Axiom repository root")
 )";
 			if (!nativeAxiomRootFallback.empty()) {
@@ -304,7 +320,7 @@ endif()
 
 )";
 
-			return R"(cmake_minimum_required(VERSION 3.20)
+			std::string output = R"(cmake_minimum_required(VERSION 3.20)
 project()" + project.Name + R"(-NativeScripts LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -355,6 +371,21 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE
     $<$<CONFIG:Dist>:AIM_DIST;NDEBUG>
 )
 
+# Build profile macro — sibling of the C# AXIOM_BUILD_DEVELOPMENT/RELEASE
+# defines. Editor hot-reload omits -DAXIOM_BUILD_PROFILE so we default to
+# DEVELOPMENT here; the build pipeline passes -DAXIOM_BUILD_PROFILE=RELEASE
+# when ActiveBuildProfile == Release. Native scripts can then guard with
+# `#ifdef AXIOM_BUILD_RELEASE` exactly like C# scripts.
+if(NOT DEFINED AXIOM_BUILD_PROFILE)
+    set(AXIOM_BUILD_PROFILE "DEVELOPMENT")
+endif()
+target_compile_definitions(${PROJECT_NAME} PRIVATE AXIOM_BUILD_${AXIOM_BUILD_PROFILE})
+
+# Project custom defines, baked into the CMake file at project save time.
+# Same list the C# .csproj's <DefineConstants> receives, so C# and native
+# scripts agree on the same symbol set.
+)" + std::string(R"(@AXIOM_PROJECT_CUSTOM_DEFINES_BLOCK@)") + R"(
+
 if(WIN32)
     aim_normalize_native_arch(AIM_NATIVE_ARCH "${CMAKE_SYSTEM_PROCESSOR}")
     set(AIM_NATIVE_PLATFORM "windows-${AIM_NATIVE_ARCH}")
@@ -387,6 +418,25 @@ foreach(config Debug Release Dist)
     )
 endforeach()
 )";
+
+			// Substitute the custom-defines placeholder. find/replace once;
+			// if no defines were configured the placeholder line is removed
+			// entirely (along with its trailing newline) so the generated
+			// CMakeLists stays clean.
+			const std::string placeholder = "@AXIOM_PROJECT_CUSTOM_DEFINES_BLOCK@";
+			const auto pos = output.find(placeholder);
+			if (pos != std::string::npos) {
+				if (customDefinesBlock.empty()) {
+					// Strip the placeholder line including its trailing \n.
+					std::size_t lineEnd = output.find('\n', pos);
+					if (lineEnd == std::string::npos) lineEnd = output.size();
+					else lineEnd += 1; // consume the newline too
+					output.erase(pos, lineEnd - pos);
+				} else {
+					output.replace(pos, placeholder.size(), customDefinesBlock);
+				}
+			}
+			return output;
 		}
 
 		void EnsureNativeScriptCMakeListsFile(const AxiomProject& project) {
@@ -519,6 +569,29 @@ endforeach()
 			root.AddMember("profiler", std::move(profilerJson));
 		}
 
+		// Runtime stats overlay opt-out. Only written when the user disabled
+		// it (default true) so virgin project files stay clean.
+		if (!project.ShowRuntimeStats) {
+			root.AddMember("showRuntimeStats", false);
+		}
+		if (!project.ShowRuntimeLogs) {
+			root.AddMember("showRuntimeLogs", false);
+		}
+
+		// Build profile + custom defines. Only written when non-default to
+		// keep virgin project files compact.
+		if (project.ActiveBuildProfile != AxiomProject::BuildProfile::Development) {
+			root.AddMember("buildProfile",
+				std::string(AxiomProject::BuildProfileToString(project.ActiveBuildProfile)));
+		}
+		if (!project.CustomDefines.empty()) {
+			Json::Value definesJson = Json::Value::MakeArray();
+			for (const std::string& d : project.CustomDefines) {
+				if (!d.empty()) definesJson.Append(Json::Value(d));
+			}
+			root.AddMember("customDefines", std::move(definesJson));
+		}
+
 		return root;
 	}
 
@@ -559,7 +632,50 @@ endforeach()
 			defineConstants += buildDefine;
 		}
 
+		// Build profile + project custom defines. Pulled from the currently
+		// loaded project so editor hot-reload (AXIOM_EDITOR primary) and
+		// build-pipeline (AXIOM_BUILD primary) both pick up the user's
+		// chosen profile + custom defines from a single source of truth.
+		// Editor hot-reload always uses Development as the profile —
+		// shipping defaults shouldn't bleed into editor preview.
+		AxiomProject* project = ProjectManager::GetCurrentProject();
+		const std::string profileDefine = (primarySymbol == "AXIOM_EDITOR")
+			? std::string("AXIOM_BUILD_DEVELOPMENT")
+			: (project ? project->GetActiveBuildProfileDefine() : std::string("AXIOM_BUILD_DEVELOPMENT"));
+		if (!profileDefine.empty()) {
+			if (!defineConstants.empty()) defineConstants += "%3B";
+			defineConstants += profileDefine;
+		}
+		if (project) {
+			for (const std::string& custom : project->CustomDefines) {
+				if (custom.empty()) continue;
+				if (!defineConstants.empty()) defineConstants += "%3B";
+				defineConstants += custom;
+			}
+		}
+
 		return defineConstants;
+	}
+
+	std::string AxiomProject::GetActiveBuildProfileDefine() const {
+		switch (ActiveBuildProfile) {
+			case BuildProfile::Release:     return "AXIOM_BUILD_RELEASE";
+			case BuildProfile::Development: return "AXIOM_BUILD_DEVELOPMENT";
+		}
+		return "AXIOM_BUILD_DEVELOPMENT";
+	}
+
+	const char* AxiomProject::BuildProfileToString(BuildProfile profile) {
+		switch (profile) {
+			case BuildProfile::Release:     return "Release";
+			case BuildProfile::Development: return "Development";
+		}
+		return "Development";
+	}
+
+	AxiomProject::BuildProfile AxiomProject::BuildProfileFromString(std::string_view value) {
+		if (value == "Release") return BuildProfile::Release;
+		return BuildProfile::Development;
 	}
 
 	std::string AxiomProject::GetNativeDllPath() const {
@@ -772,6 +888,21 @@ endforeach()
 						for (const auto& [name, value] : modulesValue->GetObject()) {
 							project.Profiler.ModuleEnabled.emplace_back(
 								std::string(name), value.AsBoolOr(true));
+						}
+					}
+				}
+				if (const Json::Value* v = root.FindMember("showRuntimeStats"))
+					project.ShowRuntimeStats = v->AsBoolOr(true);
+				if (const Json::Value* v = root.FindMember("showRuntimeLogs"))
+					project.ShowRuntimeLogs = v->AsBoolOr(true);
+				if (const Json::Value* v = root.FindMember("buildProfile"))
+					project.ActiveBuildProfile = AxiomProject::BuildProfileFromString(v->AsStringOr("Development"));
+				if (const Json::Value* v = root.FindMember("customDefines"); v && v->IsArray()) {
+					project.CustomDefines.clear();
+					for (const Json::Value& item : v->GetArray()) {
+						if (item.IsString()) {
+							std::string s = item.AsStringOr();
+							if (!s.empty()) project.CustomDefines.push_back(std::move(s));
 						}
 					}
 				}

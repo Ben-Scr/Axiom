@@ -82,6 +82,14 @@ namespace Axiom {
 		Application::Quit();
 	}
 
+	// Runtime sibling of the compile-time AXIOM_EDITOR define. True when
+	// the host process is the editor binary, false in shipped runtime
+	// builds. Useful for runtime branches that can't be #if'd because
+	// the same script DLL feeds both editor preview and ship builds.
+	static int Axiom_Application_IsEditor() {
+		return Application::IsEditor() ? 1 : 0;
+	}
+
 	static float Axiom_Application_GetFixedDeltaTime() {
 		auto* app = Application::GetInstance();
 		return app ? app->GetTime().GetFixedDeltaTime() : (1.0f / 50.0f);
@@ -211,6 +219,7 @@ namespace Axiom {
 		b.Application_GetElapsedTime = &Axiom_Application_GetTime;
 		b.Application_GetScreenWidth = &Axiom_Application_GetScreenWidth;
 		b.Application_GetScreenHeight = &Axiom_Application_GetScreenHeight;
+		b.Application_IsEditor = &Axiom_Application_IsEditor;
 		b.Application_GetTargetFrameRate = &Axiom_Application_GetTargetFrameRate;
 		b.Application_SetTargetFrameRate = &Axiom_Application_SetTargetFrameRate;
 		b.Application_Quit = &Axiom_Application_Quit;

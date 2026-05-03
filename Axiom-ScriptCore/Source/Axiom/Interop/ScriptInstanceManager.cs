@@ -746,61 +746,9 @@ internal static class ScriptInstanceManager
                 if (fieldType == "unsupported") continue;
 
                 object? val = field.GetValue(instance);
-                string valueStr = FormatFieldValue(field.FieldType, val);
-
-                string displayName = string.IsNullOrEmpty(showAttr.DisplayName) ? field.Name : showAttr.DisplayName;
-                bool readOnly = showAttr.ReadOnly;
-
-                float clampMin = 0, clampMax = 0;
-                bool hasClamp = false;
-                var clampAttr = field.GetCustomAttribute<ClampValueAttribute>();
-                if (clampAttr != null)
-                {
-                    clampMin = clampAttr.Min;
-                    clampMax = clampAttr.Max;
-                    hasClamp = true;
-                }
-
-                string tooltip = "";
-                var tooltipAttr = field.GetCustomAttribute<ToolTipAttribute>();
-                if (tooltipAttr != null)
-                    tooltip = tooltipAttr.Text;
-
-                string headerContent = "";
-                int headerSize = 0;
-                var headerAttr = field.GetCustomAttribute<HeaderAttribute>();
-                if (headerAttr != null)
-                {
-                    headerContent = headerAttr.Content;
-                    headerSize = headerAttr.Size;
-                }
-
-                float spaceHeight = 0.0f;
-                bool hasSpace = false;
-                var spaceAttr = field.GetCustomAttribute<SpaceAttribute>();
-                if (spaceAttr != null)
-                {
-                    spaceHeight = spaceAttr.Height;
-                    hasSpace = true;
-                }
-
                 if (!first) sb.Append(',');
                 first = false;
-
-                sb.Append("{\"name\":\"").Append(EscapeJson(field.Name))
-                  .Append("\",\"displayName\":\"").Append(EscapeJson(displayName))
-                  .Append("\",\"type\":\"").Append(fieldType)
-                  .Append("\",\"value\":\"").Append(EscapeJson(valueStr))
-                  .Append("\",\"readOnly\":").Append(readOnly ? "true" : "false")
-                  .Append(",\"hasClamp\":").Append(hasClamp ? "true" : "false")
-                  .Append(",\"clampMin\":").Append(clampMin.ToString(System.Globalization.CultureInfo.InvariantCulture))
-                  .Append(",\"clampMax\":").Append(clampMax.ToString(System.Globalization.CultureInfo.InvariantCulture))
-                  .Append(",\"tooltip\":\"").Append(EscapeJson(tooltip))
-                  .Append("\",\"headerContent\":\"").Append(EscapeJson(headerContent))
-                  .Append("\",\"headerSize\":").Append(headerSize.ToString(System.Globalization.CultureInfo.InvariantCulture))
-                  .Append(",\"hasSpace\":").Append(hasSpace ? "true" : "false")
-                  .Append(",\"spaceHeight\":").Append(spaceHeight.ToString(System.Globalization.CultureInfo.InvariantCulture))
-                  .Append("}");
+                AppendFieldJson(sb, field, val);
             }
 
             sb.Append(']');
@@ -867,6 +815,13 @@ internal static class ScriptInstanceManager
         if (t == typeof(Vector3Int)) return "vector3Int";
         if (t == typeof(Vector4)) return "vector4";
         if (t == typeof(Vector4Int)) return "vector4Int";
+
+        if (t.IsEnum)
+        {
+            // [Flags] enums get their own dispatch type so the editor renders
+            // a per-bit checkbox combo instead of a single-selection dropdown.
+            return t.GetCustomAttribute<FlagsAttribute>() != null ? "flagenum" : "enum";
+        }
 
         if (t.IsSubclassOf(typeof(Component)))
         {
@@ -972,6 +927,14 @@ internal static class ScriptInstanceManager
                 ? nativeName!
                 : t.Name;
             return comp.Entity.ID.ToString(ic) + ":" + typeName;
+        }
+
+        if (t.IsEnum)
+        {
+            // Enums round-trip as the underlying integer's invariant decimal
+            // form. Flag enums are bitwise OR-able integers so the same path
+            // works for both single-value and [Flags] enums.
+            return Convert.ToInt64(val, ic).ToString(ic);
         }
         return val.ToString() ?? "";
     }
@@ -1116,6 +1079,16 @@ internal static class ScriptInstanceManager
                 }
                 return null;
             }
+
+            if (t.IsEnum)
+            {
+                // Stored as the underlying integer's decimal form. ToObject
+                // accepts any integer convertible to the enum's underlying
+                // type, so this works for both regular enums and [Flags] OR
+                // combinations.
+                long parsed = string.IsNullOrWhiteSpace(s) ? 0 : long.Parse(s, ic);
+                return Enum.ToObject(t, parsed);
+            }
         }
         catch (Exception ex) when (ex is FormatException || ex is OverflowException || ex is ArgumentException)
         {
@@ -1127,6 +1100,91 @@ internal static class ScriptInstanceManager
     private static string EscapeJson(string s)
     {
         return s.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", "\\n").Replace("\r", "\\r");
+    }
+
+    // Build a single field's JSON object for the editor metadata payload.
+    // Centralised here so GetScriptFields and GetClassFieldDefs emit the same
+    // shape — the C++ inspector parses the result into PropertyDescriptor.
+    //
+    // Enum / FlagEnum fields gain `enumIsFlags` and `enumOptions` arrays so
+    // the editor can render the correct combo / multi-checkbox UI without a
+    // second reflection round-trip.
+    private static void AppendFieldJson(System.Text.StringBuilder sb, FieldInfo field, object? value)
+    {
+        var ic = System.Globalization.CultureInfo.InvariantCulture;
+        var showAttr = field.GetCustomAttribute<ShowInEditorAttribute>()!;
+
+        string fieldType = MapFieldType(field.FieldType);
+        string valueStr = FormatFieldValue(field.FieldType, value);
+        string displayName = string.IsNullOrEmpty(showAttr.DisplayName) ? field.Name : showAttr.DisplayName;
+        bool readOnly = showAttr.ReadOnly;
+
+        float clampMin = 0, clampMax = 0;
+        bool hasClamp = false;
+        var clampAttr = field.GetCustomAttribute<ClampValueAttribute>();
+        if (clampAttr != null)
+        {
+            clampMin = clampAttr.Min;
+            clampMax = clampAttr.Max;
+            hasClamp = true;
+        }
+
+        string tooltip = "";
+        var tooltipAttr = field.GetCustomAttribute<ToolTipAttribute>();
+        if (tooltipAttr != null) tooltip = tooltipAttr.Text;
+
+        string headerContent = "";
+        int headerSize = 0;
+        var headerAttr = field.GetCustomAttribute<HeaderAttribute>();
+        if (headerAttr != null)
+        {
+            headerContent = headerAttr.Content;
+            headerSize = headerAttr.Size;
+        }
+
+        float spaceHeight = 0.0f;
+        bool hasSpace = false;
+        var spaceAttr = field.GetCustomAttribute<SpaceAttribute>();
+        if (spaceAttr != null)
+        {
+            spaceHeight = spaceAttr.Height;
+            hasSpace = true;
+        }
+
+        sb.Append("{\"name\":\"").Append(EscapeJson(field.Name))
+          .Append("\",\"displayName\":\"").Append(EscapeJson(displayName))
+          .Append("\",\"type\":\"").Append(fieldType)
+          .Append("\",\"value\":\"").Append(EscapeJson(valueStr))
+          .Append("\",\"readOnly\":").Append(readOnly ? "true" : "false")
+          .Append(",\"hasClamp\":").Append(hasClamp ? "true" : "false")
+          .Append(",\"clampMin\":").Append(clampMin.ToString(ic))
+          .Append(",\"clampMax\":").Append(clampMax.ToString(ic))
+          .Append(",\"tooltip\":\"").Append(EscapeJson(tooltip))
+          .Append("\",\"headerContent\":\"").Append(EscapeJson(headerContent))
+          .Append("\",\"headerSize\":").Append(headerSize.ToString(ic))
+          .Append(",\"hasSpace\":").Append(hasSpace ? "true" : "false")
+          .Append(",\"spaceHeight\":").Append(spaceHeight.ToString(ic));
+
+        if (field.FieldType.IsEnum)
+        {
+            bool isFlags = field.FieldType.GetCustomAttribute<FlagsAttribute>() != null;
+            sb.Append(",\"enumIsFlags\":").Append(isFlags ? "true" : "false");
+            sb.Append(",\"enumOptions\":[");
+            bool firstOpt = true;
+            foreach (var name in Enum.GetNames(field.FieldType))
+            {
+                object enumValue = Enum.Parse(field.FieldType, name);
+                long underlying = Convert.ToInt64(enumValue, ic);
+                if (!firstOpt) sb.Append(',');
+                firstOpt = false;
+                sb.Append("{\"name\":\"").Append(EscapeJson(name))
+                  .Append("\",\"value\":").Append(underlying.ToString(ic))
+                  .Append('}');
+            }
+            sb.Append(']');
+        }
+
+        sb.Append("}");
     }
 
     private static void ReleaseFieldJsonBuffer()
@@ -1201,61 +1259,9 @@ internal static class ScriptInstanceManager
                 if (fieldType == "unsupported") continue;
 
                 object? val = field.GetValue(tempInstance);
-                string valueStr = FormatFieldValue(field.FieldType, val);
-
-                string displayName = string.IsNullOrEmpty(showAttr.DisplayName) ? field.Name : showAttr.DisplayName;
-                bool readOnly = showAttr.ReadOnly;
-
-                float clampMin = 0, clampMax = 0;
-                bool hasClamp = false;
-                var clampAttr = field.GetCustomAttribute<ClampValueAttribute>();
-                if (clampAttr != null)
-                {
-                    clampMin = clampAttr.Min;
-                    clampMax = clampAttr.Max;
-                    hasClamp = true;
-                }
-
-                string tooltip = "";
-                var tooltipAttr = field.GetCustomAttribute<ToolTipAttribute>();
-                if (tooltipAttr != null)
-                    tooltip = tooltipAttr.Text;
-
-                string headerContent = "";
-                int headerSize = 0;
-                var headerAttr = field.GetCustomAttribute<HeaderAttribute>();
-                if (headerAttr != null)
-                {
-                    headerContent = headerAttr.Content;
-                    headerSize = headerAttr.Size;
-                }
-
-                float spaceHeight = 0.0f;
-                bool hasSpace = false;
-                var spaceAttr = field.GetCustomAttribute<SpaceAttribute>();
-                if (spaceAttr != null)
-                {
-                    spaceHeight = spaceAttr.Height;
-                    hasSpace = true;
-                }
-
                 if (!first) sb.Append(',');
                 first = false;
-
-                sb.Append("{\"name\":\"").Append(EscapeJson(field.Name))
-                  .Append("\",\"displayName\":\"").Append(EscapeJson(displayName))
-                  .Append("\",\"type\":\"").Append(fieldType)
-                  .Append("\",\"value\":\"").Append(EscapeJson(valueStr))
-                  .Append("\",\"readOnly\":").Append(readOnly ? "true" : "false")
-                  .Append(",\"hasClamp\":").Append(hasClamp ? "true" : "false")
-                  .Append(",\"clampMin\":").Append(clampMin.ToString(System.Globalization.CultureInfo.InvariantCulture))
-                  .Append(",\"clampMax\":").Append(clampMax.ToString(System.Globalization.CultureInfo.InvariantCulture))
-                  .Append(",\"tooltip\":\"").Append(EscapeJson(tooltip))
-                  .Append("\",\"headerContent\":\"").Append(EscapeJson(headerContent))
-                  .Append("\",\"headerSize\":").Append(headerSize.ToString(System.Globalization.CultureInfo.InvariantCulture))
-                  .Append(",\"hasSpace\":").Append(hasSpace ? "true" : "false")
-                  .Append(",\"spaceHeight\":").Append(spaceHeight.ToString(System.Globalization.CultureInfo.InvariantCulture))
-                  .Append("}");
+                AppendFieldJson(sb, field, val);
             }
 
             sb.Append(']');

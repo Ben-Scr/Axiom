@@ -85,17 +85,17 @@ namespace Axiom {
 			return false;
 		}
 
+		// IDs crossing the script bridge are *only* runtime IDs (or the
+		// equivalent UUID-resolution path). We deliberately do NOT fall back
+		// to `ToEntityHandle(entityID)` here: that would truncate the high 32
+		// bits of a UUID and could coincidentally collide with a live entt
+		// handle whose lower 32 bits happen to match — silent type confusion
+		// across the script boundary, hard to debug.
+
 		Scene* currentScene = ScriptEngine::GetScene();
 		if (currentScene) {
 			if (TryResolveEntityByUUID(*currentScene, entityID, outHandle)) {
 				outScene = currentScene;
-				return true;
-			}
-
-			const EntityHandle rawHandle = ToEntityHandle(entityID);
-			if (currentScene->IsValid(rawHandle)) {
-				outScene = currentScene;
-				outHandle = rawHandle;
 				return true;
 			}
 		}
@@ -145,13 +145,41 @@ namespace Axiom {
 		auto& comp = scene->GetComponent<Type>(handle)
 
 
-	// Helper: find ComponentInfo by display name
+	// Helper: find ComponentInfo by name. The lookup tries multiple keys so
+	// callers can pass any of the names the engine knows the component by:
+	//   1. displayName    — what the editor inspector shows ("Tilemap 2D")
+	//   2. serializedName — the JSON key in scene/prefab files ("Tilemap2D")
+	//   3. serializedName + "Component" — C# convention for package types
+	//      (`typeof(Tilemap2DComponent).Name` -> "Tilemap2DComponent")
+	//   4. displayName_no_spaces + "Component" — same C# convention but
+	//      derived from the display name when no serializedName is set.
+	//
+	// Built-in component types appear in C#'s `s_NativeComponentNames` map
+	// (Entity.cs) and use the displayName form, so they hit case 1 directly.
+	// Package types like Tilemap2DComponent fall through C#'s `typeof(T).Name`
+	// fallback, which produces "Tilemap2DComponent" — case 3 catches it.
 	static const ComponentInfo* FindComponentByName(const std::string& name) {
 		const auto& registry = SceneManager::Get().GetComponentRegistry();
 		const ComponentInfo* found = nullptr;
 		registry.ForEachComponentInfo([&](const std::type_index&, const ComponentInfo& info) {
-			if (info.displayName == name)
+			if (found) return;
+			if (info.displayName == name) { found = &info; return; }
+			if (!info.serializedName.empty() && info.serializedName == name) { found = &info; return; }
+			if (!info.serializedName.empty() && (info.serializedName + "Component") == name) {
 				found = &info;
+				return;
+			}
+			if (!info.displayName.empty()) {
+				std::string normalized;
+				normalized.reserve(info.displayName.size());
+				for (char c : info.displayName) {
+					if (c != ' ') normalized.push_back(c);
+				}
+				if ((normalized + "Component") == name) {
+					found = &info;
+					return;
+				}
+			}
 		});
 		return found;
 	}

@@ -22,8 +22,12 @@ namespace Axiom {
 		FileWatcher(const FileWatcher&) = delete;
 		FileWatcher& operator=(const FileWatcher&) = delete;
 
-		void Watch(const std::string& path, const std::string& pattern, Callback callback);
-		void Watch(const std::vector<std::string>& paths, const std::vector<std::string>& patterns, Callback callback);
+		// `recursive` controls whether directory targets monitor their full
+		// subtree. Defaults to true to preserve historical behavior. Pass
+		// `false` to watch only the immediate children of each directory
+		// target (file targets ignore the flag).
+		void Watch(const std::string& path, const std::string& pattern, Callback callback, bool recursive = true);
+		void Watch(const std::vector<std::string>& paths, const std::vector<std::string>& patterns, Callback callback, bool recursive = true);
 		void Stop();
 		void Poll(float pollIntervalSeconds = 1.0f);
 
@@ -33,6 +37,7 @@ namespace Axiom {
 		struct WatchTarget {
 			std::filesystem::path Path;
 			bool IsDirectory = false;
+			bool Recursive = true;
 		};
 
 		using Snapshot = std::unordered_map<std::string, std::filesystem::file_time_type>;

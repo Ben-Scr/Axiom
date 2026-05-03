@@ -8,6 +8,7 @@
 #include <vector>
 #include <cstdint>
 #include <optional>
+#include <type_traits>
 #include <utility>
 
 namespace Axiom {
@@ -63,13 +64,18 @@ namespace Axiom {
 		void Process(b2WorldId world, const ContactBeginCallback& onBegin = {}, const ContactEndCallback& onEnd = {}, const ContactStayCallback& onStay = {}) {
 			b2ContactEvents ev = b2World_GetContactEvents(world);
 
+			// User callbacks (often dispatched into managed scripts) can call
+			// entity.Destroy(), which removes a Collider2D component, which calls
+			// UnregisterShape — mutating m_begin/m_end/m_hit/m_activeContacts
+			// while we iterate them. Resolving the per-shape callback list
+			// up-front into a local snapshot makes the dispatch reentrant-safe.
 			for (int i = 0; i < ev.beginCount; ++i) {
 				auto& e = ev.beginEvents[i];
 				auto collision2D = MakeCollision(e.shapeIdA, e.shapeIdB);
 				m_activeContacts[MakeContactKey(collision2D.entityA, collision2D.entityB)] = { e.shapeIdA, e.shapeIdB, collision2D };
 				if (onBegin) onBegin(collision2D);
-				Dispatch(e.shapeIdA, collision2D, m_begin);
-				Dispatch(e.shapeIdB, collision2D, m_begin);
+				DispatchSafe(e.shapeIdA, collision2D, m_begin);
+				DispatchSafe(e.shapeIdB, collision2D, m_begin);
 			}
 
 			for (int i = 0; i < ev.endCount; ++i) {
@@ -81,8 +87,8 @@ namespace Axiom {
 					m_activeContacts.erase(active);
 				}
 				if (onEnd) onEnd(collision2D);
-				Dispatch(e.shapeIdA, collision2D, m_end);
-				Dispatch(e.shapeIdB, collision2D, m_end);
+				DispatchSafe(e.shapeIdA, collision2D, m_end);
+				DispatchSafe(e.shapeIdB, collision2D, m_end);
 			}
 
 			for (int i = 0; i < ev.hitCount; ++i) {
@@ -92,13 +98,21 @@ namespace Axiom {
 				if (auto active = m_activeContacts.find(key); active != m_activeContacts.end()) {
 					active->second.Collision.contactPoint = collision2D.contactPoint;
 				}
-				Dispatch(e.shapeIdA, collision2D, m_hit);
-				Dispatch(e.shapeIdB, collision2D, m_hit);
+				DispatchSafe(e.shapeIdA, collision2D, m_hit);
+				DispatchSafe(e.shapeIdB, collision2D, m_hit);
 			}
 
 			if (onStay) {
+				// Snapshot the active-contact collisions so callbacks that
+				// destroy entities (and therefore erase from m_activeContacts)
+				// don't invalidate our iterator.
+				std::vector<Collision2D> stayCollisions;
+				stayCollisions.reserve(m_activeContacts.size());
 				for (const auto& [_, active] : m_activeContacts) {
-					onStay(active.Collision);
+					stayCollisions.push_back(active.Collision);
+				}
+				for (const Collision2D& c : stayCollisions) {
+					onStay(c);
 				}
 			}
 		}
@@ -143,6 +157,19 @@ namespace Axiom {
 			auto it = map.find(id);
 			if (it == map.end()) return;
 			for (auto& cb : it->second) cb(e);
+		}
+
+		// Reentrant-safe variant: copies the matching callbacks into a local
+		// vector before invoking them, so a callback that triggers
+		// UnregisterShape (via entity destruction) can't free the underlying
+		// vector while we iterate. The copy is intentional.
+		template<typename Evt, typename Map>
+		void DispatchSafe(b2ShapeId id, const Evt& e, Map& map) {
+			auto it = map.find(id);
+			if (it == map.end()) return;
+			using CallbackVec = std::remove_reference_t<decltype(it->second)>;
+			CallbackVec snapshot = it->second;
+			for (auto& cb : snapshot) cb(e);
 		}
 
 		std::unordered_map<b2ShapeId,

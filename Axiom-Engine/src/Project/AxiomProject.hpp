@@ -62,7 +62,53 @@ namespace Axiom {
 			std::vector<std::pair<std::string, bool>> ModuleEnabled;
 		} Profiler;
 
+		// Runtime stats overlay (F6 in built games). When true, the runtime
+		// pushes RuntimeStatsLayer at startup so the user can toggle the
+		// FPS / tris / memory / audio overlay with F6. When false the layer
+		// isn't pushed at all — zero overhead in the shipped exe. Default
+		// true so the diagnostic is available out of the box; ship-ready
+		// builds can flip it off via Project Settings.
+		bool ShowRuntimeStats = true;
+
+		// Runtime log overlay (F7 in built games). Same model as
+		// ShowRuntimeStats: the runtime pushes RuntimeLogLayer at startup
+		// when this is true. When both overlays are visible, the log
+		// window stacks below the stats window so they don't overlap.
+		bool ShowRuntimeLogs = true;
+
+		// Build profile — drives compile-time defines emitted to user
+		// scripts at build time:
+		//   • Development → AXIOM_BUILD_DEVELOPMENT (and toggle defaults
+		//     for ShowRuntimeStats/ShowRuntimeLogs are ON)
+		//   • Release     → AXIOM_BUILD_RELEASE (defaults OFF)
+		// Independent of MSBuild's Debug/Release/Dist (which controls
+		// ENGINE compilation). Set in the Build panel; default is
+		// Development so iteration-day defaults are sensible.
+		enum class BuildProfile : uint8_t {
+			Development = 0,
+			Release     = 1,
+		};
+		BuildProfile ActiveBuildProfile = BuildProfile::Development;
+
+		// User-defined preprocessor symbols. Get baked into BOTH the C#
+		// .csproj's <DefineConstants> AND the native scripts' CMakeLists
+		// target_compile_definitions on every script compile. Useful for
+		// per-team / per-build flags (STEAM_BUILD, DEMO_MODE, etc.).
+		// Names only — no `=value` form (matches Unity's scripting-define-
+		// symbols convention; keeps the UI a flat list and the symbols
+		// uniform across both compilers).
+		std::vector<std::string> CustomDefines;
+
 		std::string GetUserAssemblyOutputPath(std::string_view configuration = {}) const;
+
+		// Returns "AXIOM_BUILD_DEVELOPMENT" or "AXIOM_BUILD_RELEASE" — the
+		// compile-time symbol matching ActiveBuildProfile. Used by the C#
+		// build pipeline (BuildManagedDefineConstants) and the native
+		// CMakeLists generator.
+		std::string GetActiveBuildProfileDefine() const;
+		static const char* BuildProfileToString(BuildProfile profile);
+		static BuildProfile BuildProfileFromString(std::string_view value);
+
 		std::string GetNativeDllPath() const;
 		std::string GetSceneFilePath(const std::string& sceneName) const;
 		void EnsureNativeScriptBootstrapFiles() const;

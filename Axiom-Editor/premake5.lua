@@ -19,6 +19,12 @@ project "Axiom-Editor"
         "icon.rc"
     }
 
+    -- Engine-level diagnostic overlays (StatsOverlay, LogOverlay, …).
+    -- Same cross-binary share pattern as ProfilerPanel: the .cpp files use
+    -- ImGui directly and are excluded from the engine DLL; we compile them
+    -- into the editor binary so the Game View toolbar can drive them.
+    files { path.join(ROOT_DIR, "Axiom-Engine/src/Diagnostics/**.cpp") }
+
     UseDependencySet(Dependency.EditorRuntimeCommon)
     defines(GetAxiomModuleDefines())
     defines { "AIM_IMPORT_DLL" }

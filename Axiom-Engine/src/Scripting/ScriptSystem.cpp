@@ -1091,7 +1091,12 @@ namespace Axiom {
 					*cmakeExecutable,
 					"-B", buildDirectory.string(),
 					"-S", nativeProjectDirectory,
-					"-DCMAKE_BUILD_TYPE=" + buildConfig
+					"-DCMAKE_BUILD_TYPE=" + buildConfig,
+					// Editor hot-reload always builds the DEVELOPMENT profile —
+					// editor preview shouldn't bleed Release stripping into
+					// running games. The Build panel pipeline overrides this
+					// (passes RELEASE) when packaging a release ship build.
+					"-DAXIOM_BUILD_PROFILE=DEVELOPMENT"
 				};
 
 #if defined(AIM_PLATFORM_WINDOWS)

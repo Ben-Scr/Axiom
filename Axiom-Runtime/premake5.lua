@@ -28,6 +28,13 @@ project "Axiom-Runtime"
         includedirs { path.join(ROOT_DIR, "Axiom-Editor/src") }
     end
 
+    -- Engine-level diagnostic overlays (StatsOverlay = F6, LogOverlay = F7,
+    -- and any future additions). Glob picks up new files automatically.
+    -- Same cross-binary share as ProfilerPanel: the .cpp files use ImGui
+    -- and are excluded from the engine DLL; we compile them into the
+    -- runtime exe so the F6/F7 toggle layers can drive them.
+    files { path.join(ROOT_DIR, "Axiom-Engine/src/Diagnostics/**.cpp") }
+
     UseDependencySet(Dependency.EditorRuntimeCommon)
     defines(GetAxiomModuleDefines())
     defines { "AIM_IMPORT_DLL" }

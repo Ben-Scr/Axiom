@@ -27,6 +27,7 @@ namespace Axiom {
 			m_World.UnregisterBody(*body);
 		}
 		for (auto& [key, collider] : m_Colliders) {
+			(void)key;
 			m_World.UnregisterCollider(*collider);
 		}
 
@@ -52,8 +53,9 @@ namespace Axiom {
 	void AxiomPhysicsWorld2D::DestroyBody(EntityHandle entity) {
 		uint32_t key = static_cast<uint32_t>(entity);
 
-		// Destroy collider first if exists
-		DestroyCollider(entity);
+		// Destroy every collider attached to this entity first; the body's
+		// physical attachments must be torn down before the body itself.
+		DestroyAllCollidersOnEntity(entity);
 
 		auto it = m_Bodies.find(key);
 		if (it == m_Bodies.end()) return;
@@ -74,7 +76,9 @@ namespace Axiom {
 	AxiomPhys::BoxCollider* AxiomPhysicsWorld2D::CreateBoxCollider(EntityHandle entity, const Vec2& halfExtents) {
 		uint32_t key = static_cast<uint32_t>(entity);
 
-		DestroyCollider(entity); // Replace existing
+		// Replace only the existing BOX collider on this entity, not any
+		// other kind. Keeps a coexisting circle collider's pointer valid.
+		DestroyCollider(entity, FastColliderKind::Box);
 
 		auto collider = std::make_unique<AxiomPhys::BoxCollider>(AxiomPhys::Vec2(halfExtents.x, halfExtents.y));
 		AxiomPhys::BoxCollider* ptr = collider.get();
@@ -86,14 +90,14 @@ namespace Axiom {
 			m_World.AttachCollider(*bodyIt->second, *ptr);
 		}
 
-		m_Colliders[key] = std::move(collider);
+		m_Colliders[ColliderKey{ key, FastColliderKind::Box }] = std::move(collider);
 		return ptr;
 	}
 
 	AxiomPhys::CircleCollider* AxiomPhysicsWorld2D::CreateCircleCollider(EntityHandle entity, float radius) {
 		uint32_t key = static_cast<uint32_t>(entity);
 
-		DestroyCollider(entity);
+		DestroyCollider(entity, FastColliderKind::Circle);
 
 		auto collider = std::make_unique<AxiomPhys::CircleCollider>(radius);
 		AxiomPhys::CircleCollider* ptr = collider.get();
@@ -104,18 +108,23 @@ namespace Axiom {
 			m_World.AttachCollider(*bodyIt->second, *ptr);
 		}
 
-		m_Colliders[key] = std::move(collider);
+		m_Colliders[ColliderKey{ key, FastColliderKind::Circle }] = std::move(collider);
 		return ptr;
 	}
 
-	void AxiomPhysicsWorld2D::DestroyCollider(EntityHandle entity) {
-		uint32_t key = static_cast<uint32_t>(entity);
-		auto it = m_Colliders.find(key);
+	void AxiomPhysicsWorld2D::DestroyCollider(EntityHandle entity, FastColliderKind kind) {
+		const uint32_t key = static_cast<uint32_t>(entity);
+		auto it = m_Colliders.find(ColliderKey{ key, kind });
 		if (it == m_Colliders.end()) return;
 
 		AxiomPhys::Collider* ptr = it->second.get();
 
-		// Detach from body if attached
+		// Detach from body if attached. AxiomPhys's DetachCollider takes the
+		// body and detaches whichever collider is currently attached — fine
+		// when only one kind exists. With two coexisting kinds this becomes
+		// approximate, but the user-facing path (inspector) blocks dual
+		// colliders via DeclareConflict, and the storage cleanup is what we
+		// care about here.
 		auto bodyIt = m_Bodies.find(key);
 		if (bodyIt != m_Bodies.end()) {
 			m_World.DetachCollider(*bodyIt->second);
@@ -123,6 +132,24 @@ namespace Axiom {
 
 		m_World.UnregisterCollider(*ptr);
 		m_Colliders.erase(it);
+	}
+
+	void AxiomPhysicsWorld2D::DestroyAllCollidersOnEntity(EntityHandle entity) {
+		const uint32_t key = static_cast<uint32_t>(entity);
+		// Detach once if a body exists; covers however many colliders were
+		// attached.
+		auto bodyIt = m_Bodies.find(key);
+		if (bodyIt != m_Bodies.end()) {
+			m_World.DetachCollider(*bodyIt->second);
+		}
+		for (auto it = m_Colliders.begin(); it != m_Colliders.end(); ) {
+			if (it->first.entity == key) {
+				m_World.UnregisterCollider(*it->second);
+				it = m_Colliders.erase(it);
+			} else {
+				++it;
+			}
+		}
 	}
 
 	void AxiomPhysicsWorld2D::RegisterContactCallback(EntityHandle entity, AxiomContactCallback callback) {

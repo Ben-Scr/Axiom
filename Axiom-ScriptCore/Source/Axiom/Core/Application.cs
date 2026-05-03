@@ -55,6 +55,24 @@ public static class Application
     public static float AspectRatio => ScreenHeight > 0 ? (float)ScreenWidth / ScreenHeight : 1.0f;
 
     /// <summary>
+    /// True when the script is running inside the editor process (editor
+    /// preview / play-mode), false when running in a built game.
+    ///
+    /// Runtime sibling of the compile-time AXIOM_EDITOR define — both are
+    /// available so callers can pick whichever fits the use:
+    /// <code>
+    /// #if AXIOM_EDITOR                    // strips at compile time
+    ///     EditorOnlyDebugDraw();
+    /// #endif
+    ///
+    /// if (Application.IsEditor) {         // runtime branch (no #if)
+    ///     SkipFatalErrorsThatWouldKillTheEditorProcess();
+    /// }
+    /// </code>
+    /// </summary>
+    public static bool IsEditor => InternalCalls.Application_IsEditor();
+
+    /// <summary>
     /// Quits the application. Only works in build mode, ignored in the editor.
     /// </summary>
     public static void Quit() => InternalCalls.Application_Quit();

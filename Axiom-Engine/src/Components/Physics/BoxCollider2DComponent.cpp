@@ -92,8 +92,12 @@ namespace Axiom {
 			polygon.vertices[2].x - polygon.vertices[0].x,
 			polygon.vertices[2].y - polygon.vertices[0].y
 		);
-		size += Vec2{ 1.f };
-		return size - tr->Scale;
+		// Inverse of SetScale's `tr->Scale.x * scale.x * 0.5f` per axis: polygon
+		// edge length equals tr->Scale.<axis> * localScale.<axis>, so divide.
+		// Guard against zero scale to avoid division-by-zero NaN.
+		const float invX = tr->Scale.x != 0.0f ? 1.0f / tr->Scale.x : 0.0f;
+		const float invY = tr->Scale.y != 0.0f ? 1.0f / tr->Scale.y : 0.0f;
+		return Vec2{ size.x * invX, size.y * invY };
 	}
 
 	void BoxCollider2DComponent::UpdateScale(const Scene& scene) {
@@ -114,7 +118,7 @@ namespace Axiom {
 			return;
 		}
 
-		b2Polygon polygon = b2MakeOffsetBox(tr->Scale.x * 0.5f, tr->Scale.y * 0.5f, b2Vec2(center.x, center.y), b2Rot_identity);
+		b2Polygon polygon = b2MakeOffsetBox(tr->Scale.x * 0.5f, tr->Scale.y * 0.5f, b2Vec2(center.x, center.y), tr->GetB2Rotation());
 		b2Shape_SetPolygon(m_ShapeId, &polygon);
 	}
 

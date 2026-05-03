@@ -3,25 +3,37 @@
 -- Discovers `axiom-package.lua` manifests under `packages/<Name>/`, validates them,
 -- topologically sorts by dependency, and registers Premake projects:
 --
---   - engine_core  / standalone_cpp  →  Pkg.<Name>.Native  (C++ SharedLib)
---   - csharp                          →  Pkg.<Name>          (C# SharedLib)
+--   - native  / native_standalone  →  Pkg.<Name>.Native  (C++ SharedLib)
+--   - csharp                       →  Pkg.<Name>          (C# SharedLib)
 --
 -- A single package may declare any combination of the three layers. When both
--- engine_core and standalone_cpp are present they are merged into a single
--- Pkg.<Name>.Native (and that lib then links the engine, since engine_core does).
+-- native and native_standalone are present they are merged into a single
+-- Pkg.<Name>.Native (and that lib then links the engine, since `native` does).
+--
+-- Layer naming history
+-- --------------------
+-- The layers used to be called `engine_core` (links the engine) and
+-- `standalone_cpp` (does not link the engine). Those names led to two recurring
+-- confusions: `engine_core` was misread as "code that belongs to the engine
+-- core" and `standalone_cpp` was wordy when its sibling was just `csharp`.
+-- The canonical names are now `native` and `native_standalone`. The old names
+-- still work — manifests using them are normalised + warned at validation time
+-- so existing project-local packages don't break — but new manifests should
+-- use the canonical names.
 --
 -- Manifest schema (returned by axiom-package.lua via `return { ... }`):
 --
 --   name          string   required, unique
 --   version       string   required
 --   description   string   optional
---   layers        table    required, at least one of engine_core / standalone_cpp / csharp
+--   layers        table    required, at least one of native / native_standalone / csharp
 --                          each layer:
 --                              sources           list of file/glob patterns relative to the package dir
 --                              includes          optional list of include dirs (relative)
 --                              private_includes  optional list of include dirs (relative)
 --                          csharp may additionally declare:
 --                              pinvoke_dll       string identifying the package's own native lib
+--                              allow_unsafe      true to enable `clr "Unsafe"` for fixed-pin pinvoke
 --   dependencies  table    optional list of other package names
 
 local PackageSystem = {}
@@ -30,7 +42,36 @@ local function PackageError(msg)
     error("[Axiom Packages] " .. msg, 0)
 end
 
-local k_AllowedLayers = { engine_core = true, standalone_cpp = true, csharp = true }
+-- Canonical layer names. Old names (engine_core, standalone_cpp) are accepted
+-- but normalised to the canonical form before any other code reads them.
+local k_AllowedLayers = { native = true, native_standalone = true, csharp = true }
+local k_LayerAliases = {
+    engine_core    = "native",
+    standalone_cpp = "native_standalone",
+}
+
+-- Walk the layers table, rename any deprecated keys to their canonical form,
+-- and emit a one-time warning per occurrence. Returns the (possibly mutated)
+-- layers table — call this BEFORE ValidateManifest so the rest of the loader
+-- only ever sees `native` / `native_standalone` / `csharp`.
+local function NormaliseLayerNames(manifest)
+    if type(manifest.layers) ~= "table" then return end
+    for oldName, newName in pairs(k_LayerAliases) do
+        local spec = manifest.layers[oldName]
+        if spec ~= nil then
+            if manifest.layers[newName] ~= nil then
+                PackageError("Package '" .. tostring(manifest.name) ..
+                    "' declares both '" .. oldName .. "' (deprecated alias) and '" ..
+                    newName .. "' (canonical). Pick one.")
+            end
+            print("[Axiom Packages] Package '" .. tostring(manifest.name) ..
+                "' uses deprecated layer name '" .. oldName .. "'. Rename to '" ..
+                newName .. "' in axiom-package.lua. (Old name still works for now.)")
+            manifest.layers[newName] = spec
+            manifest.layers[oldName] = nil
+        end
+    end
+end
 
 -- PascalCase.PascalCase[.PascalCase…]. Same shape as scripts/NewPackage.py's
 -- regex. Anything outside this character set breaks downstream as a project
@@ -76,7 +117,8 @@ local function ValidateManifest(manifest, manifestPath)
     for layerName, layerSpec in pairs(manifest.layers) do
         if not k_AllowedLayers[layerName] then
             PackageError("Package '" .. manifest.name .. "' declares unknown layer '" ..
-                tostring(layerName) .. "'. Allowed: engine_core, standalone_cpp, csharp.")
+                tostring(layerName) .. "'. Allowed: native, native_standalone, csharp " ..
+                "(deprecated aliases: engine_core → native, standalone_cpp → native_standalone).")
         end
         if type(layerSpec) ~= "table" then
             PackageError("Package '" .. manifest.name .. "' layer '" .. layerName .. "' must be a table.")
@@ -92,21 +134,21 @@ local function ValidateManifest(manifest, manifestPath)
         PackageError("Package '" .. manifest.name .. "' declares zero layers; at least one is required.")
     end
 
-    -- engine_core links the engine via EditorRuntimeCommon; standalone_cpp
+    -- `native` links the engine via EditorRuntimeCommon; `native_standalone`
     -- explicitly does not. Combining both into the same Pkg.<Name>.Native
     -- silently links the engine into the "standalone" sources, breaking
     -- the layer's whole reason to exist. scripts/NewPackage.py already
     -- rejects this combo; mirror that here so hand-written manifests fail
     -- the same way.
-    if manifest.layers.engine_core and manifest.layers.standalone_cpp then
+    if manifest.layers.native and manifest.layers.native_standalone then
         PackageError("Package '" .. manifest.name ..
-            "' declares both 'engine_core' and 'standalone_cpp' layers. They merge into a single Pkg.<Name>.Native and cannot coexist — engine_core links the engine while standalone_cpp must not. Pick one.")
+            "' declares both 'native' and 'native_standalone' layers. They merge into a single Pkg.<Name>.Native and cannot coexist — `native` links the engine while `native_standalone` must not. Pick one.")
     end
 
     if manifest.layers.csharp and manifest.layers.csharp.pinvoke_dll then
-        if not (manifest.layers.engine_core or manifest.layers.standalone_cpp) then
+        if not (manifest.layers.native or manifest.layers.native_standalone) then
             PackageError("Package '" .. manifest.name ..
-                "' declares 'pinvoke_dll' on csharp layer but has no native (engine_core / standalone_cpp) layer to bridge to.")
+                "' declares 'pinvoke_dll' on csharp layer but has no native (native / native_standalone) layer to bridge to.")
         end
     end
 
@@ -125,6 +167,9 @@ local function LoadManifestsFromRoot(searchRoot, manifests, byName)
         local manifestPath = path.join(entry, "axiom-package.lua")
         if os.isfile(manifestPath) then
             local manifest = dofile(manifestPath)
+            -- Rewrite deprecated layer names to canonical form before any
+            -- validator / dispatcher reads them. Warns on rewrite.
+            NormaliseLayerNames(manifest)
             ValidateManifest(manifest, manifestPath)
 
             if byName[manifest.name] then
@@ -196,10 +241,10 @@ end
 
 local function RegisterNativeProject(manifest)
     local layers = manifest.layers
-    local hasEngineCore = layers.engine_core ~= nil
-    local hasStandalone = layers.standalone_cpp ~= nil
+    local hasEngineLinked   = layers.native ~= nil
+    local hasEngineUnlinked = layers.native_standalone ~= nil
 
-    if not hasEngineCore and not hasStandalone then
+    if not hasEngineLinked and not hasEngineUnlinked then
         return
     end
 
@@ -214,8 +259,8 @@ local function RegisterNativeProject(manifest)
         AppendAll(includes, ResolvePaths(manifest.PackageDir, layer.private_includes))
     end
 
-    if hasEngineCore then AbsorbLayer(layers.engine_core) end
-    if hasStandalone then AbsorbLayer(layers.standalone_cpp) end
+    if hasEngineLinked   then AbsorbLayer(layers.native) end
+    if hasEngineUnlinked then AbsorbLayer(layers.native_standalone) end
 
     project(nativeName)
         location(path.join(ROOT_DIR, "premake/generated", nativeName))
@@ -232,8 +277,10 @@ local function RegisterNativeProject(manifest)
         files(sources)
         includedirs(includes)
 
-        if hasEngineCore then
-            -- Engine-core packages link against the engine and pick up its include set.
+        if hasEngineLinked then
+            -- The `native` layer links against the engine and picks up its
+            -- include set transitively. `native_standalone` skips this — it's
+            -- the explicit "no engine link" path.
             UseDependencySet(Dependency.EditorRuntimeCommon)
             -- Engine is a SharedLib; consumers must declare the import side of AXIOM_API.
             defines { "AIM_IMPORT_DLL" }

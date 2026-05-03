@@ -84,7 +84,7 @@ namespace Axiom {
 		static bool s_IsInitialized;
 
 		struct SoundRequest {
-			AudioHandle GetHandle;
+			AudioHandle Handle;
 			float Volume;
 			float Priority;
 			glm::vec3 Position;

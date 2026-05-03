@@ -17,6 +17,7 @@ namespace Axiom {
 		float  (*Application_GetFixedDeltaTime)();
 		float  (*Application_GetUnscaledDeltaTime)();
 		float  (*Application_GetFixedUnscaledDeltaTime)();
+		int    (*Application_IsEditor)(); // 1 = host is editor, 0 = standalone runtime
 
 		// ── Log ──────────────────────────────────────────────────────
 		void   (*Log_Trace)(const char* message);

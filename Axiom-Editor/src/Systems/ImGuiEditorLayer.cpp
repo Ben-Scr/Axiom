@@ -2,6 +2,7 @@
 #include "ImGuiEditorLayer.hpp"
 
 #include <imgui.h>
+#include <imgui_internal.h>
 #include <glad/glad.h>
 
 #include <cstdio>
@@ -28,7 +29,9 @@
 #include "Utils/Process.hpp"
 #include "Packages/NuGetSource.hpp"
 #include "Packages/GitHubSource.hpp"
+#include "Editor/EditorComponentRegistration.hpp"
 #include "Editor/ExternalEditor.hpp"
+#include "Inspector/ReferencePicker.hpp"
 #include "Gui/EditorIcons.hpp"
 #include "Gui/EditorTheme.hpp"
 #include "Assets/AssetRegistry.hpp"
@@ -1396,7 +1399,6 @@ namespace Axiom {
 			}
 			m_IsInspectorPanelFocused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
 			ImGui::End();
-			m_InspectorItemWasActive = false;
 			return;
 		}
 
@@ -1652,7 +1654,7 @@ namespace Axiom {
 
 			// Scripts render their own per-script sections — skip the outer wrapper
 			if (info.displayName == "Scripts") {
-				if (info.drawInspector) info.drawInspector(entitySpan);
+				DispatchComponentInspector(info, entitySpan);
 				return;
 			}
 
@@ -1849,9 +1851,7 @@ namespace Axiom {
 			}
 
 			if (open) {
-				if (info.drawInspector) {
-					info.drawInspector(entitySpan);
-				}
+				DispatchComponentInspector(info, entitySpan);
 				ImGuiUtils::EndComponentSection();
 			}
 		});
@@ -1876,6 +1876,12 @@ namespace Axiom {
 			text += " - not on all selected";
 			ImGui::TextDisabled("%s", text.c_str());
 		}
+
+		// Render the unified reference-picker popup once per inspector frame,
+		// so any native component's PropertyDrawer-driven asset/entity picker
+		// surfaces. The script inspector renders it inside its own draw too,
+		// for the case where the panel is open without other components.
+		ReferencePicker::RenderPopup();
 
 		ImGui::Spacing();
 		ImGui::Separator();
@@ -1903,6 +1909,28 @@ namespace Axiom {
 			}
 			scene.MarkDirty();
 		};
+		// `proposed` would conflict on at least one selected entity if any of
+		// its current components has a declared conflict with `proposed` (or
+		// vice-versa). The Add Component popup hides such entries entirely so
+		// the user can't end up in an invariant-violating state. The matching
+		// existing component is reported via outConflictName for tooltips.
+		auto componentConflictsWithSelection = [&](const std::type_index& proposed,
+			std::string* outConflictName) -> bool
+		{
+			for (const Entity& e : selectedEntities) {
+				if (registry.HasConflict(e, proposed)) {
+					if (outConflictName) {
+						registry.ForEachComponentInfo([&](const std::type_index& id, const ComponentInfo& info) {
+							if (!outConflictName->empty()) return;
+							if (id == proposed || !info.has || !info.has(e)) return;
+							if (registry.TypesConflict(id, proposed)) *outConflictName = info.displayName;
+						});
+					}
+					return true;
+				}
+			}
+			return false;
+		};
 
 		if (ImGui::BeginPopup("AddComponentPopup")) {
 			ImGui::SetNextItemWidth(-1);
@@ -1919,7 +1947,7 @@ namespace Axiom {
 
 			if (hasFilter) {
 				// Flat filtered list when searching
-				registry.ForEachComponentInfo([&](const std::type_index&, const ComponentInfo& info) {
+				registry.ForEachComponentInfo([&](const std::type_index& typeId, const ComponentInfo& info) {
 					if (info.category != ComponentCategory::Component) return;
 					if (info.displayName == "Scripts") return;
 					if (!componentMissingFromAny(info)) return;
@@ -1928,8 +1956,14 @@ namespace Axiom {
 					std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(), ::tolower);
 					if (lowerName.find(filter) == std::string::npos) return;
 
-					if (ImGuiUtils::MenuItemEllipsis(info.displayName, info.displayName.c_str(), nullptr, false, true, 260.0f)) {
-						addComponentToAll(info);
+					std::string conflictName;
+					const bool conflicts = componentConflictsWithSelection(typeId, &conflictName);
+					const bool enabled = !conflicts;
+					if (ImGuiUtils::MenuItemEllipsis(info.displayName, info.displayName.c_str(), nullptr, false, enabled, 260.0f)) {
+						if (enabled) addComponentToAll(info);
+					}
+					if (conflicts && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+						ImGui::SetTooltip("Conflicts with %s", conflictName.c_str());
 					}
 				});
 
@@ -1960,8 +1994,12 @@ namespace Axiom {
 				}
 			} else {
 				// Categorized tree view
-				// Collect components grouped by subcategory
-				std::vector<std::pair<std::string, std::vector<const ComponentInfo*>>> categories;
+				// Collect components grouped by subcategory. Pair the
+				// ComponentInfo* with its std::type_index so the leaf render
+				// can ask the registry whether the type conflicts with
+				// anything already on the selection.
+				struct CategoryEntry { std::type_index TypeId; const ComponentInfo* Info; };
+				std::vector<std::pair<std::string, std::vector<CategoryEntry>>> categories;
 				std::unordered_map<std::string, size_t> categoryIndex;
 
 				// Define subcategory ordering
@@ -1970,10 +2008,10 @@ namespace Axiom {
 				};
 				for (const auto& sub : subcategoryOrder) {
 					categoryIndex[sub] = categories.size();
-					categories.emplace_back(sub, std::vector<const ComponentInfo*>{});
+					categories.emplace_back(sub, std::vector<CategoryEntry>{});
 				}
 
-				registry.ForEachComponentInfo([&](const std::type_index&, const ComponentInfo& info) {
+				registry.ForEachComponentInfo([&](const std::type_index& typeId, const ComponentInfo& info) {
 					if (info.category != ComponentCategory::Component) return;
 					if (info.displayName == "Scripts") return;
 					if (!componentMissingFromAny(info)) return;
@@ -1982,19 +2020,26 @@ namespace Axiom {
 					auto it = categoryIndex.find(sub);
 					if (it == categoryIndex.end()) {
 						categoryIndex[sub] = categories.size();
-						categories.emplace_back(sub, std::vector<const ComponentInfo*>{});
+						categories.emplace_back(sub, std::vector<CategoryEntry>{});
 						it = categoryIndex.find(sub);
 					}
-					categories[it->second].second.push_back(&info);
+					categories[it->second].second.push_back({ typeId, &info });
 				});
 
 				for (const auto& [subcategory, components] : categories) {
 					if (components.empty()) continue;
 
 					if (ImGui::TreeNode(subcategory.c_str())) {
-						for (const auto* info : components) {
-							if (ImGuiUtils::MenuItemEllipsis(info->displayName, info->displayName.c_str(), nullptr, false, true, 260.0f)) {
-								addComponentToAll(*info);
+						for (const auto& entry : components) {
+							const ComponentInfo* info = entry.Info;
+							std::string conflictName;
+							const bool conflicts = componentConflictsWithSelection(entry.TypeId, &conflictName);
+							const bool enabled = !conflicts;
+							if (ImGuiUtils::MenuItemEllipsis(info->displayName, info->displayName.c_str(), nullptr, false, enabled, 260.0f)) {
+								if (enabled) addComponentToAll(*info);
+							}
+							if (conflicts && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+								ImGui::SetTooltip("Conflicts with %s", conflictName.c_str());
 							}
 						}
 						ImGui::TreePop();
@@ -2085,12 +2130,16 @@ namespace Axiom {
 			ImGui::EndDragDropTarget();
 		}
 
-		// Detect inspector property changes: when a widget finishes being edited, mark dirty
-		bool anyActive = ImGui::IsAnyItemActive() && ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows);
-		if (m_InspectorItemWasActive && !anyActive) {
-			scene.MarkDirty();
+		// Mark the scene dirty only when ImGui reports a real value change on
+		// the active widget this frame. IsAnyItemActive() would fire on mere
+		// focus/click; ActiveIdHasBeenEditedThisFrame fires only on edits
+		// (drag step, keystroke, etc.). Scope to this panel's focus stack.
+		if (ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows)) {
+			const ImGuiContext& g = *ImGui::GetCurrentContext();
+			if (g.ActiveId != 0 && g.ActiveIdHasBeenEditedThisFrame) {
+				scene.MarkDirty();
+			}
 		}
-		m_InspectorItemWasActive = anyActive;
 		m_IsInspectorPanelFocused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
 
 		ImGui::End();

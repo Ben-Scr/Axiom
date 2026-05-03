@@ -159,14 +159,14 @@ namespace Axiom {
 				continue;
 			}
 
-			if (IsThrottled(request.GetHandle)) {
+			if (IsThrottled(request.Handle)) {
 				processed++;
 				continue;
 			}
 
-			if (StartOneShotInstance(request.GetHandle, request.Volume)) {
+			if (StartOneShotInstance(request.Handle, request.Volume)) {
 				s_soundsPlayedThisFrame++;
-				ThrottleSound(request.GetHandle);
+				ThrottleSound(request.Handle);
 				s_activeSoundCount++;
 			}
 			processed++;
@@ -436,7 +436,7 @@ namespace Axiom {
 		}
 
 		SoundRequest request{};
-		request.GetHandle = audioHandle;
+		request.Handle = audioHandle;
 		request.Volume = volume;
 		request.Priority = 1.0f;
 		request.RequestTime = std::chrono::steady_clock::now();

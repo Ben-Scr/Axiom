@@ -14,6 +14,45 @@
 namespace Axiom {
 
 	namespace {
+		// XML-escape any character that has meaning in attribute or element
+		// content. Without this, GitHub-index strings (which we don't control)
+		// could inject MSBuild elements/attributes into the user's .csproj.
+		std::string XmlEscape(std::string_view value) {
+			std::string out;
+			out.reserve(value.size());
+			for (char c : value) {
+				switch (c) {
+					case '&':  out += "&amp;";  break;
+					case '<':  out += "&lt;";   break;
+					case '>':  out += "&gt;";   break;
+					case '"':  out += "&quot;"; break;
+					case '\'': out += "&apos;"; break;
+					default:   out.push_back(c); break;
+				}
+			}
+			return out;
+		}
+
+		// Reject names/versions that would cause path traversal or otherwise
+		// escape the project tree when concatenated into a filesystem path. We
+		// don't try to canonicalise — we just refuse anything containing path
+		// separators, parent-dir tokens, drive markers, control chars, or
+		// non-printable bytes. Whitelist: [A-Za-z0-9._-+~]. Empty rejected.
+		bool IsSafePathComponent(std::string_view value) {
+			if (value.empty()) return false;
+			if (value == "." || value == "..") return false;
+			for (char c : value) {
+				const unsigned char uc = static_cast<unsigned char>(c);
+				if (uc < 0x20 || uc == 0x7F) return false;
+				if (c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' ||
+				    c == '"' || c == '<' || c == '>' || c == '|') return false;
+			}
+			// Also forbid embedded ".." substrings even if the whole string
+			// isn't exactly "..".
+			if (value.find("..") != std::string_view::npos) return false;
+			return true;
+		}
+
 		// Add a <Reference> to a .csproj file
 		static bool AddReferenceToProject(const std::string& csprojPath, const std::string& dllPath,
 			const std::string& hintPath) {
@@ -26,10 +65,15 @@ namespace Axiom {
 			if (content.find(hintPath) != std::string::npos)
 				return true;
 
+			// Escape every untrusted value before splicing it into XML. The
+			// stem is derived from dllPath which itself flows from packageId;
+			// hintPath includes packageId/version. Both come from a remote
+			// package index — must not be trusted as raw XML.
+			const std::string stem = std::filesystem::path(dllPath).stem().string();
 			std::string refBlock =
 				"  <ItemGroup>\n"
-				"    <Reference Include=\"" + std::filesystem::path(dllPath).stem().string() + "\">\n"
-				"      <HintPath>" + hintPath + "</HintPath>\n"
+				"    <Reference Include=\"" + XmlEscape(stem) + "\">\n"
+				"      <HintPath>" + XmlEscape(hintPath) + "</HintPath>\n"
 				"    </Reference>\n"
 				"  </ItemGroup>\n";
 
@@ -53,7 +97,7 @@ namespace Axiom {
 			in.close();
 
 			// Find the ItemGroup containing the Reference
-			std::string search = "<Reference Include=\"" + assemblyName + "\">";
+			std::string search = "<Reference Include=\"" + XmlEscape(assemblyName) + "\">";
 			auto refPos = content.find(search);
 			if (refPos == std::string::npos) return true; // Already removed
 
@@ -62,7 +106,8 @@ namespace Axiom {
 			auto igEnd = content.find("</ItemGroup>", refPos);
 			if (igStart == std::string::npos || igEnd == std::string::npos) return false;
 
-			igEnd += 13; // length of "</ItemGroup>" + newline
+			constexpr std::string_view kCloseTag = "</ItemGroup>";
+			igEnd += kCloseTag.size(); // 12 chars — was previously 13, deleting one byte past the tag.
 			if (igEnd < content.size() && content[igEnd] == '\n') igEnd++;
 
 			content.erase(igStart, igEnd - igStart);
@@ -247,6 +292,16 @@ namespace Axiom {
 			if (!project)
 				return { false, "No project loaded" };
 
+			// Reject untrusted strings that could escape the project tree
+			// (packageId/version come from the remote index — never trust them
+			// as raw filesystem components).
+			if (!IsSafePathComponent(packageId)) {
+				return { false, "Refusing to install package with unsafe id: '" + packageId + "'" };
+			}
+			if (!version.empty() && !IsSafePathComponent(version)) {
+				return { false, "Refusing to install package with unsafe version: '" + version + "'" };
+			}
+
 			std::string packagesDir = Path::Combine(project->RootDirectory, "Packages", packageId, version);
 			std::string dllName = packageId + ".dll";
 			std::string localDll = Path::Combine(packagesDir, dllName);
@@ -265,8 +320,10 @@ namespace Axiom {
 			if (!successValue || !successValue->AsBoolOr(false))
 				return { false, "Download failed for " + packageId };
 
-			// Add <Reference> to .csproj
-			std::string hintPath = "Packages\\" + packageId + "\\" + version + "\\" + dllName;
+			// Add <Reference> to .csproj. MSBuild accepts both '/' and '\' as
+			// path separators on every platform; using '/' keeps the file
+			// portable across Windows/Linux without affecting Windows builds.
+			std::string hintPath = "Packages/" + packageId + "/" + version + "/" + dllName;
 			if (!AddReferenceToProject(csprojPath, localDll, hintPath))
 				return { false, "Failed to add reference to .csproj" };
 

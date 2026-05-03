@@ -1,6 +1,8 @@
 #include <Axiom.hpp>
 #include "Core/Application.hpp"
+#include "RuntimeLogLayer.hpp"
 #include "RuntimeProfilerLayer.hpp"
+#include "RuntimeStatsLayer.hpp"
 #include "Scene/SceneDefinition.hpp"
 #include "Scene/SceneManager.hpp"
 
@@ -93,6 +95,25 @@ public:
 		AxiomProject* project = ProjectManager::GetCurrentProject();
 		if (project && project->Profiler.EnableInRuntime) {
 			PushLayer<RuntimeProfilerLayer>("RuntimeProfiler");
+		}
+
+		// Push the F6 stats overlay when the project opts in (default true).
+		// Layers share the runtime ImGui context via RuntimeImGuiHost, so
+		// pushing both this and the profiler layer above is fine — push order
+		// doesn't matter for ImGui hosting, but it DOES matter for stacking:
+		// stats is pushed first so it renders first this frame, and
+		// RuntimeLogLayer reads the stats layer's last-rendered height to
+		// position itself directly below.
+		const bool showStats = project ? project->ShowRuntimeStats : true;
+		if (showStats) {
+			PushLayer<RuntimeStatsLayer>("RuntimeStats");
+		}
+
+		// Push the F7 log overlay when the project opts in (default true).
+		// Stacks below the stats overlay when both visible.
+		const bool showLogs = project ? project->ShowRuntimeLogs : true;
+		if (showLogs) {
+			PushLayer<RuntimeLogLayer>("RuntimeLogs");
 		}
 	}
 

@@ -11,6 +11,11 @@
 namespace Axiom::Json {
 
 	namespace {
+		// Cap recursion depth to prevent a malformed deeply-nested JSON from
+		// stack-overflowing the parser. 256 covers any reasonable user data
+		// (scenes, prefabs, project files); pathological input is rejected.
+		constexpr int kMaxParseDepth = 256;
+
 		class Parser {
 		public:
 			explicit Parser(std::string_view text)
@@ -18,8 +23,19 @@ namespace Axiom::Json {
 			}
 
 			bool ParseValue(Value& outValue, std::string* outError) {
+				// Skip a leading UTF-8 BOM (EF BB BF). Some editors (Notepad,
+				// some VS configs) write one; the JSON spec doesn't include it
+				// in valid input, but rejecting BOM-prefixed files is a
+				// frequent and surprising failure mode.
+				if (m_Text.size() >= 3
+					&& static_cast<unsigned char>(m_Text[0]) == 0xEF
+					&& static_cast<unsigned char>(m_Text[1]) == 0xBB
+					&& static_cast<unsigned char>(m_Text[2]) == 0xBF) {
+					m_Position = 3;
+				}
+
 				SkipWhitespace();
-				if (!ParseAny(outValue, outError)) {
+				if (!ParseAny(outValue, outError, 0)) {
 					return false;
 				}
 
@@ -33,7 +49,12 @@ namespace Axiom::Json {
 			}
 
 		private:
-			bool ParseAny(Value& outValue, std::string* outError) {
+			bool ParseAny(Value& outValue, std::string* outError, int depth) {
+				if (depth >= kMaxParseDepth) {
+					SetError(outError, "JSON nesting depth exceeded");
+					return false;
+				}
+
 				SkipWhitespace();
 				if (IsAtEnd()) {
 					SetError(outError, "Unexpected end of JSON input");
@@ -50,9 +71,9 @@ namespace Axiom::Json {
 				case '"':
 					return ParseStringValue(outValue, outError);
 				case '{':
-					return ParseObject(outValue, outError);
+					return ParseObject(outValue, outError, depth);
 				case '[':
-					return ParseArray(outValue, outError);
+					return ParseArray(outValue, outError, depth);
 				default:
 					if (Peek() == '-' || std::isdigit(static_cast<unsigned char>(Peek()))) {
 						return ParseNumber(outValue, outError);
@@ -124,6 +145,36 @@ namespace Axiom::Json {
 						if (!ParseUnicodeEscape(codePoint, outError)) {
 							return false;
 						}
+						// JSON encodes code points outside the BMP as a UTF-16
+						// surrogate pair: a high surrogate (D800-DBFF) followed
+						// by `\u` and a low surrogate (DC00-DFFF). Detect the
+						// pair and combine into the actual 21-bit code point;
+						// without this we'd emit invalid UTF-8 for every emoji
+						// or non-BMP character.
+						if (codePoint >= 0xD800 && codePoint <= 0xDBFF) {
+							if (m_Position + 2 > m_Text.size()
+								|| m_Text[m_Position] != '\\'
+								|| m_Text[m_Position + 1] != 'u') {
+								SetError(outError, "Lone high surrogate in unicode escape");
+								return false;
+							}
+							m_Position += 2; // consume '\u'
+							uint32_t low = 0;
+							if (!ParseUnicodeEscape(low, outError)) {
+								return false;
+							}
+							if (low < 0xDC00 || low > 0xDFFF) {
+								SetError(outError, "Invalid low surrogate in unicode escape");
+								return false;
+							}
+							codePoint = 0x10000u
+								+ ((codePoint - 0xD800u) << 10)
+								+ (low - 0xDC00u);
+						}
+						else if (codePoint >= 0xDC00 && codePoint <= 0xDFFF) {
+							SetError(outError, "Lone low surrogate in unicode escape");
+							return false;
+						}
 						AppendUtf8(result, codePoint);
 						break;
 					}
@@ -189,8 +240,10 @@ namespace Axiom::Json {
 
 			bool ParseNumber(Value& outValue, std::string* outError) {
 				const size_t start = m_Position;
+				bool isNegative = false;
 
 				if (Peek() == '-') {
+					isNegative = true;
 					Advance();
 				}
 
@@ -201,6 +254,12 @@ namespace Axiom::Json {
 
 				if (Peek() == '0') {
 					Advance();
+					// Reject leading zeros (`01`, `09`) per JSON spec — a `0`
+					// can only be followed by `.`, exponent, or end-of-number.
+					if (!IsAtEnd() && std::isdigit(static_cast<unsigned char>(Peek()))) {
+						SetError(outError, "Invalid JSON number: leading zero");
+						return false;
+					}
 				}
 				else if (std::isdigit(static_cast<unsigned char>(Peek()))) {
 					while (!IsAtEnd() && std::isdigit(static_cast<unsigned char>(Peek()))) {
@@ -212,7 +271,9 @@ namespace Axiom::Json {
 					return false;
 				}
 
+				bool isFloat = false;
 				if (!IsAtEnd() && Peek() == '.') {
+					isFloat = true;
 					Advance();
 					if (IsAtEnd() || !std::isdigit(static_cast<unsigned char>(Peek()))) {
 						SetError(outError, "Invalid JSON number fraction");
@@ -224,6 +285,7 @@ namespace Axiom::Json {
 				}
 
 				if (!IsAtEnd() && (Peek() == 'e' || Peek() == 'E')) {
+					isFloat = true;
 					Advance();
 					if (!IsAtEnd() && (Peek() == '+' || Peek() == '-')) {
 						Advance();
@@ -238,6 +300,36 @@ namespace Axiom::Json {
 				}
 
 				const std::string numericText(m_Text.substr(start, m_Position - start));
+
+				// Integer-shaped numbers go to int64/uint64 storage to preserve
+				// full 64-bit precision (UUIDs, AssetGUIDs are >2^53). Only
+				// fall back to double when we see a fraction or exponent, or
+				// when the integer doesn't fit in [INT64_MIN, UINT64_MAX].
+				if (!isFloat) {
+					if (isNegative) {
+						const char* first = numericText.data();
+						const char* last = first + numericText.size();
+						int64_t intValue = 0;
+						auto [ptr, ec] = std::from_chars(first, last, intValue);
+						if (ec == std::errc{} && ptr == last) {
+							outValue = Value(intValue);
+							return true;
+						}
+						// Out of int64 range — fall through to double.
+					}
+					else {
+						const char* first = numericText.data();
+						const char* last = first + numericText.size();
+						uint64_t uintValue = 0;
+						auto [ptr, ec] = std::from_chars(first, last, uintValue);
+						if (ec == std::errc{} && ptr == last) {
+							outValue = Value(uintValue);
+							return true;
+						}
+						// Out of uint64 range — fall through to double.
+					}
+				}
+
 				char* endPtr = nullptr;
 				const double parsed = std::strtod(numericText.c_str(), &endPtr);
 				if (endPtr != numericText.c_str() + numericText.size()) {
@@ -249,7 +341,7 @@ namespace Axiom::Json {
 				return true;
 			}
 
-			bool ParseObject(Value& outValue, std::string* outError) {
+			bool ParseObject(Value& outValue, std::string* outError, int depth) {
 				if (!Consume('{')) {
 					SetError(outError, "Expected object start");
 					return false;
@@ -275,7 +367,7 @@ namespace Axiom::Json {
 					}
 
 					Value childValue;
-					if (!ParseAny(childValue, outError)) {
+					if (!ParseAny(childValue, outError, depth + 1)) {
 						return false;
 					}
 
@@ -299,7 +391,7 @@ namespace Axiom::Json {
 				return false;
 			}
 
-			bool ParseArray(Value& outValue, std::string* outError) {
+			bool ParseArray(Value& outValue, std::string* outError, int depth) {
 				if (!Consume('[')) {
 					SetError(outError, "Expected array start");
 					return false;
@@ -314,7 +406,7 @@ namespace Axiom::Json {
 
 				while (!IsAtEnd()) {
 					Value childValue;
-					if (!ParseAny(childValue, outError)) {
+					if (!ParseAny(childValue, outError, depth + 1)) {
 						return false;
 					}
 
@@ -393,10 +485,25 @@ namespace Axiom::Json {
 				break;
 			case Value::Type::Number:
 			{
-				std::ostringstream stream;
-				stream.precision(15);
-				stream << value.AsDoubleOr(0.0);
-				out += stream.str();
+				// Integer kinds emit without a decimal point so they round-trip
+				// losslessly. The Double kind uses precision-15 stream output.
+				switch (value.GetNumberKind()) {
+				case Value::NumberKind::Int64:
+					out += std::to_string(value.AsInt64Or(0));
+					break;
+				case Value::NumberKind::UInt64:
+					out += std::to_string(value.AsUInt64Or(0));
+					break;
+				case Value::NumberKind::Double:
+				default:
+				{
+					std::ostringstream stream;
+					stream.precision(15);
+					stream << value.AsDoubleOr(0.0);
+					out += stream.str();
+					break;
+				}
+				}
 				break;
 			}
 			case Value::Type::String:
@@ -480,6 +587,7 @@ namespace Axiom::Json {
 
 	Value::Value(double value)
 		: m_Type(Type::Number)
+		, m_NumberKind(NumberKind::Double)
 		, m_Number(value) {
 	}
 
@@ -489,12 +597,16 @@ namespace Axiom::Json {
 
 	Value::Value(int64_t value)
 		: m_Type(Type::Number)
-		, m_Number(static_cast<double>(value)) {
+		, m_NumberKind(NumberKind::Int64)
+		, m_Number(static_cast<double>(value))
+		, m_Int64(value) {
 	}
 
 	Value::Value(uint64_t value)
 		: m_Type(Type::Number)
-		, m_Number(static_cast<double>(value)) {
+		, m_NumberKind(NumberKind::UInt64)
+		, m_Number(static_cast<double>(value))
+		, m_UInt64(value) {
 	}
 
 	Value::Value(const char* value)
@@ -523,7 +635,13 @@ namespace Axiom::Json {
 	}
 
 	double Value::AsDoubleOr(double fallback) const {
-		return IsNumber() ? m_Number : fallback;
+		if (!IsNumber()) return fallback;
+		switch (m_NumberKind) {
+		case NumberKind::Int64:  return static_cast<double>(m_Int64);
+		case NumberKind::UInt64: return static_cast<double>(m_UInt64);
+		case NumberKind::Double:
+		default:                 return m_Number;
+		}
 	}
 
 	int Value::AsIntOr(int fallback) const {
@@ -531,8 +649,26 @@ namespace Axiom::Json {
 			return fallback;
 		}
 
+		if (m_NumberKind == NumberKind::Int64) {
+			if (m_Int64 < std::numeric_limits<int>::min() ||
+			    m_Int64 > std::numeric_limits<int>::max()) {
+				return fallback;
+			}
+			return static_cast<int>(m_Int64);
+		}
+		if (m_NumberKind == NumberKind::UInt64) {
+			if (m_UInt64 > static_cast<uint64_t>(std::numeric_limits<int>::max())) {
+				return fallback;
+			}
+			return static_cast<int>(m_UInt64);
+		}
+
+		// Largest double < INT_MAX+1 that's still ≤ INT_MAX. Comparing
+		// against `static_cast<double>(INT_MAX)` would round up to INT_MAX+1,
+		// so values in (INT_MAX, INT_MAX+1] would pass the guard and produce
+		// UB on cast.
 		if (m_Number < static_cast<double>(std::numeric_limits<int>::min()) ||
-			m_Number > static_cast<double>(std::numeric_limits<int>::max())) {
+			m_Number >= static_cast<double>(std::numeric_limits<int>::max()) + 1.0) {
 			return fallback;
 		}
 
@@ -544,8 +680,24 @@ namespace Axiom::Json {
 			return fallback;
 		}
 
-		if (m_Number < static_cast<double>(std::numeric_limits<int64_t>::min()) ||
-			m_Number > static_cast<double>(std::numeric_limits<int64_t>::max())) {
+		if (m_NumberKind == NumberKind::Int64) {
+			return m_Int64;
+		}
+		if (m_NumberKind == NumberKind::UInt64) {
+			if (m_UInt64 > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+				return fallback;
+			}
+			return static_cast<int64_t>(m_UInt64);
+		}
+
+		// `static_cast<double>(INT64_MAX)` rounds up to 9223372036854775808.0,
+		// which is INT64_MAX+1. Values in (INT64_MAX, INT64_MAX+1] would pass
+		// a naive `> INT64_MAX` check then UB on cast. Use the next-lower
+		// exactly-representable double instead.
+		constexpr double k_MaxSafeI64 = 9223372036854774784.0;  // INT64_MAX rounded down to nearest representable double
+		constexpr double k_MinSafeI64 = -9223372036854775808.0; // INT64_MIN is exactly representable
+
+		if (m_Number < k_MinSafeI64 || m_Number > k_MaxSafeI64) {
 			return fallback;
 		}
 
@@ -553,8 +705,23 @@ namespace Axiom::Json {
 	}
 
 	uint64_t Value::AsUInt64Or(uint64_t fallback) const {
-		if (!IsNumber() || m_Number < 0.0 ||
-			m_Number > static_cast<double>(std::numeric_limits<uint64_t>::max())) {
+		if (!IsNumber()) {
+			return fallback;
+		}
+
+		if (m_NumberKind == NumberKind::UInt64) {
+			return m_UInt64;
+		}
+		if (m_NumberKind == NumberKind::Int64) {
+			if (m_Int64 < 0) return fallback;
+			return static_cast<uint64_t>(m_Int64);
+		}
+
+		// `static_cast<double>(UINT64_MAX)` rounds up; same UB hazard as
+		// AsInt64Or. Use the next-lower exactly-representable double.
+		constexpr double k_MaxSafeU64 = 18446744073709549568.0;
+
+		if (m_Number < 0.0 || m_Number > k_MaxSafeU64) {
 			return fallback;
 		}
 
@@ -638,8 +805,11 @@ namespace Axiom::Json {
 		}
 
 		m_Type = type;
+		m_NumberKind = NumberKind::Double;
 		m_Bool = false;
 		m_Number = 0.0;
+		m_Int64 = 0;
+		m_UInt64 = 0;
 		m_String.clear();
 		m_Object.clear();
 		m_Array.clear();

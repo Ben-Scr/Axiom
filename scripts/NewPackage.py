@@ -8,7 +8,7 @@ premake so the new project lands in the IDE solution on next reload.
 
 Usage examples
 --------------
-    # Engine package, native (engine_core) only:
+    # Engine package, native (engine-linked) only:
     python scripts/NewPackage.py Axiom.Foo
 
     # Engine package, C# only (Serialization-style):
@@ -16,6 +16,13 @@ Usage examples
 
     # Engine package, native + C# wired together (Tilemap2D-style):
     python scripts/NewPackage.py Axiom.Foo --layers native+csharp
+
+    # Scaffold an example component too (header + cpp + properties + C# wrapper).
+    # The scaffolded component demonstrates the unified Inspector ruleset:
+    # PropertyDescriptors, ReferencePicker for asset fields, conflictsWith, and
+    # the matching managed C# class. This is the recommended way to start a
+    # gameplay package — saves ~150 lines of boilerplate vs. writing it by hand.
+    python scripts/NewPackage.py Axiom.Foo --layers native+csharp --component Health
 
     # Project-local package (auto-adds to axiom-project.json allow-list):
     python scripts/NewPackage.py MyGame.Loot --layers native+csharp \\
@@ -26,12 +33,18 @@ Usage examples
 
 Layer flags
 -----------
-    native      -> engine_core layer (links Axiom-Engine; AIM_* logging available)
-    standalone  -> standalone_cpp layer (no engine link)
-    csharp      -> csharp layer (.NET 9.0 SharedLib; auto-links Axiom-ScriptCore)
+    native      -> `native` layer (links Axiom-Engine; AIM_* logging available)
+    standalone  -> `native_standalone` layer (no engine link)
+    csharp      -> `csharp` layer (.NET 9.0 SharedLib; auto-links Axiom-ScriptCore)
 
 You can pass them comma- or plus-separated: `--layers native,csharp` or
 `--layers native+csharp`.
+
+The CLI shorthand `native` / `standalone` maps to the loader's canonical
+layer names (`native` / `native_standalone`). The previous `engine_core` /
+`standalone_cpp` layer names are still accepted by the loader (with a
+deprecation warning) but new manifests should use the canonical form — that's
+what this scaffolder emits.
 """
 from __future__ import annotations
 
@@ -75,12 +88,12 @@ return {{
 {layers}
     }},
 
-    dependencies = {{}},
+    dependencies = {{{dependencies}}},
 }}
 """
 
 NATIVE_LAYER_BLOCK = """\
-        engine_core = {
+        native = {
             sources = {
                 "src/**.cpp",
                 "src/**.hpp",
@@ -90,7 +103,7 @@ NATIVE_LAYER_BLOCK = """\
         },"""
 
 STANDALONE_LAYER_BLOCK = """\
-        standalone_cpp = {
+        native_standalone = {
             sources = {
                 "src/**.cpp",
                 "src/**.hpp",
@@ -111,13 +124,42 @@ CSHARP_LAYER_BLOCK_BRIDGED = """\
             pinvoke_dll  = "Pkg.{name}.Native",
         }},"""
 
-# ---- C++ entry point (engine_core) ----------------------------------------
+# ---- C++ entry point (`native` layer) -------------------------------------
+# This is the WITHOUT-component scaffold: bare entry that logs and returns 0,
+# but with a thoroughly commented "this is where you wire things up" hint so
+# the user knows the canonical pattern (RegisterSerializableComponent +
+# DeclareComponentConflict). The WITH-component variant lower in this file
+# replaces the comment block with a real registration call.
 NATIVE_ENTRY_TEMPLATE = """\
 // {name} — package entry point.
 //
 // `AxiomPackage_OnLoad` runs once after the runtime LoadLibrary's this DLL.
 // Use it to register components, attach systems, or any other one-time init.
 // Return 0 on success; non-zero is logged but the module stays loaded.
+//
+// Canonical wiring for a gameplay component (see the ".claude/skills/
+// axiom-author-package" + "axiom-inspector-ruleset" skills for full details):
+//
+//   #include "Inspector/PropertyRegistration.hpp"
+//   #include "Packages/PackageRegistration.hpp"
+//   #include "MyComponent.hpp"
+//
+//   std::vector<Axiom::PropertyDescriptor> props = {{
+//       Axiom::Properties::Make("Value", "Value", &MyComponent::Value),
+//   }};
+//   Axiom::Package::RegisterSerializableComponent<MyComponent>(
+//       "My Component", "Subcategory", "MyComponent",
+//       /* drawInspector */ nullptr,            // null = auto-drawer fallback
+//       /* serialize     */ nullptr,            // optional — see axiom-serialize-field
+//       /* deserialize   */ nullptr,
+//       Axiom::ComponentCategory::Component,
+//       std::move(props));
+//
+//   // Optional: declare exclusivity against other renderers / systems.
+//   // Axiom::Package::DeclareComponentConflict<MyComponent, Other>();
+//
+// Pass `--component <Name>` to scripts/NewPackage.py to scaffold an example
+// component end-to-end (header + cpp + properties + C# wrapper).
 
 #include "Packages/PackageApi.hpp"
 #include "Core/Log.hpp"
@@ -128,7 +170,7 @@ extern "C" AXIOM_PACKAGE_API int AxiomPackage_OnLoad() {{
 }}
 """
 
-# ---- C++ entry point (standalone_cpp, no engine link) ---------------------
+# ---- C++ entry point (`native_standalone`, no engine link) ----------------
 # Standalone packages don't link Axiom-Engine, so AIM_*_TAG is unavailable.
 # Use printf for the "I'm alive" log; users can swap in their own logger.
 STANDALONE_ENTRY_TEMPLATE = """\
@@ -193,12 +235,265 @@ internal static class NativeBindings
 
 # ---- C# user-facing surface ------------------------------------------------
 CSHARP_PACKAGE_TEMPLATE = """\
+using Axiom;
+
 namespace {csharpNamespace};
 
 // Entry surface for the {name} package. Add public types and helpers here.
+//
+// Common patterns:
+//
+//   // 1. A managed wrapper over a native component (Tilemap2D-style):
+//   public class MyComponent : Component {{
+//       public unsafe int Value {{
+//           get {{ int v; NativeBindings.GetValue(Entity.ID, &v); return v; }}
+//           set => NativeBindings.SetValue(Entity.ID, value);
+//       }}
+//   }}
+//
+//   // 2. A pure-managed script (no native side):
+//   public class MyScript : EntityScript {{
+//       [ShowInEditor] public float Speed = 1.0f;
+//       [ShowInEditor] public Texture? Sprite;
+//       public override void OnUpdate() {{ /* per-frame logic */ }}
+//   }}
+//
+// The [ShowInEditor] attribute drives the editor inspector via the unified
+// PropertyDrawer — see the "axiom-inspector-ruleset" skill for the canonical
+// type table (enums, [Flags] enums, references, vectors all auto-render).
 public static class Package
 {{
 }}
+"""
+
+# ---- Component scaffold (header + cpp, attached when --component is given)
+COMPONENT_HEADER_TEMPLATE = """\
+#pragma once
+
+// {componentName}Component — generated by scripts/NewPackage.py --component.
+//
+// Plain value-type struct. Public fields show up automatically in the editor
+// inspector via the PropertyDescriptor list registered in PackageEntry.cpp.
+// Add new fields here and a matching `Properties::Make(...)` line in the
+// registration block — that's the entire pipeline (no inspector code, no
+// custom serializer required for primitive / vector / color / enum fields).
+
+#include "Packages/PackageApi.hpp"
+
+#include "Collections/Color.hpp"
+
+namespace {namespaceName} {{
+
+    struct AXIOM_PACKAGE_API {componentName}Component {{
+        float        Value      = 0.0f;
+        Axiom::Color TintColor  = Axiom::Color::White();
+    }};
+
+}} // namespace {namespaceName}
+"""
+
+COMPONENT_CPP_TEMPLATE = """\
+#include "{componentName}Component.hpp"
+
+// Pure data component — no out-of-line implementation needed today. Methods
+// (e.g. validation helpers, derived getters) can live here when added.
+"""
+
+# ---- Component bindings update for PackageEntry.cpp -----------------------
+# When --component is given alongside the native layer, we replace the bare
+# logging entry with a real registration that demonstrates the full flow.
+COMPONENT_NATIVE_ENTRY_TEMPLATE = """\
+// {name} — package entry point.
+//
+// Registers {componentName}Component as a fully-declarative inspector
+// component. Adding a new field is one line in the properties list below;
+// the editor's auto-drawer + the eventual generic JSON serialiser pick it up
+// for free. See the "axiom-inspector-ruleset" skill for the type table.
+
+#include "{componentName}Component.hpp"
+
+#include "Inspector/PropertyRegistration.hpp"
+#include "Packages/PackageRegistration.hpp"
+#include "Core/Log.hpp"
+
+#include <vector>
+
+extern "C" AXIOM_PACKAGE_API int AxiomPackage_OnLoad() {{
+    using namespace Axiom;
+    using {namespaceName}::{componentName}Component;
+
+    std::vector<PropertyDescriptor> properties = {{
+        Properties::Make("Value",     "Value",      &{componentName}Component::Value),
+        Properties::Make("TintColor", "Tint Color", &{componentName}Component::TintColor),
+    }};
+
+    Package::RegisterSerializableComponent<{componentName}Component>(
+        /* displayName    */ "{componentName}",
+        /* subcategory    */ "{componentSubcategory}",
+        /* serializedName */ "{componentName}",
+        /* drawInspector  */ nullptr,            // null = unified auto-drawer
+        /* serialize      */ nullptr,            // optional; see axiom-serialize-field
+        /* deserialize    */ nullptr,
+        /* category       */ ComponentCategory::Component,
+        /* properties     */ std::move(properties));
+
+    // Declare conflicts here when this component is mutually exclusive with
+    // another. Both halves of the relation only need to be declared on one
+    // side — the registry's HasConflict check walks both directions.
+    //
+    //   Package::DeclareComponentConflict<{componentName}Component, Axiom::SpriteRendererComponent>();
+
+    AIM_INFO_TAG("Pkg.{name}", "Loaded - {componentName}Component registered.");
+    return 0;
+}}
+"""
+
+CSHARP_COMPONENT_WRAPPER_TEMPLATE = """\
+using Axiom;
+
+namespace {csharpNamespace};
+
+// Managed wrapper over the native {componentName}Component. The C# layer
+// holds no parallel state — every read/write goes through P/Invoke into
+// Pkg.{name}.Native.
+//
+// Field accessors are pinvoke-thin so spans, structs, and primitive types
+// cross the boundary without managed allocations. For component-level
+// methods (e.g. SetTiles batch APIs), follow the Tilemap2DComponent.cs
+// pattern: pin the input span with `fixed` and pass a raw pointer + length.
+public class {componentName}Component : Component
+{{
+    public unsafe float Value
+    {{
+        get
+        {{
+            float v;
+            NativeBindings.GetValue(Entity.ID, &v);
+            return v;
+        }}
+        set => NativeBindings.SetValue(Entity.ID, value);
+    }}
+}}
+"""
+
+# Per-component P/Invoke surface that lives next to PInvoke.cpp's Ping().
+COMPONENT_PINVOKE_TEMPLATE = """\
+// {componentName}Component bindings exported to the csharp layer. Every
+// public field accessor in {componentName}Component.cs maps to one entry
+// here. Resolve the entity via the package's GetComponent helper (typically
+// a small static, see Tilemap2DPInvoke.cpp for the pattern) so each binding
+// is a one-liner.
+
+#include "{componentName}Component.hpp"
+
+#include "Components/General/UUIDComponent.hpp"
+#include "Scene/Scene.hpp"
+#include "Scene/SceneManager.hpp"
+
+#include <cstdint>
+
+namespace {{
+    using namespace Axiom;
+    using namespace {namespaceName};
+
+    {componentName}Component* Get{componentName}(uint64_t entityId) {{
+        if (entityId == 0) return nullptr;
+        {componentName}Component* found = nullptr;
+        SceneManager::Get().ForeachLoadedScene([&](Scene& scene) {{
+            if (found) return;
+            EntityHandle handle = entt::null;
+            if (scene.TryResolveRuntimeID(entityId, handle)
+                && scene.HasComponent<{componentName}Component>(handle)) {{
+                found = &scene.GetComponent<{componentName}Component>(handle);
+            }}
+        }});
+        return found;
+    }}
+}}
+
+extern "C" AXIOM_PACKAGE_API
+void {exportPrefix}_GetValue(uint64_t entityId, float* outValue) {{
+    if (!outValue) return;
+    *outValue = 0.0f;
+    auto* comp = Get{componentName}(entityId);
+    if (!comp) return;
+    *outValue = comp->Value;
+}}
+
+extern "C" AXIOM_PACKAGE_API
+void {exportPrefix}_SetValue(uint64_t entityId, float value) {{
+    if (auto* comp = Get{componentName}(entityId)) comp->Value = value;
+}}
+"""
+
+CSHARP_COMPONENT_BINDINGS_TEMPLATE = """\
+using System.Runtime.InteropServices;
+
+namespace {csharpNamespace};
+
+// DllImport surface bridging this csharp layer to its sibling native layer
+// (Pkg.{name}.Native). Mirror every binding in `src/{componentName}PInvoke.cpp`
+// — names, calling convention, and primitive types must match exactly.
+//
+// Library resolution is handled by Axiom.Interop.PackageNativeResolver in
+// Axiom-ScriptCore — no host-side wiring required.
+internal static unsafe class NativeBindings
+{{
+    private const string Lib = "Pkg.{name}.Native";
+
+    [DllImport(Lib, EntryPoint = "{exportPrefix}_Ping",     CallingConvention = CallingConvention.Cdecl)]
+    public static extern int  Ping();
+
+    [DllImport(Lib, EntryPoint = "{exportPrefix}_GetValue", CallingConvention = CallingConvention.Cdecl)]
+    public static extern void GetValue(ulong entityId, float* outValue);
+
+    [DllImport(Lib, EntryPoint = "{exportPrefix}_SetValue", CallingConvention = CallingConvention.Cdecl)]
+    public static extern void SetValue(ulong entityId, float value);
+}}
+"""
+
+# ---- README template ------------------------------------------------------
+README_TEMPLATE = """\
+# {name}
+
+{description}
+
+## Install
+
+Engine-shipped packages live under `<repo>/packages/`. Project-local packages
+live under `<project>/Packages/` and must appear in the project's
+`axiom-project.json` allow-list:
+
+```json
+{{
+  "packages": [
+    "{name}"
+  ]
+}}
+```
+
+After editing `axiom-project.json`, regenerate project files:
+
+```sh
+./vendor/bin/premake5.exe vs2022     # Windows
+./vendor/bin/premake5    gmake2      # Linux
+```
+
+The build emits:
+
+| Layer | Project | Output |
+|---|---|---|
+{layersTable}
+
+## Usage
+
+{usageBlock}
+
+## See also
+
+- `axiom-package.lua` — manifest + layer list
+- `.claude/skills/axiom-author-package` — manifest schema reference
+- `.claude/skills/axiom-inspector-ruleset` — how component fields surface in the editor
 """
 
 
@@ -228,8 +523,8 @@ def parse_layers(raw: str) -> set[str]:
         raise SystemExit("[NewPackage] No layers specified after parsing.")
     if "native" in layers and "standalone" in layers:
         raise SystemExit(
-            "[NewPackage] Cannot combine 'native' (engine_core) and "
-            "'standalone' (standalone_cpp) — they merge into the same DLL "
+            "[NewPackage] Cannot combine 'native' (engine-linked) and "
+            "'standalone' (engine-unlinked) — they merge into the same DLL "
             "and would conflict over engine linkage. Pick one."
         )
     return layers
@@ -251,7 +546,8 @@ def write_file(path: Path, contents: str) -> None:
     print(f"  wrote {path.relative_to(REPO_ROOT) if path.is_relative_to(REPO_ROOT) else path}")
 
 
-def render_manifest(name: str, description: str, layers: set[str]) -> str:
+def render_manifest(name: str, description: str, layers: set[str],
+                    depends_on: list[str] | None = None) -> str:
     blocks: list[str] = []
     if "native" in layers:
         blocks.append(NATIVE_LAYER_BLOCK)
@@ -264,45 +560,181 @@ def render_manifest(name: str, description: str, layers: set[str]) -> str:
         else:
             blocks.append(CSHARP_LAYER_BLOCK_NO_BRIDGE)
     layers_text = "\n\n".join(blocks)
+
+    if depends_on:
+        # Compact one-line form for short lists, multi-line for longer ones.
+        if len(depends_on) == 1:
+            deps_text = f' "{depends_on[0]}" '
+        else:
+            entries = ",\n        ".join(f'"{dep}"' for dep in depends_on)
+            deps_text = f"\n        {entries},\n    "
+    else:
+        deps_text = ""
+
     return MANIFEST_TEMPLATE.format(
         name=name,
         description=description,
         layers=layers_text,
+        dependencies=deps_text,
     )
 
 
-def emit_native_sources(pkg_dir: Path, name: str, kind: str) -> None:
-    """Write src/ + include/ stubs for native ('engine_core') or 'standalone'."""
+def emit_native_sources(pkg_dir: Path, name: str, kind: str,
+                        component: str | None = None) -> None:
+    """Write src/ + include/ stubs for the `native` or `native_standalone` layer.
+
+    When `component` is set + `kind == 'native'`, the bare entry is replaced
+    with a registration call that demonstrates Properties::Make + the unified
+    inspector ruleset, and a sibling `<Component>Component.{hpp,cpp}` is
+    emitted under include/ + src/.
+    """
     if kind == "native":
-        entry = NATIVE_ENTRY_TEMPLATE.format(name=name)
+        if component:
+            namespace_name = pkg_namespace_from_name(name)
+            entry = COMPONENT_NATIVE_ENTRY_TEMPLATE.format(
+                name=name,
+                componentName=component,
+                componentSubcategory=component,   # safe default subcategory
+                namespaceName=namespace_name,
+            )
+        else:
+            entry = NATIVE_ENTRY_TEMPLATE.format(name=name)
     elif kind == "standalone":
         entry = STANDALONE_ENTRY_TEMPLATE.format(name=name)
     else:
         raise ValueError(f"Bad native kind: {kind}")
     write_file(pkg_dir / "src" / "PackageEntry.cpp", entry)
-    # Keep include/ around so the manifest's include glob has a target. An
-    # empty .gitkeep is more portable than relying on the user to seed one.
-    write_file(pkg_dir / "include" / ".gitkeep", "")
+
+    if component and kind == "native":
+        emit_component_sources(pkg_dir, name, component)
+    else:
+        # Keep include/ around so the manifest's include glob has a target.
+        # An empty .gitkeep is more portable than relying on the user to
+        # seed one.
+        write_file(pkg_dir / "include" / ".gitkeep", "")
 
 
-def emit_pinvoke_source(pkg_dir: Path, name: str, export_prefix: str) -> None:
+def emit_component_sources(pkg_dir: Path, name: str, component: str) -> None:
+    """Emit `<Component>Component.{hpp,cpp}` for the native layer.
+
+    The header lives in include/ so users of the package can include it via
+    `#include "<Component>Component.hpp"` once the package's include dir is
+    on their search path. The .cpp lives in src/ so premake's `src/**.cpp`
+    glob picks it up.
+    """
+    namespace_name = pkg_namespace_from_name(name)
+    write_file(
+        pkg_dir / "include" / f"{component}Component.hpp",
+        COMPONENT_HEADER_TEMPLATE.format(
+            componentName=component,
+            namespaceName=namespace_name,
+        ),
+    )
+    write_file(
+        pkg_dir / "src" / f"{component}Component.cpp",
+        COMPONENT_CPP_TEMPLATE.format(componentName=component),
+    )
+
+
+def emit_pinvoke_source(pkg_dir: Path, name: str, export_prefix: str,
+                        component: str | None = None) -> None:
+    """Emit src/PInvoke.cpp.
+
+    When `component` is set, also emit `<Component>PInvoke.cpp` next to it
+    with Get/Set bindings for the scaffolded component's `Value` field —
+    the C# wrapper expects these symbols.
+    """
     contents = PINVOKE_TEMPLATE.format(name=name, exportPrefix=export_prefix)
     write_file(pkg_dir / "src" / "PInvoke.cpp", contents)
-
-
-def emit_csharp_sources(pkg_dir: Path, name: str, namespace: str, bridged: bool) -> None:
-    if bridged:
+    if component:
+        namespace_name = pkg_namespace_from_name(name)
         write_file(
-            pkg_dir / "Source" / "NativeBindings.cs",
-            CSHARP_BINDINGS_TEMPLATE.format(
-                name=name,
-                csharpNamespace=namespace,
-                exportPrefix=export_prefix_from_name(name),
+            pkg_dir / "src" / f"{component}PInvoke.cpp",
+            COMPONENT_PINVOKE_TEMPLATE.format(
+                componentName=component,
+                namespaceName=namespace_name,
+                exportPrefix=export_prefix,
             ),
         )
+
+
+def emit_csharp_sources(pkg_dir: Path, name: str, namespace: str, bridged: bool,
+                        component: str | None = None) -> None:
+    """Emit Source/*.cs files.
+
+    `Package.cs` is always written (entry-surface stub). When the layer is
+    bridged to a native sibling, `NativeBindings.cs` is added — and if
+    `component` is set, the bindings file gets the GetValue/SetValue exports
+    plus a `<Component>Component.cs` wrapper that uses them.
+    """
+    export_prefix = export_prefix_from_name(name)
+    if bridged:
+        bindings = (
+            CSHARP_COMPONENT_BINDINGS_TEMPLATE if component
+            else CSHARP_BINDINGS_TEMPLATE
+        ).format(
+            name=name,
+            csharpNamespace=namespace,
+            exportPrefix=export_prefix,
+            componentName=component or "",
+        )
+        write_file(pkg_dir / "Source" / "NativeBindings.cs", bindings)
     write_file(
         pkg_dir / "Source" / "Package.cs",
         CSHARP_PACKAGE_TEMPLATE.format(name=name, csharpNamespace=namespace),
+    )
+    if component and bridged:
+        write_file(
+            pkg_dir / "Source" / f"{component}Component.cs",
+            CSHARP_COMPONENT_WRAPPER_TEMPLATE.format(
+                name=name,
+                csharpNamespace=namespace,
+                componentName=component,
+            ),
+        )
+
+
+def pkg_namespace_from_name(name: str) -> str:
+    """`Axiom.Tilemap2D` -> `Axiom::Tilemap2D` for C++ namespace use."""
+    return "::".join(name.split("."))
+
+
+def emit_readme(pkg_dir: Path, name: str, description: str, layers: set[str],
+                component: str | None) -> None:
+    rows: list[str] = []
+    if "native" in layers or "standalone" in layers:
+        rows.append(f"| C++ | `Pkg.{name}.Native` | `bin/<config>/Pkg.{name}.Native/Pkg.{name}.Native.dll` |")
+    if "csharp" in layers:
+        rows.append(f"| C# | `Pkg.{name}` | `bin/<config>/Pkg.{name}/Pkg.{name}.dll` |")
+    layers_table = "\n".join(rows) if rows else "| _no build outputs declared_ |  |  |"
+
+    if component:
+        namespace = pkg_namespace_from_name(name)
+        usage_block = (
+            f"This package registers `{component}Component` (under namespace "
+            f"`{namespace}`). After installing it, the component appears in "
+            f"the editor's Add Component popup under \"{component}\". Edit it "
+            f"in the inspector or from C++ / C# — see the scaffolded "
+            f"`{component}Component.{{hpp,cpp,cs}}` files for the entry surface.\n\n"
+            "Add new fields by appending to the `properties` vector in "
+            "`src/PackageEntry.cpp` — the editor's auto-drawer picks them up "
+            "with no inspector code to write."
+        )
+    else:
+        usage_block = (
+            "Add gameplay code under `src/` (C++) or `Source/` (C#). The "
+            "scaffolded `PackageEntry.cpp` has a commented-out hint showing "
+            "how to register a component via `Package::RegisterSerializableComponent`."
+        )
+
+    write_file(
+        pkg_dir / "README.md",
+        README_TEMPLATE.format(
+            name=name,
+            description=description,
+            layersTable=layers_table,
+            usageBlock=usage_block,
+        ),
     )
 
 
@@ -430,6 +862,26 @@ def main(argv: Iterable[str] | None = None) -> int:
         help="One-line description for the manifest.",
     )
     parser.add_argument(
+        "--depends-on",
+        default="",
+        metavar="A,B",
+        help="Comma- or plus-separated list of OTHER package names this package "
+        "depends on. Each entry becomes an item in the manifest's `dependencies` "
+        "array. The loader topologically sorts before registering, so dep order "
+        "doesn't matter; missing deps fail loudly at premake time.",
+    )
+    parser.add_argument(
+        "--component",
+        default=None,
+        metavar="ComponentName",
+        help="Scaffold an example component end-to-end: <Component>Component.{hpp,cpp} "
+        "in include/ + src/, a registration call in PackageEntry.cpp that uses "
+        "Properties::Make + the unified inspector ruleset, and (when csharp+native) "
+        "<Component>Component.cs + the matching Get/Set P/Invoke surface. The name "
+        "must be PascalCase WITHOUT a trailing 'Component' suffix (the suffix is "
+        "added automatically). Requires --layers to include 'native'.",
+    )
+    parser.add_argument(
         "--no-premake",
         action="store_true",
         help="Skip running premake5 after creation. The project will only appear in the "
@@ -451,6 +903,42 @@ def main(argv: Iterable[str] | None = None) -> int:
 
     layers = parse_layers(args.layers)
 
+    # Dependencies — comma- or plus-separated. Validated against the on-disk
+    # package set after target-dir resolution so we can warn about typos
+    # (premake will fail-loud later, but warning earlier helps).
+    depends_on: list[str] = []
+    if args.depends_on:
+        for token in re.split(r"[+,]", args.depends_on.strip()):
+            token = token.strip()
+            if not token:
+                continue
+            if not PACKAGE_NAME_PATTERN.match(token):
+                raise SystemExit(
+                    f"[NewPackage] --depends-on entry '{token}' is not a valid "
+                    "Axiom package name (PascalCase.PascalCase form expected)."
+                )
+            depends_on.append(token)
+
+    component: str | None = args.component.strip() if args.component else None
+    if component:
+        if not re.match(r"^[A-Z][A-Za-z0-9]*$", component):
+            raise SystemExit(
+                f"[NewPackage] --component '{component}' must be PascalCase identifier "
+                "(letters/digits, leading uppercase). E.g. 'Health', 'Tilemap2D'."
+            )
+        if component.endswith("Component"):
+            raise SystemExit(
+                f"[NewPackage] --component '{component}' should NOT include the trailing "
+                "'Component' suffix; the scaffolder adds it automatically. "
+                f"Try --component {component[:-len('Component')]}"
+            )
+        if "native" not in layers:
+            raise SystemExit(
+                "[NewPackage] --component requires --layers to include 'native' (the "
+                "C++ side owns the component definition). Add 'native' to --layers, "
+                "or drop --component for a layer-stub-only scaffold."
+            )
+
     description = args.description or f"{name} package."
 
     # Resolve target directory.
@@ -462,6 +950,21 @@ def main(argv: Iterable[str] | None = None) -> int:
         pkg_dir = project_root / "Packages" / name
     else:
         pkg_dir = REPO_ROOT / "packages" / name
+        # Heuristic: warn when the user runs this from inside a project
+        # layout but didn't pass --project. The script is in <repo>/scripts/
+        # so `cwd == REPO_ROOT` is the engine-developer case (silent). Any
+        # other CWD that has an axiom-project.json is almost certainly a
+        # project root the user meant to target.
+        cwd = Path.cwd().resolve()
+        if cwd != REPO_ROOT and (cwd / "axiom-project.json").is_file():
+            print()
+            print(f"[NewPackage] HINT: cwd ({cwd}) contains axiom-project.json but you")
+            print( "             did NOT pass --project. The package is being created as an")
+            print( "             ENGINE-shipped package under <repo>/packages/ instead of")
+            print( "             under your project. If you wanted a project-local package,")
+            print( "             cancel (Ctrl-C) and re-run with:")
+            print(f"               python scripts/NewPackage.py {name} --layers {args.layers} --project \"{cwd}\"")
+            print()
 
     if pkg_dir.exists():
         if not args.force:
@@ -476,25 +979,46 @@ def main(argv: Iterable[str] | None = None) -> int:
     print(f"[NewPackage] creating '{name}' under {pkg_dir.relative_to(REPO_ROOT) if pkg_dir.is_relative_to(REPO_ROOT) else pkg_dir}")
     print(f"[NewPackage] layers: {', '.join(sorted(layers))}")
 
-    # 1. Manifest
-    write_file(pkg_dir / "axiom-package.lua", render_manifest(name, description, layers))
+    # 1. Manifest. Cross-check declared deps against the on-disk package set
+    #    so a typo doesn't sail through to a confusing premake-time error.
+    if depends_on:
+        known_packages: set[str] = set()
+        for search_root in (REPO_ROOT / "packages",
+                            (project_root / "Packages") if project_root else None):
+            if search_root and search_root.is_dir():
+                for child in search_root.iterdir():
+                    if (child / "axiom-package.lua").is_file():
+                        known_packages.add(child.name)
+        for dep in depends_on:
+            if dep not in known_packages:
+                print(f"[NewPackage] WARNING: dependency '{dep}' has no axiom-package.lua "
+                      "on disk yet. premake will fail until it's created.")
+    write_file(pkg_dir / "axiom-package.lua",
+               render_manifest(name, description, layers, depends_on))
 
     # 2. Sources per layer
     if "native" in layers:
-        emit_native_sources(pkg_dir, name, "native")
+        emit_native_sources(pkg_dir, name, "native", component=component)
     if "standalone" in layers:
         emit_native_sources(pkg_dir, name, "standalone")
     if "csharp" in layers:
         bridged = "native" in layers or "standalone" in layers
-        emit_csharp_sources(pkg_dir, name, csharp_namespace_from_name(name), bridged)
+        emit_csharp_sources(pkg_dir, name, csharp_namespace_from_name(name), bridged,
+                            component=component if bridged else None)
         if bridged:
-            emit_pinvoke_source(pkg_dir, name, export_prefix_from_name(name))
+            emit_pinvoke_source(pkg_dir, name, export_prefix_from_name(name),
+                                component=component)
 
-    # 3. Project allow-list (project-local only)
+    # 3. README — single per-package landing doc that explains install +
+    #    expected next steps. Tilemap2D's hand-written README is the format
+    #    target; the auto-generated version is shorter but covers the basics.
+    emit_readme(pkg_dir, name, description, layers, component)
+
+    # 4. Project allow-list (project-local only)
     if project_root is not None:
         add_to_project_allow_list(project_root, name)
 
-    # 4. Premake regen (unless suppressed). When the new package has a csharp
+    # 5. Premake regen (unless suppressed). When the new package has a csharp
     # layer, also run `dotnet restore` so the first MSBuild against the new
     # csproj doesn't blow up on a missing project.assets.json.
     if not args.no_premake:
@@ -502,13 +1026,18 @@ def main(argv: Iterable[str] | None = None) -> int:
         if "csharp" in layers:
             run_dotnet_restore()
 
-    # 5. Next-steps banner.
+    # 6. Next-steps banner.
     print()
     print("[NewPackage] done.")
     print()
     print("Next steps:")
     print(f"  1. Restart Visual Studio so the new Pkg.{name}{' / Pkg.' + name + '.Native' if 'native' in layers or 'standalone' in layers else ''} project(s) appear in the solution.")
-    print("  2. Edit the generated stubs to add real functionality.")
+    if component:
+        print(f"  2. Open include/{component}Component.hpp and add real fields next to Value/TintColor.")
+        print("     Mirror each field with one Properties::Make(...) line in src/PackageEntry.cpp.")
+    else:
+        print("  2. Edit src/PackageEntry.cpp — the commented block at the top shows the canonical")
+        print("     RegisterSerializableComponent + DeclareComponentConflict pattern.")
     print(f"  3. Build. Outputs land in bin/<config>/Pkg.{name}/.")
     if "csharp" in layers and ("native" in layers or "standalone" in layers):
         print()

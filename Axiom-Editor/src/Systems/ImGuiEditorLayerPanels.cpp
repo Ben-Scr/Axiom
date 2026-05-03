@@ -304,6 +304,49 @@ namespace Axiom {
 			AIM_INFO_TAG("Build", "C# scripts compiled.");
 		}
 
+		// Rebuild native scripts with the project's chosen build profile so
+		// the shipped DLL has AXIOM_BUILD_RELEASE / AXIOM_BUILD_DEVELOPMENT
+		// matching the C# side. Editor hot-reload always builds DEVELOPMENT;
+		// here we override via -DAXIOM_BUILD_PROFILE so a Release build
+		// actually strips dev-only #ifdef'd code from native scripts.
+		// Skipped when the project has no CMakeLists (no native scripts).
+		const std::filesystem::path nativeProjectDir(project->NativeScriptsDir);
+		const std::filesystem::path nativeCMakeLists = nativeProjectDir / "CMakeLists.txt";
+		if (std::filesystem::exists(nativeCMakeLists)) {
+			AIM_INFO_TAG("Build", "Compiling native scripts ({} profile)...",
+				AxiomProject::BuildProfileToString(project->ActiveBuildProfile));
+			const std::string profileCmakeArg = std::string("-DAXIOM_BUILD_PROFILE=")
+				+ ((project->ActiveBuildProfile == AxiomProject::BuildProfile::Release) ? "RELEASE" : "DEVELOPMENT");
+			const std::filesystem::path nativeBuildDir = nativeProjectDir / "build";
+			// Configure (overrides editor's cached AXIOM_BUILD_PROFILE so the
+			// next-frame editor hot-reload also picks up the explicit value).
+			Process::Result cfg = Process::Run({
+				"cmake",
+				"-B", nativeBuildDir.string(),
+				"-S", nativeProjectDir.string(),
+				"-DCMAKE_BUILD_TYPE=" + buildConfiguration,
+				profileCmakeArg
+			}, nativeProjectDir.string());
+			if (!cfg.Succeeded()) {
+				AIM_WARN_TAG("Build",
+					"Native script CMake configure failed (exit code {}); shipping the editor's last-built native DLL.",
+					cfg.ExitCode);
+			} else {
+				Process::Result bld = Process::Run({
+					"cmake", "--build", nativeBuildDir.string(),
+					"--config", buildConfiguration
+				}, nativeProjectDir.string());
+				if (!bld.Succeeded()) {
+					AIM_WARN_TAG("Build",
+						"Native script build failed (exit code {}); shipping the editor's last-built native DLL.",
+						bld.ExitCode);
+					if (!bld.Output.empty()) AIM_WARN_TAG("Build", "{}", bld.Output);
+				} else {
+					AIM_INFO_TAG("Build", "Native scripts compiled.");
+				}
+			}
+		}
+
 		try {
 			std::filesystem::create_directories(outDir);
 		}
@@ -526,6 +569,82 @@ namespace Axiom {
 				}
 
 				ImGui::Spacing();
+
+				// Build Profile dropdown. Drives the AXIOM_BUILD_DEVELOPMENT
+				// vs AXIOM_BUILD_RELEASE compile-time defines passed to BOTH
+				// C# and native scripts at build time. Switching the profile
+				// also flips the runtime overlay defaults (stats + logs)
+				// since release ships shouldn't expose dev diagnostics by
+				// default — the user can re-enable explicitly via Player
+				// Settings after the auto-flip.
+				ImGui::TextUnformatted("Build Profile:");
+				ImGui::SetNextItemWidth(-1);
+				const char* profileItems[] = { "Development", "Release" };
+				int profileIdx = (project->ActiveBuildProfile == AxiomProject::BuildProfile::Release) ? 1 : 0;
+				if (ImGui::Combo("##BuildProfile", &profileIdx, profileItems, IM_ARRAYSIZE(profileItems))) {
+					const auto newProfile = (profileIdx == 1)
+						? AxiomProject::BuildProfile::Release
+						: AxiomProject::BuildProfile::Development;
+					if (newProfile != project->ActiveBuildProfile) {
+						project->ActiveBuildProfile = newProfile;
+						// Auto-flip overlay defaults to match the new profile.
+						// Release = both off (ship-clean). Development = both on.
+						const bool isDev = (newProfile == AxiomProject::BuildProfile::Development);
+						project->ShowRuntimeStats = isDev;
+						project->ShowRuntimeLogs  = isDev;
+						project->Save();
+					}
+				}
+
+				ImGui::Spacing();
+
+				// Custom defines list. Symbols here are baked into both the
+				// C# .csproj's <DefineConstants> and the native scripts'
+				// CMakeLists target_compile_definitions on next compile.
+				// Names only (no `=value`) — Unity-style scripting symbols.
+				ImGui::TextUnformatted("Custom Defines:");
+				ImGui::SetNextItemWidth(-1);
+				ImGui::InputTextWithHint("##NewCustomDefine", "Add a symbol (e.g. STEAM_BUILD)…",
+					m_CustomDefineEntryBuffer, sizeof(m_CustomDefineEntryBuffer),
+					ImGuiInputTextFlags_EnterReturnsTrue);
+				ImGui::SameLine();
+				bool addClicked = ImGui::Button("Add##CustomDefine");
+				const bool entryReady = m_CustomDefineEntryBuffer[0] != '\0';
+				if (addClicked && entryReady) {
+					std::string newDef(m_CustomDefineEntryBuffer);
+					// Trim whitespace + reject duplicates / empty strings.
+					while (!newDef.empty() && std::isspace(static_cast<unsigned char>(newDef.back()))) newDef.pop_back();
+					std::size_t firstNonSpace = 0;
+					while (firstNonSpace < newDef.size()
+						&& std::isspace(static_cast<unsigned char>(newDef[firstNonSpace]))) ++firstNonSpace;
+					newDef.erase(0, firstNonSpace);
+					if (!newDef.empty()
+						&& std::find(project->CustomDefines.begin(), project->CustomDefines.end(), newDef) == project->CustomDefines.end()) {
+						project->CustomDefines.push_back(std::move(newDef));
+						project->Save();
+					}
+					m_CustomDefineEntryBuffer[0] = '\0';
+				}
+
+				if (project->CustomDefines.empty()) {
+					ImGui::TextDisabled("(no custom defines)");
+				} else {
+					int removeIdx = -1;
+					for (int i = 0; i < static_cast<int>(project->CustomDefines.size()); ++i) {
+						ImGui::PushID(i);
+						ImGui::Bullet();
+						ImGui::TextUnformatted(project->CustomDefines[i].c_str());
+						ImGui::SameLine();
+						if (ImGui::SmallButton("x")) removeIdx = i;
+						ImGui::PopID();
+					}
+					if (removeIdx >= 0) {
+						project->CustomDefines.erase(project->CustomDefines.begin() + removeIdx);
+						project->Save();
+					}
+				}
+
+				ImGui::Spacing();
 				ImGui::Text("Output Directory:");
 				ImGui::SetNextItemWidth(-1);
 				ImGui::InputText("##BuildOutputDir", m_BuildOutputDirBuffer, sizeof(m_BuildOutputDirBuffer));
@@ -580,6 +699,13 @@ namespace Axiom {
 			ImGui::Indent(8);
 			changed |= ImGui::Checkbox("Fullscreen", &project->BuildFullscreen);
 			changed |= ImGui::Checkbox("Resizable", &project->BuildResizable);
+			ImGui::Unindent(8);
+		}
+
+		if (ImGui::CollapsingHeader("Diagnostics", ImGuiTreeNodeFlags_DefaultOpen)) {
+			ImGui::Indent(8);
+			changed |= ImGui::Checkbox("Show runtime stats overlay (F6)", &project->ShowRuntimeStats);
+			changed |= ImGui::Checkbox("Show runtime log overlay (F7)", &project->ShowRuntimeLogs);
 			ImGui::Unindent(8);
 		}
 

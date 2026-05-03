@@ -1,58 +1,420 @@
 #include "pch.hpp"
 #include "Scene/BuiltInComponentRegistration.hpp"
 
-#include "Scene/SceneManager.hpp"
+#include "Audio/AudioManager.hpp"
 #include "Components/Components.hpp"
+#include "Graphics/TextureManager.hpp"
+#include "Inspector/PropertyRegistration.hpp"
+#include "Physics/PhysicsTypes.hpp"
+#include "Scene/Scene.hpp"
+#include "Scene/SceneManager.hpp"
 #include "Scripting/ScriptComponent.hpp"
 
-// This file is the SINGLE source of truth for the engine's built-in component
-// list (display names, categories, subcategories, serialized names). The
-// editor's EditorComponentRegistration.cpp only attaches drawInspector
-// callbacks to entries declared here -- it must NOT re-declare component
-// metadata. Adding a new built-in component is a one-site change here, plus
-// (optionally) one inspector attachment in the editor file.
+#include <cmath>
+
+#include <vector>
+
+// SINGLE source of truth for the engine's built-in component list — display
+// names, categories, subcategories, serialised names, and now also the
+// declarative property list that drives the inspector's auto-drawer +
+// (eventually) the generic JSON serialiser.
+//
+// Adding a new built-in component is a one-line change here. Adding a new
+// inspectable field is one more entry in that component's `properties`
+// vector — no editor file needs to change.
 namespace Axiom {
 	namespace {
 		template<typename T>
 		void RegisterComponent(SceneManager& sceneManager, const std::string& displayName,
 			ComponentCategory category = ComponentCategory::Component,
 			const std::string& subcategory = "",
-			const std::string& serializedName = "")
+			const std::string& serializedName = "",
+			std::vector<PropertyDescriptor> properties = {})
 		{
 			ComponentInfo info{ displayName, subcategory, category };
 			info.serializedName = serializedName;
+			info.properties = std::move(properties);
 			sceneManager.RegisterComponentType<T>(info);
+		}
+
+		template<typename A, typename B>
+		void DeclareConflict(SceneManager& sceneManager) {
+			const std::type_index aId(typeid(A));
+			const std::type_index bId(typeid(B));
+			sceneManager.GetComponentRegistry().ForEachComponentInfo(
+				[&](const std::type_index& id, ComponentInfo& info) {
+					if (id == aId) {
+						bool present = false;
+						for (const auto& c : info.conflictsWith) if (c == bId) { present = true; break; }
+						if (!present) info.conflictsWith.push_back(bId);
+					}
+					else if (id == bId) {
+						bool present = false;
+						for (const auto& c : info.conflictsWith) if (c == aId) { present = true; break; }
+						if (!present) info.conflictsWith.push_back(aId);
+					}
+				});
+		}
+
+		// ── Texture / audio ref helpers ─────────────────────────────
+		// Wrap the LoadTextureByUUID / LoadAudioByUUID side-effects so each
+		// component's TextureRef / AudioRef descriptor is one line in the
+		// component's properties vector. Set lambdas reload the runtime
+		// handle from the new asset UUID and write through to the component's
+		// public field / setter.
+
+		template <typename T, typename HandleAccessor, typename HandleAssign>
+		PropertyDescriptor MakeTextureRefDirect(const std::string& name, const std::string& displayName,
+			HandleAccessor getHandle, HandleAssign setHandle)
+		{
+			return Properties::MakeTextureRef(name, displayName,
+				[getHandle](const Entity& e) -> uint64_t {
+					const auto& component = e.GetComponent<T>();
+					const auto handle = getHandle(component);
+					return handle.IsValid() ? TextureManager::GetTextureAssetUUID(handle) : 0ull;
+				},
+				[setHandle](Entity& e, uint64_t uuid) {
+					auto& component = e.GetComponent<T>();
+					const TextureHandle h = uuid != 0
+						? TextureManager::LoadTextureByUUID(uuid)
+						: TextureHandle{};
+					setHandle(component, h, UUID(uuid));
+				});
 		}
 	}
 
 	void RegisterBuiltInComponents(SceneManager& sceneManager) {
-		// General
-		RegisterComponent<Transform2DComponent>(sceneManager, "Transform 2D", ComponentCategory::Component, "General", "Transform2D");
-		RegisterComponent<RectTransformComponent>(sceneManager, "Rect Transform", ComponentCategory::Component, "General", "RectTransform");
-		RegisterComponent<NameComponent>(sceneManager, "Name", ComponentCategory::Component, "General", "name");
+		// ── General ─────────────────────────────────────────────────
+
+		RegisterComponent<Transform2DComponent>(sceneManager, "Transform 2D",
+			ComponentCategory::Component, "General", "Transform2D",
+			{
+				Properties::MakeWith<Vec2>("Position", "Position",
+					[](const Entity& e) { return e.GetComponent<Transform2DComponent>().Position; },
+					[](Entity& e, const Vec2& v) {
+						e.GetComponent<Transform2DComponent>().SetPosition(v);
+					}),
+				Properties::MakeWith<float>("Rotation", "Rotation",
+					[](const Entity& e) { return e.GetComponent<Transform2DComponent>().Rotation; },
+					[](Entity& e, float v) {
+						e.GetComponent<Transform2DComponent>().SetRotation(v);
+					},
+					[]() { PropertyMetadata m; m.DragSpeed = 0.01f; return m; }()),
+				Properties::MakeWith<Vec2>("Scale", "Scale",
+					[](const Entity& e) { return e.GetComponent<Transform2DComponent>().Scale; },
+					[](Entity& e, const Vec2& v) {
+						e.GetComponent<Transform2DComponent>().SetScale(v);
+					}),
+			});
+
+		RegisterComponent<RectTransformComponent>(sceneManager, "Rect Transform",
+			ComponentCategory::Component, "General", "RectTransform",
+			{
+				Properties::Make("Position", "Position", &RectTransformComponent::Position),
+				Properties::Make("Pivot",    "Pivot",    &RectTransformComponent::Pivot),
+				Properties::Make("Width",    "Width",    &RectTransformComponent::Width),
+				Properties::Make("Height",   "Height",   &RectTransformComponent::Height),
+				Properties::Make("Rotation", "Rotation", &RectTransformComponent::Rotation),
+				Properties::Make("Scale",    "Scale",    &RectTransformComponent::Scale),
+			});
+
+		RegisterComponent<NameComponent>(sceneManager, "Name",
+			ComponentCategory::Component, "General", "name",
+			{
+				Properties::Make("Name", "Name", &NameComponent::Name),
+			});
+
 		RegisterComponent<UUIDComponent>(sceneManager, "UUID", ComponentCategory::Tag);
 		RegisterComponent<EntityMetaDataComponent>(sceneManager, "Entity Metadata", ComponentCategory::Tag);
 		RegisterComponent<PrefabInstanceComponent>(sceneManager, "Prefab Instance", ComponentCategory::Tag);
 
-		// Rendering
-		RegisterComponent<SpriteRendererComponent>(sceneManager, "Sprite Renderer", ComponentCategory::Component, "Rendering", "SpriteRenderer");
-		RegisterComponent<ImageComponent>(sceneManager, "Image", ComponentCategory::Component, "Rendering", "Image");
-		RegisterComponent<Camera2DComponent>(sceneManager, "Camera 2D", ComponentCategory::Component, "Rendering", "Camera2D");
-		RegisterComponent<ParticleSystem2DComponent>(sceneManager, "Particle System 2D", ComponentCategory::Component, "Rendering", "ParticleSystem2D");
+		// ── Rendering ───────────────────────────────────────────────
 
-		// Physics
-		RegisterComponent<BoxCollider2DComponent>(sceneManager, "Box Collider 2D", ComponentCategory::Component, "Physics", "BoxCollider2D");
-		RegisterComponent<Rigidbody2DComponent>(sceneManager, "Rigidbody 2D", ComponentCategory::Component, "Physics", "Rigidbody2D");
+		RegisterComponent<SpriteRendererComponent>(sceneManager, "Sprite Renderer",
+			ComponentCategory::Component, "Rendering", "SpriteRenderer",
+			{
+				Properties::Make("Color", "Color", &SpriteRendererComponent::Color),
+				Properties::MakeWith<int16_t>("SortingOrder", "Sorting Order",
+					[](const Entity& e) { return e.GetComponent<SpriteRendererComponent>().SortingOrder; },
+					[](Entity& e, int16_t v) {
+						e.GetComponent<SpriteRendererComponent>().SortingOrder = v;
+					}),
+				Properties::MakeWith<uint8_t>("SortingLayer", "Sorting Layer",
+					[](const Entity& e) { return e.GetComponent<SpriteRendererComponent>().SortingLayer; },
+					[](Entity& e, uint8_t v) {
+						e.GetComponent<SpriteRendererComponent>().SortingLayer = v;
+					}),
+				MakeTextureRefDirect<SpriteRendererComponent>("Texture", "Texture",
+					[](const SpriteRendererComponent& s) { return s.TextureHandle; },
+					[](SpriteRendererComponent& s, TextureHandle h, UUID assetId) {
+						s.TextureHandle = h;
+						s.TextureAssetId = assetId;
+					}),
+			});
 
-		// Axiom-Physics components (lightweight AABB physics)
-		RegisterComponent<FastBody2DComponent>(sceneManager, "Fast Body 2D", ComponentCategory::Component, "Physics", "FastBody2D");
-		RegisterComponent<FastBoxCollider2DComponent>(sceneManager, "Fast Box Collider 2D", ComponentCategory::Component, "Physics", "FastBoxCollider2D");
-		RegisterComponent<FastCircleCollider2DComponent>(sceneManager, "Fast Circle Collider 2D", ComponentCategory::Component, "Physics", "FastCircleCollider2D");
+		RegisterComponent<ImageComponent>(sceneManager, "Image",
+			ComponentCategory::Component, "Rendering", "Image",
+			{
+				Properties::Make("Color", "Color", &ImageComponent::Color),
+				MakeTextureRefDirect<ImageComponent>("Texture", "Texture",
+					[](const ImageComponent& i) { return i.TextureHandle; },
+					[](ImageComponent& i, TextureHandle h, UUID assetId) {
+						i.TextureHandle = h;
+						i.TextureAssetId = assetId;
+					}),
+			});
 
-		// Audio
-		RegisterComponent<AudioSourceComponent>(sceneManager, "Audio Source", ComponentCategory::Component, "Audio", "AudioSource");
+		RegisterComponent<Camera2DComponent>(sceneManager, "Camera 2D",
+			ComponentCategory::Component, "Rendering", "Camera2D",
+			{
+				Properties::MakeWith<float>("Zoom", "Zoom",
+					[](const Entity& e) { return e.GetComponent<Camera2DComponent>().GetZoom(); },
+					[](Entity& e, float v) {
+						e.GetComponent<Camera2DComponent>().SetZoom(v);
+					},
+					[]() { PropertyMetadata m; m.HasClamp = true; m.ClampMin = 0.01; m.ClampMax = 100.0; m.DragSpeed = 0.01f; return m; }()),
+				Properties::MakeWith<float>("OrthographicSize", "Orthographic Size",
+					[](const Entity& e) { return e.GetComponent<Camera2DComponent>().GetOrthographicSize(); },
+					[](Entity& e, float v) {
+						e.GetComponent<Camera2DComponent>().SetOrthographicSize(v);
+					},
+					[]() { PropertyMetadata m; m.HasClamp = true; m.ClampMin = 0.05; m.ClampMax = 1000.0; m.DragSpeed = 0.05f; return m; }()),
+				Properties::MakeWith<Color>("ClearColor", "Clear Color",
+					[](const Entity& e) { return e.GetComponent<Camera2DComponent>().GetClearColor(); },
+					[](Entity& e, const Color& c) {
+						e.GetComponent<Camera2DComponent>().SetClearColor(c);
+					}),
+			});
 
-		//RegisterComponent<ScriptComponent>(sceneManager, "Scripts", ComponentCategory::Component, "Scripts");
+		// ParticleSystem2D keeps a fully-custom drawInspector — it has variant
+		// types (CircleParams/SquareParams), play/pause buttons, and conditional
+		// per-shape sections that don't map to declarative PropertyDescriptors.
+		// Other engine code shouldn't expect this one to participate in the
+		// auto-drawer / generic-serializer paths.
+		RegisterComponent<ParticleSystem2DComponent>(sceneManager, "Particle System 2D",
+			ComponentCategory::Component, "Rendering", "ParticleSystem2D");
+
+		// ── Physics (Box2D-backed) ──────────────────────────────────
+
+		RegisterComponent<Rigidbody2DComponent>(sceneManager, "Rigidbody 2D",
+			ComponentCategory::Component, "Physics", "Rigidbody2D",
+			{
+				Properties::MakeWith<Vec2>("Position", "Position",
+					[](const Entity& e) { return e.GetComponent<Rigidbody2DComponent>().GetPosition(); },
+					[](Entity& e, const Vec2& v) {
+						e.GetComponent<Rigidbody2DComponent>().SetPosition(v);
+					}),
+				Properties::MakeWith<Vec2>("Velocity", "Velocity",
+					[](const Entity& e) { return e.GetComponent<Rigidbody2DComponent>().GetVelocity(); },
+					[](Entity& e, const Vec2& v) {
+						e.GetComponent<Rigidbody2DComponent>().SetVelocity(v);
+					}),
+				Properties::MakeWith<float>("Rotation", "Rotation",
+					[](const Entity& e) { return e.GetComponent<Rigidbody2DComponent>().GetRotation(); },
+					[](Entity& e, float v) {
+						e.GetComponent<Rigidbody2DComponent>().SetRotation(v);
+					},
+					[]() { PropertyMetadata m; m.DragSpeed = 0.01f; return m; }()),
+				Properties::MakeWith<float>("GravityScale", "Gravity Scale",
+					[](const Entity& e) { return e.GetComponent<Rigidbody2DComponent>().GetGravityScale(); },
+					[](Entity& e, float v) {
+						e.GetComponent<Rigidbody2DComponent>().SetGravityScale(v);
+					},
+					[]() { PropertyMetadata m; m.HasClamp = true; m.ClampMin = 0.0; m.ClampMax = 1.0; return m; }()),
+				Properties::MakeWith<BodyType>("BodyType", "Body Type",
+					[](const Entity& e) {
+						return const_cast<Entity&>(e).GetComponent<Rigidbody2DComponent>().GetBodyType();
+					},
+					[](Entity& e, BodyType v) {
+						e.GetComponent<Rigidbody2DComponent>().SetBodyType(v);
+					}),
+			});
+
+		// BoxCollider2D's Size + Offset setters need a Scene* to convert
+		// world ↔ local (the collider stores local-space; the inspector
+		// shows world-space). The Set lambdas pull the entity's Scene at
+		// edit time. Local Size is intentionally NOT exposed — it's a
+		// derived diagnostic that the user shouldn't edit directly.
+		RegisterComponent<BoxCollider2DComponent>(sceneManager, "Box Collider 2D",
+			ComponentCategory::Component, "Physics", "BoxCollider2D",
+			{
+				Properties::MakeWith<Vec2>("Offset", "Offset",
+					[](const Entity& e) { return e.GetComponent<BoxCollider2DComponent>().GetCenter(); },
+					[](Entity& e, const Vec2& v) {
+						if (Scene* s = e.GetScene()) {
+							e.GetComponent<BoxCollider2DComponent>().SetCenter(v, *s);
+						}
+					},
+					[]() { PropertyMetadata m; m.DragSpeed = 0.05f; return m; }()),
+				Properties::MakeWith<Vec2>("Size", "Size",
+					[](const Entity& e) { return e.GetComponent<BoxCollider2DComponent>().GetScale(); },
+					[](Entity& e, const Vec2& worldSize) {
+						Scene* s = e.GetScene();
+						if (!s || !s->HasComponent<Transform2DComponent>(e.GetHandle())) return;
+						auto& col = e.GetComponent<BoxCollider2DComponent>();
+						const auto& tr = s->GetComponent<Transform2DComponent>(e.GetHandle());
+						Vec2 localSize = col.GetLocalScale(*s);
+						const float clampedX = std::max(worldSize.x, 0.001f);
+						const float clampedY = std::max(worldSize.y, 0.001f);
+						if (std::fabs(tr.Scale.x) > 0.0001f) localSize.x = clampedX / tr.Scale.x;
+						if (std::fabs(tr.Scale.y) > 0.0001f) localSize.y = clampedY / tr.Scale.y;
+						col.SetScale(localSize, *s);
+					},
+					[]() { PropertyMetadata m; m.HasClamp = true; m.ClampMin = 0.001; m.ClampMax = 1000.0; m.DragSpeed = 0.05f; return m; }()),
+				Properties::MakeWith<bool>("Sensor", "Sensor",
+					[](const Entity& e) { return e.GetComponent<BoxCollider2DComponent>().IsSensor(); },
+					[](Entity& e, bool v) {
+						auto& col = e.GetComponent<BoxCollider2DComponent>();
+						if (Scene* s = e.GetScene()) col.SetSensor(v, *s);
+					}),
+				Properties::MakeWith<bool>("ContactEvents", "Contact Events",
+					[](const Entity& e) { return e.GetComponent<BoxCollider2DComponent>().CanRegisterContacts(); },
+					[](Entity& e, bool v) {
+						e.GetComponent<BoxCollider2DComponent>().SetRegisterContacts(v);
+					}),
+				Properties::MakeWith<bool>("Enabled", "Collider Enabled",
+					[](const Entity& e) { return e.GetComponent<BoxCollider2DComponent>().IsEnabled(); },
+					[](Entity& e, bool v) {
+						e.GetComponent<BoxCollider2DComponent>().SetEnabled(v);
+					}),
+				Properties::MakeWith<float>("Friction", "Friction",
+					[](const Entity& e) { return e.GetComponent<BoxCollider2DComponent>().GetFriction(); },
+					[](Entity& e, float v) {
+						e.GetComponent<BoxCollider2DComponent>().SetFriction(v);
+					},
+					[]() { PropertyMetadata m; m.HasClamp = true; m.ClampMin = 0.0; m.ClampMax = 10.0; m.DragSpeed = 0.01f; return m; }()),
+				Properties::MakeWith<float>("Bounciness", "Bounciness",
+					[](const Entity& e) { return e.GetComponent<BoxCollider2DComponent>().GetBounciness(); },
+					[](Entity& e, float v) {
+						e.GetComponent<BoxCollider2DComponent>().SetBounciness(v);
+					},
+					[]() { PropertyMetadata m; m.HasClamp = true; m.ClampMin = 0.0; m.ClampMax = 1.0; m.DragSpeed = 0.01f; return m; }()),
+				Properties::MakeWith<uint64_t>("LayerMask", "Layer Mask",
+					[](const Entity& e) { return e.GetComponent<BoxCollider2DComponent>().GetLayer(); },
+					[](Entity& e, uint64_t v) {
+						e.GetComponent<BoxCollider2DComponent>().SetLayer(v);
+					}),
+			});
+
+		// ── Physics (Axiom-Physics, lightweight AABB) ──────────────
+
+		RegisterComponent<FastBody2DComponent>(sceneManager, "Fast Body 2D",
+			ComponentCategory::Component, "Physics", "FastBody2D",
+			{
+				Properties::MakeWith<AxiomPhys::BodyType>("Type", "Body Type",
+					[](const Entity& e) { return e.GetComponent<FastBody2DComponent>().Type; },
+					[](Entity& e, AxiomPhys::BodyType v) {
+						auto& body = e.GetComponent<FastBody2DComponent>();
+						body.Type = v;
+						if (body.m_Body) body.m_Body->SetBodyType(v);
+					}),
+				Properties::MakeWith<float>("Mass", "Mass",
+					[](const Entity& e) { return e.GetComponent<FastBody2DComponent>().Mass; },
+					[](Entity& e, float v) {
+						auto& body = e.GetComponent<FastBody2DComponent>();
+						body.Mass = v;
+						if (body.m_Body) body.m_Body->SetMass(v);
+					},
+					[]() { PropertyMetadata m; m.HasClamp = true; m.ClampMin = 0.001; m.ClampMax = 10000.0; m.DragSpeed = 0.1f; return m; }()),
+				Properties::MakeWith<bool>("UseGravity", "Use Gravity",
+					[](const Entity& e) { return e.GetComponent<FastBody2DComponent>().UseGravity; },
+					[](Entity& e, bool v) {
+						auto& body = e.GetComponent<FastBody2DComponent>();
+						body.UseGravity = v;
+						if (body.m_Body) body.m_Body->SetGravityEnabled(v);
+					}),
+				Properties::MakeWith<bool>("BoundaryCheck", "Boundary Check",
+					[](const Entity& e) { return e.GetComponent<FastBody2DComponent>().BoundaryCheck; },
+					[](Entity& e, bool v) {
+						auto& body = e.GetComponent<FastBody2DComponent>();
+						body.BoundaryCheck = v;
+						if (body.m_Body) body.m_Body->SetBoundaryCheckEnabled(v);
+					}),
+			});
+
+		RegisterComponent<FastBoxCollider2DComponent>(sceneManager, "Fast Box Collider 2D",
+			ComponentCategory::Component, "Physics", "FastBoxCollider2D",
+			{
+				Properties::MakeWith<Vec2>("HalfExtents", "Half Extents",
+					[](const Entity& e) { return e.GetComponent<FastBoxCollider2DComponent>().HalfExtents; },
+					[](Entity& e, const Vec2& v) {
+						e.GetComponent<FastBoxCollider2DComponent>().SetHalfExtents(v);
+					},
+					[]() { PropertyMetadata m; m.DragSpeed = 0.05f; return m; }()),
+			});
+
+		RegisterComponent<FastCircleCollider2DComponent>(sceneManager, "Fast Circle Collider 2D",
+			ComponentCategory::Component, "Physics", "FastCircleCollider2D",
+			{
+				Properties::MakeWith<float>("Radius", "Radius",
+					[](const Entity& e) { return e.GetComponent<FastCircleCollider2DComponent>().Radius; },
+					[](Entity& e, float v) {
+						e.GetComponent<FastCircleCollider2DComponent>().SetRadius(v);
+					},
+					[]() { PropertyMetadata m; m.HasClamp = true; m.ClampMin = 0.01; m.ClampMax = 100.0; m.DragSpeed = 0.05f; return m; }()),
+			});
+
+		// ── Audio ───────────────────────────────────────────────────
+
+		RegisterComponent<AudioSourceComponent>(sceneManager, "Audio Source",
+			ComponentCategory::Component, "Audio", "AudioSource",
+			{
+				Properties::MakeWith<bool>("PlayOnAwake", "Play On Awake",
+					[](const Entity& e) { return e.GetComponent<AudioSourceComponent>().GetPlayOnAwake(); },
+					[](Entity& e, bool v) {
+						e.GetComponent<AudioSourceComponent>().SetPlayOnAwake(v);
+					}),
+				Properties::MakeWith<float>("Volume", "Volume",
+					[](const Entity& e) { return e.GetComponent<AudioSourceComponent>().GetVolume(); },
+					[](Entity& e, float v) {
+						e.GetComponent<AudioSourceComponent>().SetVolume(v);
+					},
+					[]() { PropertyMetadata m; m.HasClamp = true; m.ClampMin = 0.0; m.ClampMax = 1.0; m.DragSpeed = 0.01f; return m; }()),
+				Properties::MakeWith<float>("Pitch", "Pitch",
+					[](const Entity& e) { return e.GetComponent<AudioSourceComponent>().GetPitch(); },
+					[](Entity& e, float v) {
+						e.GetComponent<AudioSourceComponent>().SetPitch(v);
+					},
+					[]() { PropertyMetadata m; m.HasClamp = true; m.ClampMin = 0.1; m.ClampMax = 3.0; m.DragSpeed = 0.01f; return m; }()),
+				Properties::MakeWith<bool>("Loop", "Loop",
+					[](const Entity& e) { return e.GetComponent<AudioSourceComponent>().IsLooping(); },
+					[](Entity& e, bool v) {
+						e.GetComponent<AudioSourceComponent>().SetLoop(v);
+					}),
+				Properties::MakeAudioRef("Clip", "Clip",
+					[](const Entity& e) -> uint64_t {
+						const auto& src = e.GetComponent<AudioSourceComponent>();
+						const AudioHandle h = src.GetAudioHandle();
+						return h.IsValid() ? AudioManager::GetAudioAssetUUID(h) : 0ull;
+					},
+					[](Entity& e, uint64_t uuid) {
+						auto& src = e.GetComponent<AudioSourceComponent>();
+						const AudioHandle h = uuid != 0
+							? AudioManager::LoadAudioByUUID(uuid)
+							: AudioHandle{};
+						src.SetAudioHandle(h, UUID(uuid));
+					}),
+			});
+
+		// ── Conflicts ───────────────────────────────────────────────
+		// Visual-output exclusion: an entity carries exactly one renderer.
+		// Tilemap2DComponent (in the Tilemap2D package) declares its own half
+		// of these conflicts in its package init.
+		DeclareConflict<SpriteRendererComponent, ParticleSystem2DComponent>(sceneManager);
+		DeclareConflict<SpriteRendererComponent, ImageComponent>(sceneManager);
+		DeclareConflict<ImageComponent, ParticleSystem2DComponent>(sceneManager);
+
+		// Physics-stack exclusion: Box2D-backed and Axiom-Physics-backed bodies
+		// do not coexist on a single entity (they manage distinct simulation
+		// state under the same logical "rigid body"). Same for collider pairs:
+		// a Box2D collider attaches to a Box2D body; an Axiom-Physics collider
+		// attaches to an Axiom-Physics body. The two stacks must not be mixed
+		// per-entity.
+		DeclareConflict<Rigidbody2DComponent, FastBody2DComponent>(sceneManager);
+		DeclareConflict<BoxCollider2DComponent, FastBoxCollider2DComponent>(sceneManager);
+		DeclareConflict<BoxCollider2DComponent, FastCircleCollider2DComponent>(sceneManager);
+		// Within Axiom-Physics, only one shape per body is supported.
+		DeclareConflict<FastBoxCollider2DComponent, FastCircleCollider2DComponent>(sceneManager);
 
 		// Tags (not user-addable)
 		RegisterComponent<IdTag>(sceneManager, "Id", ComponentCategory::Tag);

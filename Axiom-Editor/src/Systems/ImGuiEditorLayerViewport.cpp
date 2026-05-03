@@ -7,6 +7,7 @@
 #include "Components/Components.hpp"
 #include "Core/Application.hpp"
 #include "Core/Window.hpp"
+#include "Diagnostics/StatsOverlay.hpp"
 #include "Graphics/GizmoRenderer.hpp"
 #include "Graphics/Gizmo.hpp"
 #include "Graphics/Renderer2D.hpp"
@@ -312,6 +313,40 @@ namespace Axiom {
 			}
 		}
 
+		// "Stats" toggle. Lives next to VSync; flips m_ShowGameViewStats so
+		// the overlay block at the bottom of this function decides whether
+		// to draw. Buttons show a depressed appearance when their overlay
+		// is active so the user can see at a glance which are on.
+		ImGui::SameLine();
+		{
+			const bool active = m_ShowGameViewStats;
+			if (active) {
+				ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+			}
+			if (ImGui::Button("Stats##GameView")) {
+				m_ShowGameViewStats = !m_ShowGameViewStats;
+			}
+			if (active) {
+				ImGui::PopStyleColor();
+			}
+		}
+
+		// "Logs" toggle. Sibling to Stats; the log overlay stacks below
+		// the stats overlay when both are visible.
+		ImGui::SameLine();
+		{
+			const bool active = m_ShowGameViewLogs;
+			if (active) {
+				ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+			}
+			if (ImGui::Button("Logs##GameView")) {
+				m_ShowGameViewLogs = !m_ShowGameViewLogs;
+			}
+			if (active) {
+				ImGui::PopStyleColor();
+			}
+		}
+
 		ImGui::Separator();
 
 		const ImVec2 viewportSize = ImGui::GetContentRegionAvail();
@@ -407,6 +442,31 @@ namespace Axiom {
 					ImVec2(0.0f, 1.0f),
 					ImVec2(1.0f, 0.0f));
 				drawList->AddRect(imageMin, imageMax, IM_COL32(255, 255, 255, 40));
+
+				// Stats overlay — engine-level helper. The cached snapshot
+				// refreshes at 30 Hz internally; we just feed the FBO size
+				// and let it draw inside the rendered image rectangle.
+				// Tracks rendered height so the log overlay below can stack.
+				float statsRenderedHeight = 0.0f;
+				if (m_ShowGameViewStats) {
+					m_GameViewStatsOverlay.RefreshIfDue(fbW, fbH);
+					statsRenderedHeight = m_GameViewStatsOverlay.RenderInRect(imageMin, imageMax);
+				}
+
+				// Log overlay — pinned same place as stats; offset down when
+				// stats is also visible so the two don't overlap. Lazy-
+				// constructed: subscribing to Log::OnLog at engine load is
+				// safe (Log is initialized very early), but we mirror the
+				// runtime's lazy-construction style for symmetry.
+				if (m_ShowGameViewLogs) {
+					if (!m_GameViewLogOverlay) {
+						m_GameViewLogOverlay = std::make_unique<Axiom::Diagnostics::LogOverlay>();
+					}
+					const float logYOffset = statsRenderedHeight > 0.0f
+						? statsRenderedHeight + 8.0f
+						: 0.0f;
+					m_GameViewLogOverlay->RenderInRect(imageMin, imageMax, logYOffset);
+				}
 			}
 			else {
 				ImGui::TextDisabled("No main camera in scene");

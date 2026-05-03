@@ -2,6 +2,8 @@
 #include "Core/Layer.hpp"
 #include "Core/Export.hpp"
 #include "Collections/Color.hpp"
+#include "Diagnostics/LogOverlay.hpp"
+#include "Diagnostics/StatsOverlay.hpp"
 #include "Scene/Entity.hpp"
 #include "Scene/Scene.hpp"
 #include "Collections/Ids.hpp"
@@ -159,6 +161,20 @@ namespace Axiom {
 		int m_LastGameViewFbH = 0;
 		std::chrono::steady_clock::time_point m_LastGameViewRenderTime{};
 
+		// Game View overlays. The Stats / Logs buttons next to VSync toggle
+		// these flags; when on, the engine-level Diagnostics overlays draw
+		// pinned to the top-right of the rendered FBO area. Both share the
+		// same implementation as the runtime F6/F7 overlays. When both are
+		// visible the log window stacks below the stats window.
+		bool m_ShowGameViewStats = false;
+		bool m_ShowGameViewLogs  = false;
+		Axiom::Diagnostics::StatsOverlay m_GameViewStatsOverlay;
+		// unique_ptr so LogOverlay's constructor (which subscribes to
+		// Log::OnLog) only fires once Log is up. The editor's ImGuiEditorLayer
+		// constructor runs before Application::Initialize on some paths;
+		// we lazily new the overlay on first use to avoid that ordering risk.
+		std::unique_ptr<Axiom::Diagnostics::LogOverlay> m_GameViewLogOverlay;
+
 		Viewport m_EditorViewport{ 1, 1 };
 		bool m_IsViewportHovered = false;
 		bool m_IsViewportFocused = false;
@@ -183,7 +199,6 @@ namespace Axiom {
 		std::string m_PendingSceneSwitch;
 		std::string m_ConfirmDialogPendingPath;
 		bool m_ShowSaveConfirmDialog = false;
-		bool m_InspectorItemWasActive = false;
 		char m_ComponentSearchBuffer[128]{};
 		char m_SystemSearchBuffer[128]{};
 		char m_GlobalSystemSearchBuffer[128]{};
@@ -211,6 +226,7 @@ namespace Axiom {
 		PackageManagerPanel m_PackageManagerPanel;
 		std::string m_BuildOutputDir;
 		char m_BuildOutputDirBuffer[512]{};
+		char m_CustomDefineEntryBuffer[128]{}; // Build panel custom-define text input
 		int m_BuildState = 0; // 0=idle, 1=pending (render overlay), 2=execute
 		bool m_BuildAndPlay = false;
 		std::vector<entt::entity> m_EditorPausedAudioEntities; // AudioSources paused by editor, not by gameplay

@@ -15,8 +15,11 @@
 #include "Scene/Entity.hpp"
 #include "Scene/SceneManager.hpp"
 
+#include <initializer_list>
 #include <span>
 #include <string>
+#include <typeindex>
+#include <vector>
 
 namespace Axiom::Package {
 
@@ -86,13 +89,15 @@ namespace Axiom::Package {
         void (*drawInspector)(std::span<const Entity>),
         Json::Value (*serialize)(const TComponent&),
         void (*deserialize)(TComponent&, const Json::Value&),
-        ComponentCategory category = ComponentCategory::Component) {
+        ComponentCategory category = ComponentCategory::Component,
+        std::vector<PropertyDescriptor> properties = {}) {
 
         ComponentInfo info(displayName, subcategory ? subcategory : "", category);
         if (serializedName && *serializedName) {
             info.serializedName = serializedName;
         }
         info.drawInspector = drawInspector;
+        info.properties = std::move(properties);
 
         using Trampoline = ComponentSerializerTrampoline<TComponent>;
         Trampoline::s_Serialize = serialize;
@@ -101,6 +106,31 @@ namespace Axiom::Package {
         info.deserialize = deserialize ? &Trampoline::DeserializeAdapter : nullptr;
 
         SceneManager::Get().RegisterComponentType<TComponent>(info);
+    }
+
+    // Declare a symmetric conflict between two already-registered components.
+    // Either side may declare it — the registry's HasConflict lookup walks
+    // both directions. Packages call this for each rendering-style component
+    // they introduce against the engine's built-ins (SpriteRenderer / Image /
+    // ParticleSystem2D) so the editor's Add Component popup hides the
+    // conflicting entry on selected entities.
+    template <typename A, typename B>
+    void DeclareComponentConflict() {
+        const std::type_index aId(typeid(A));
+        const std::type_index bId(typeid(B));
+        SceneManager::Get().GetComponentRegistry().ForEachComponentInfo(
+            [&](const std::type_index& id, ComponentInfo& info) {
+                if (id == aId) {
+                    bool present = false;
+                    for (const auto& c : info.conflictsWith) if (c == bId) { present = true; break; }
+                    if (!present) info.conflictsWith.push_back(bId);
+                }
+                else if (id == bId) {
+                    bool present = false;
+                    for (const auto& c : info.conflictsWith) if (c == aId) { present = true; break; }
+                    if (!present) info.conflictsWith.push_back(aId);
+                }
+            });
     }
 
 } // namespace Axiom::Package

@@ -293,7 +293,12 @@ namespace Axiom {
 		std::string m_Name;
 		const SceneDefinition* m_Definition;
 		UUID m_SceneId;
-		EntityHandle m_MainCameraEntity = entt::null;
+		// `mutable`: GetMainCamera() lazily refreshes the cache when the
+		// previously-cached entity is gone or disabled. The const overload
+		// shares this code path; without `mutable` it would need to
+		// const_cast away constness — UB if any caller ever holds an
+		// actually-const Scene&.
+		mutable EntityHandle m_MainCameraEntity = entt::null;
 
 		bool m_IsLoaded = false;
 		bool m_Persistent = false;

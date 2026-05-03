@@ -114,6 +114,14 @@ project "Axiom-Engine"
         }
     )
 
+    -- Diagnostics/StatsOverlay.cpp uses ImGui directly, but the engine DLL
+    -- doesn't link ImGui (it's an editor/runtime concern). The header
+    -- (StatsOverlay.hpp) only forward-declares ImVec2 so it stays clean to
+    -- include in engine code; the .cpp is excluded here and re-added by
+    -- Axiom-Editor's and Axiom-Runtime's premake (same pattern as the
+    -- ProfilerPanel cross-binary share).
+    removefiles { "src/Diagnostics/**.cpp" }
+
 
     UseAxiomEngineModuleDependencies()
     defines(GetAxiomModuleDefines())

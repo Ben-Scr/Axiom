@@ -7,8 +7,12 @@
 #ifdef AIM_PLATFORM_WINDOWS
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
+#include <algorithm>
 #else
+#include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
+#include <signal.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #endif
@@ -102,12 +106,14 @@ namespace Axiom::Process {
 #endif
 	} // namespace
 
-	Result Run(const std::vector<std::string>& command, const std::filesystem::path& workingDirectory) {
+	Result Run(const std::vector<std::string>& command, const std::filesystem::path& workingDirectory, std::chrono::milliseconds timeout) {
 		Result result;
 		if (command.empty()) {
 			result.Output = "No command specified";
 			return result;
 		}
+
+		const bool hasTimeout = timeout.count() > 0;
 
 #ifdef AIM_PLATFORM_WINDOWS
 		SECURITY_ATTRIBUTES securityAttributes{};
@@ -163,10 +169,57 @@ namespace Axiom::Process {
 			return result;
 		}
 
-		result.Output = ReadPipeToEnd(readPipe);
+		// Drain the pipe with a deadline. PeekNamedPipe lets us check for
+		// data without blocking; if no data and the deadline expires, we
+		// terminate the child instead of blocking forever.
+		const auto deadline = hasTimeout ? std::chrono::steady_clock::now() + timeout
+		                                  : std::chrono::steady_clock::time_point::max();
+		char buffer[4096];
+		while (true) {
+			if (hasTimeout && std::chrono::steady_clock::now() >= deadline) {
+				result.TimedOut = true;
+				TerminateProcess(processInfo.hProcess, static_cast<UINT>(-1));
+				break;
+			}
+
+			DWORD available = 0;
+			if (!PeekNamedPipe(readPipe, nullptr, 0, nullptr, &available, nullptr)) {
+				break; // pipe closed (child exited and write end gone)
+			}
+			if (available == 0) {
+				// Either the child is still running with no output, or it has
+				// exited. Wait briefly for either an output byte or process
+				// exit before retrying.
+				const DWORD waitMs = hasTimeout
+					? static_cast<DWORD>(std::min<long long>(50,
+						std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count()))
+					: 50;
+				const DWORD waitResult = WaitForSingleObject(processInfo.hProcess, waitMs == 0 ? 1 : waitMs);
+				if (waitResult == WAIT_OBJECT_0) {
+					// Process exited — drain any final bytes still in the pipe.
+					DWORD finalAvailable = 0;
+					if (PeekNamedPipe(readPipe, nullptr, 0, nullptr, &finalAvailable, nullptr) && finalAvailable > 0) {
+						DWORD bytesRead = 0;
+						while (ReadFile(readPipe, buffer, sizeof(buffer), &bytesRead, nullptr) && bytesRead > 0) {
+							result.Output.append(buffer, buffer + bytesRead);
+						}
+					}
+					break;
+				}
+				continue;
+			}
+
+			DWORD bytesRead = 0;
+			if (!ReadFile(readPipe, buffer, sizeof(buffer), &bytesRead, nullptr) || bytesRead == 0) {
+				break;
+			}
+			result.Output.append(buffer, buffer + bytesRead);
+		}
 		CloseHandle(readPipe);
 
-		WaitForSingleObject(processInfo.hProcess, INFINITE);
+		// Final wait — bounded if we just terminated, INFINITE if we exited
+		// the read loop because the child closed its end normally.
+		WaitForSingleObject(processInfo.hProcess, result.TimedOut ? 5000 : INFINITE);
 		DWORD exitCode = static_cast<DWORD>(-1);
 		GetExitCodeProcess(processInfo.hProcess, &exitCode);
 		result.ExitCode = static_cast<int>(exitCode);
@@ -175,6 +228,22 @@ namespace Axiom::Process {
 		CloseHandle(processInfo.hThread);
 		return result;
 #else
+		// Build the argv array BEFORE fork(). Between fork() and execvp() we
+		// can only call async-signal-safe functions; std::vector::push_back
+		// allocates via the global allocator, which is not async-signal-safe
+		// in a multithreaded program (a thread holding malloc's lock at fork
+		// time leaves it locked in the child, deadlocking the next malloc).
+		// Pre-built argv keeps the post-fork path to chdir/dup2/close/execvp.
+		std::vector<char*> argv;
+		argv.reserve(command.size() + 1);
+		for (const std::string& arg : command) {
+			argv.push_back(const_cast<char*>(arg.c_str()));
+		}
+		argv.push_back(nullptr);
+
+		const std::string workingDirectoryStr = workingDirectory.empty() ? std::string() : workingDirectory.string();
+		const char* workingDirectoryCStr = workingDirectoryStr.empty() ? nullptr : workingDirectoryStr.c_str();
+
 		int pipeFd[2];
 		if (pipe(pipeFd) != 0) {
 			result.Output = "Failed to create process output pipe";
@@ -190,8 +259,10 @@ namespace Axiom::Process {
 		}
 
 		if (pid == 0) {
-			if (!workingDirectory.empty()) {
-				chdir(workingDirectory.c_str());
+			if (workingDirectoryCStr) {
+				if (chdir(workingDirectoryCStr) != 0) {
+					_exit(126); // distinct from execvp's 127
+				}
 			}
 
 			dup2(pipeFd[1], STDOUT_FILENO);
@@ -199,29 +270,66 @@ namespace Axiom::Process {
 			close(pipeFd[0]);
 			close(pipeFd[1]);
 
-			std::vector<char*> argv;
-			argv.reserve(command.size() + 1);
-			for (const std::string& arg : command) {
-				argv.push_back(const_cast<char*>(arg.c_str()));
-			}
-			argv.push_back(nullptr);
-
-			execvp(command[0].c_str(), argv.data());
+			execvp(argv[0], argv.data());
 			_exit(127);
 		}
 
 		close(pipeFd[1]);
 
+		const auto deadline = hasTimeout ? std::chrono::steady_clock::now() + timeout
+		                                  : std::chrono::steady_clock::time_point::max();
 		char buffer[4096];
-		ssize_t bytesRead = 0;
-		while ((bytesRead = read(pipeFd[0], buffer, sizeof(buffer))) > 0) {
-			result.Output.append(buffer, buffer + bytesRead);
+		for (;;) {
+			int waitMs = -1; // -1 = block forever
+			if (hasTimeout) {
+				const auto now = std::chrono::steady_clock::now();
+				if (now >= deadline) {
+					result.TimedOut = true;
+					kill(pid, SIGKILL);
+					break;
+				}
+				waitMs = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count());
+			}
+
+			pollfd pfd{ pipeFd[0], POLLIN, 0 };
+			const int pollResult = poll(&pfd, 1, waitMs);
+			if (pollResult < 0) {
+				if (errno == EINTR) continue;
+				break;
+			}
+			if (pollResult == 0) {
+				// poll timed out — by construction this only happens when we
+				// hit the deadline.
+				result.TimedOut = true;
+				kill(pid, SIGKILL);
+				break;
+			}
+
+			ssize_t bytesRead = read(pipeFd[0], buffer, sizeof(buffer));
+			if (bytesRead > 0) {
+				result.Output.append(buffer, buffer + bytesRead);
+				continue;
+			}
+			if (bytesRead == 0) {
+				break; // EOF (child closed write end)
+			}
+			if (errno == EINTR) continue;
+			break;
 		}
 		close(pipeFd[0]);
 
 		int status = 0;
-		waitpid(pid, &status, 0);
-		result.ExitCode = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+		while (waitpid(pid, &status, 0) < 0) {
+			if (errno == EINTR) continue;
+			break;
+		}
+		if (WIFEXITED(status)) {
+			result.ExitCode = WEXITSTATUS(status);
+		} else if (WIFSIGNALED(status)) {
+			result.ExitCode = 128 + WTERMSIG(status); // shell convention
+		} else {
+			result.ExitCode = -1;
+		}
 		return result;
 #endif
 	}

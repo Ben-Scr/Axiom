@@ -4,6 +4,8 @@
 #include "Assets/AssetRegistry.hpp"
 #include "Components/General/EntityMetaDataComponent.hpp"
 #include "Core/Log.hpp"
+#include "Editor/EditorComponentRegistration.hpp"
+#include "Inspector/ReferencePicker.hpp"
 #include "Gui/ImGuiUtils.hpp"
 #include "Scene/ComponentRegistry.hpp"
 #include "Scene/Entity.hpp"
@@ -14,6 +16,7 @@
 #include "Serialization/SceneSerializer.hpp"
 
 #include <imgui.h>
+#include <imgui_internal.h>
 
 #include <filesystem>
 #include <span>
@@ -107,7 +110,7 @@ namespace Axiom {
 			if (!info.has || !info.has(rootEntity)) return;
 
 			if (info.displayName == "Scripts") {
-				if (info.drawInspector) info.drawInspector(entitySpan);
+				DispatchComponentInspector(info, entitySpan);
 				return;
 			}
 
@@ -119,9 +122,7 @@ namespace Axiom {
 			}
 
 			if (open) {
-				if (info.drawInspector) {
-					info.drawInspector(entitySpan);
-				}
+				DispatchComponentInspector(info, entitySpan);
 				ImGuiUtils::EndComponentSection();
 			}
 		});
@@ -134,6 +135,9 @@ namespace Axiom {
 			});
 			m_PrefabScene->MarkDirty();
 		}
+
+		// Render the unified reference-picker popup once per inspector frame.
+		ReferencePicker::RenderPopup();
 
 		// Add Component popup. Bare list of registered components missing from
 		// the entity. No script-discovery search in v1 — only built-in components.
@@ -156,21 +160,24 @@ namespace Axiom {
 			ImGui::EndPopup();
 		}
 
-		// Heuristic dirty signal: if any item is currently being interacted with,
-		// mark the detached scene dirty. Component-add / -remove above have
-		// already handled their own dirtying — this catches every drag/edit on
-		// the field widgets without requiring per-drawer instrumentation.
-		const bool itemActive = ImGui::IsAnyItemActive() && ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
-		if (itemActive) {
+		// Dirty signal: only flag when ImGui reports a real value change on the
+		// active widget this frame (drag step, keystroke, etc.). Plain focus or
+		// click does NOT set ActiveIdHasBeenEditedThisFrame, so tabbing through
+		// fields without changing values leaves the prefab clean. Component
+		// add / remove above already handle their own dirtying.
+		const bool windowFocused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+		const ImGuiContext& g = *ImGui::GetCurrentContext();
+		if (windowFocused && g.ActiveId != 0 && g.ActiveIdHasBeenEditedThisFrame) {
 			m_PrefabScene->MarkDirty();
 		}
 
 		// Auto-save: flush as soon as the prefab is dirty AND no widget is
-		// currently being interacted with. During a drag the slider stays
-		// "active" every frame, so this naturally debounces — Save() fires
-		// once on release. One-shot edits (Add Component, Remove Component)
-		// have no held item, so they save on the same frame they happen.
-		// A failing Save() leaves the dirty flag set; we'll retry next frame.
+		// currently being held. During a drag the slider stays active every
+		// frame, so this naturally debounces — Save() fires once on release.
+		// One-shot edits (Add Component, Remove Component) have no held item,
+		// so they save on the same frame they happen. A failing Save() leaves
+		// the dirty flag set; we'll retry next frame.
+		const bool itemActive = ImGui::IsAnyItemActive() && windowFocused;
 		const bool dirtyForSave = m_PrefabScene->IsDirty();
 		if (dirtyForSave && !itemActive) {
 			Save();

@@ -889,7 +889,7 @@ namespace Axiom {
 	}
 
 	void Scene::OnFastBoxCollider2DDestroy(entt::registry& registry, EntityHandle entity) {
-		PhysicsSystem2D::GetAxiomPhysicsWorld().DestroyCollider(entity);
+		PhysicsSystem2D::GetAxiomPhysicsWorld().DestroyCollider(entity, AxiomPhysicsWorld2D::FastColliderKind::Box);
 	}
 
 	void Scene::OnFastCircleCollider2DConstruct(entt::registry& registry, EntityHandle entity) {
@@ -899,7 +899,7 @@ namespace Axiom {
 	}
 
 	void Scene::OnFastCircleCollider2DDestroy(entt::registry& registry, EntityHandle entity) {
-		PhysicsSystem2D::GetAxiomPhysicsWorld().DestroyCollider(entity);
+		PhysicsSystem2D::GetAxiomPhysicsWorld().DestroyCollider(entity, AxiomPhysicsWorld2D::FastColliderKind::Circle);
 	}
 
 	void Scene::ApplyEntityEnabledState(entt::registry& registry, EntityHandle entity, bool enabled)

@@ -1,11 +1,14 @@
 #pragma once
 
+#include "Inspector/PropertyDescriptor.hpp"
 #include "Scene/ComponentCategory.hpp"
 #include "Scene/Entity.hpp"
 #include "Serialization/Json.hpp"
 
 #include <span>
 #include <string>
+#include <typeindex>
+#include <vector>
 
 namespace Axiom {
 
@@ -30,7 +33,36 @@ namespace Axiom {
 		// Inspector draw. Receives the full set of currently-selected entities
 		// that have this component. For a single-entity selection the span has
 		// size 1 — single-entity edits use the same code path as multi-entity.
+		//
+		// Two ways to populate this:
+		//   1. Hand-written lambda (legacy / custom UX). Set drawInspector
+		//      directly to a function pointer.
+		//   2. Declarative properties (preferred for new components). Push
+		//      PropertyDescriptors into `properties`; the editor auto-generates
+		//      a drawInspector that walks the list and dispatches to
+		//      PropertyDrawer::Draw(entities, descriptor) for each one.
+		//
+		// If both are set, drawInspector wins. The auto-generated drawer is
+		// only installed when drawInspector is null AND properties is non-empty.
 		void (*drawInspector)(std::span<const Entity>) = nullptr;
+
+		// Declarative property list. Populated by Properties::Add / MakeFlagEnum
+		// / MakeTextureRef etc. Iterated by the editor's auto-drawer and (later)
+		// by the generic JSON serializer to round-trip values without a custom
+		// serialize/deserialize callback.
+		std::vector<PropertyDescriptor> properties;
+
+		// Components that cannot coexist on the same entity. The editor's
+		// "Add Component" popup hides entries that conflict with anything
+		// already on the selected entity. The relationship is implicitly
+		// symmetric — declaring "A conflicts with B" on either side is
+		// enough; ComponentRegistry::HasConflict checks both directions
+		// at lookup time.
+		//
+		// Common pattern: visual-output renderers (sprite, image, tilemap,
+		// particle system) tend to conflict with each other so an entity
+		// has exactly one "what shows up at this transform" component.
+		std::vector<std::type_index> conflictsWith;
 
 		// ── Serialization callbacks ─────────────────────────────────────
 		// Optional. When set, SceneSerializer routes this component through

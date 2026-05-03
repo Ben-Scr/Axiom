@@ -2,6 +2,8 @@
 #include "Editor/EditorComponentRegistration.hpp"
 
 #include "Gui/ComponentInspectors.hpp"
+#include "Inspector/PropertyDrawer.hpp"
+#include "Scene/ComponentInfo.hpp"
 #include "Scene/SceneManager.hpp"
 #include "Scripting/ScriptComponent.hpp"
 #include "Scripting/ScriptComponentInspector.hpp"
@@ -9,7 +11,9 @@
 #include "Components/Components.hpp"
 
 #include <span>
+#include <string>
 #include <typeindex>
+#include <unordered_map>
 
 namespace Axiom {
 	namespace {
@@ -45,6 +49,20 @@ namespace Axiom {
 		}
 	}
 
+	// Single dispatch entry-point used by every inspector loop. If the
+	// component carries a custom drawInspector lambda we honour it; otherwise
+	// we fall through to the unified PropertyDrawer driven by the component's
+	// declared PropertyDescriptors. Components with neither path are skipped.
+	void DispatchComponentInspector(const ComponentInfo& info, std::span<const Entity> entities) {
+		if (info.drawInspector) {
+			info.drawInspector(entities);
+			return;
+		}
+		if (!info.properties.empty()) {
+			PropertyDrawer::DrawAll(entities, info.properties, info.displayName);
+		}
+	}
+
 	void RegisterEditorComponentInspectors(SceneManager& sceneManager) {
 		// ScriptComponent is editor-only as far as registration goes: register it
 		// here (it isn't part of BuiltInComponentRegistration) before attaching
@@ -58,21 +76,28 @@ namespace Axiom {
 		// Inspector-only attachments. The component metadata itself lives in
 		// Axiom-Engine/src/Scene/BuiltInComponentRegistration.cpp — do not
 		// re-declare display names, categories, or serialized names here.
+		//
+		// Most built-ins now declare PropertyDescriptors in their engine-side
+		// registration (see BuiltInComponentRegistration.cpp). Those flow
+		// through DispatchComponentInspector's auto-drawer fallback and don't
+		// need an entry here. The bindings below are for components that
+		// either:
+		//   * have no PropertyDescriptors at all (ParticleSystem2D — variant
+		//     fields don't fit the declarative model), OR
+		//   * need a SLIM inspector that draws PropertyDrawer::DrawAll(...)
+		//     first and then appends a few extra widgets the property model
+		//     can't express (texture preview, runtime read-outs, scripts UI).
 		const InspectorBinding bindings[] = {
-			Bind<NameComponent>(DrawNameComponentInspector),
-			Bind<Transform2DComponent>(DrawTransform2DInspector),
-
+			// Hybrid: properties + extras (texture preview, runtime read-outs).
 			Bind<SpriteRendererComponent>(DrawSpriteRendererInspector),
 			Bind<Camera2DComponent>(DrawCamera2DInspector),
+			Bind<FastBody2DComponent>(DrawFastBody2DInspector),
+
+			// Custom-only: variant types + per-shape branches don't map cleanly.
 			Bind<ParticleSystem2DComponent>(DrawParticleSystem2DInspector),
 
-			Bind<BoxCollider2DComponent>(DrawBoxCollider2DInspector),
-			Bind<Rigidbody2DComponent>(DrawRigidbody2DInspector),
-			Bind<FastBody2DComponent>(DrawFastBody2DInspector),
-			Bind<FastBoxCollider2DComponent>(DrawFastBoxCollider2DInspector),
-			Bind<FastCircleCollider2DComponent>(DrawFastCircleCollider2DInspector),
-
-			Bind<AudioSourceComponent>(DrawAudioSourceInspector),
+			// Custom-only: per-script field rendering goes through its own
+			// PropertyDrawer-driven path (see ScriptComponentInspector.cpp).
 			Bind<ScriptComponent>(DrawScriptComponentInspector),
 		};
 

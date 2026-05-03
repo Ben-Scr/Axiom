@@ -1,8 +1,18 @@
 #include <pch.hpp>
 #include "Gui/ImGuiUtils.hpp"
+#include "Scene/Scene.hpp"
 #include <imgui.h>
 
 namespace Axiom::ImGuiUtils {
+	void MarkSelectionDirty(std::span<const Entity> entities)
+	{
+		for (const Entity& e : entities) {
+			if (Scene* scene = const_cast<Entity&>(e).GetScene()) {
+				scene->MarkDirty();
+			}
+		}
+	}
+
 	float GetInspectorLabelColumnWidth()
 	{
 		return 160.0f;

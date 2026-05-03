@@ -102,6 +102,17 @@ namespace Axiom {
 		static bool IsPaused() { return s_Instance ? s_Instance->IsEnginePaused() : false; }
 		static bool IsShuttingDown() { return s_Instance ? s_Instance->m_IsShuttingDown : false; }
 
+		// Runtime check: true when the host process is the editor binary,
+		// false when it's a standalone runtime (built game). The editor's
+		// Application subclass calls SetEditorHost(true) in its constructor;
+		// runtime / launcher leave it false. Mirrors the compile-time
+		// AXIOM_EDITOR macro available to C# scripts — both are kept so
+		// users can pick whichever fits the call site:
+		//   • #if AXIOM_EDITOR / #endif         (compile-time strip)
+		//   • if (Application.IsEditor) ...     (runtime branch)
+		static bool IsEditor() { return s_Instance ? s_Instance->m_IsEditorHost : false; }
+		void SetEditorHost(bool isEditor) { m_IsEditorHost = isEditor; }
+
 		// ─── Editor-only access surface (H12) ────────────────────────────
 		// The methods below exist to let an editor host pause gameplay and
 		// gate game-input independently of the editor UI. They are no-ops in
@@ -176,6 +187,7 @@ namespace Axiom {
 		bool m_RunInBackground = false;
 		bool m_ShouldQuit = false;
 		bool m_CanReload = false;
+		bool m_IsEditorHost = false; // set by Editor's Application subclass; false for runtime/launcher
 		bool m_IsPaused = false;
 		bool m_IsBackgroundPaused = false;
 		bool m_IsMinimized = false;

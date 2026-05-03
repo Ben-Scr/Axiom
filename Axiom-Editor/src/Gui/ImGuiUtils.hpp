@@ -17,6 +17,13 @@ namespace Axiom::ImGuiUtils {
 	void BeginInspectorFieldRow(const char* label);
 	void DrawInspectorLabel(const char* label);
 
+	// Mark every entity's owning scene dirty after a multi-edit setter loop.
+	// Centralised here so every *Multi helper below (and any caller doing
+	// its own per-entity write loop) can drop in a one-liner instead of
+	// re-implementing the gated MarkDirty walk. Defined in ImGuiUtils.cpp
+	// to keep Scene.hpp out of this widely-included header.
+	void MarkSelectionDirty(std::span<const Entity> entities);
+
 	template<typename Draw>
 	bool DrawInspectorControl(const char* label, Draw&& draw)
 	{
@@ -252,6 +259,7 @@ namespace Axiom::ImGuiUtils {
 		const bool changed = ImGui::DragFloat("##Value", &v, speed, vmin, vmax, uniform ? format : "-");
 		if (changed) {
 			for (const Entity& e : entities) set(e, v);
+			MarkSelectionDirty(entities);
 		}
 		ImGui::PopID();
 		return changed;
@@ -269,6 +277,7 @@ namespace Axiom::ImGuiUtils {
 		const bool changed = ImGui::SliderFloat("##Value", &v, vmin, vmax, uniform ? format : "-");
 		if (changed) {
 			for (const Entity& e : entities) set(e, v);
+			MarkSelectionDirty(entities);
 		}
 		ImGui::PopID();
 		return changed;
@@ -286,6 +295,7 @@ namespace Axiom::ImGuiUtils {
 		const bool changed = ImGui::InputFloat("##Value", &v, step, stepFast, uniform ? format : "-");
 		if (changed) {
 			for (const Entity& e : entities) set(e, v);
+			MarkSelectionDirty(entities);
 		}
 		ImGui::PopID();
 		return changed;
@@ -304,6 +314,7 @@ namespace Axiom::ImGuiUtils {
 		const bool changed = ImGui::DragInt("##Value", &v, speed, vmin, vmax, uniform ? format : "-");
 		if (changed) {
 			for (const Entity& e : entities) set(e, v);
+			MarkSelectionDirty(entities);
 		}
 		ImGui::PopID();
 		return changed;
@@ -335,6 +346,7 @@ namespace Axiom::ImGuiUtils {
 		}
 		if (changed) {
 			for (const Entity& e : entities) set(e, v);
+			MarkSelectionDirty(entities);
 		}
 		ImGui::PopID();
 		return changed;
@@ -355,6 +367,7 @@ namespace Axiom::ImGuiUtils {
 			vmin, vmax, uniform ? format : "-");
 		if (changed) {
 			for (const Entity& e : entities) set(e, v);
+			MarkSelectionDirty(entities);
 		}
 		ImGui::PopID();
 		return changed;
@@ -395,6 +408,7 @@ namespace Axiom::ImGuiUtils {
 		}
 		if (changed) {
 			for (const Entity& e : entities) set(e, v);
+			MarkSelectionDirty(entities);
 		}
 		ImGui::PopID();
 		return changed;
@@ -423,6 +437,7 @@ namespace Axiom::ImGuiUtils {
 		}
 		if (changed) {
 			for (const Entity& e : entities) set(e, tmp);
+			MarkSelectionDirty(entities);
 		}
 		ImGui::PopID();
 		return changed;
@@ -448,6 +463,7 @@ namespace Axiom::ImGuiUtils {
 		if (changed) {
 			std::string newValue(buf);
 			for (const Entity& e : entities) set(e, newValue);
+			MarkSelectionDirty(entities);
 		}
 		ImGui::PopID();
 		return changed;
@@ -492,6 +508,7 @@ namespace Axiom::ImGuiUtils {
 			const bool changed = ImGui::DragFloat("##c", &channelValue, speed, vmin, vmax, fmt);
 			if (changed) {
 				for (const Entity& e : entities) setChan(e, c, channelValue);
+				MarkSelectionDirty(entities);
 			}
 			ImGui::PopID();
 			return changed;
@@ -526,6 +543,7 @@ namespace Axiom::ImGuiUtils {
 						anyChanged = true;
 					}
 				}
+				if (anyChanged) MarkSelectionDirty(entities);
 			}
 		}
 		else {
@@ -538,6 +556,7 @@ namespace Axiom::ImGuiUtils {
 				const bool changed = ImGui::DragFloat("##c", &channelValue, 0.005f, 0.0f, 1.0f, fmt);
 				if (changed) {
 					for (const Entity& e : entities) setChan(e, c, channelValue);
+					MarkSelectionDirty(entities);
 				}
 				ImGui::PopID();
 				return changed;
@@ -579,6 +598,7 @@ namespace Axiom::ImGuiUtils {
 				const bool isSelected = uniform && (sampled == value);
 				if (ImGui::Selectable(std::string(name).c_str(), isSelected)) {
 					for (const Entity& e : entities) set(e, value);
+					MarkSelectionDirty(entities);
 					changed = true;
 				}
 				if (isSelected) {
@@ -612,6 +632,7 @@ namespace Axiom::ImGuiUtils {
 				const bool isSelected = uniform && (sampled == i);
 				if (ImGui::Selectable(itemNames[i], isSelected)) {
 					for (const Entity& e : entities) set(e, i);
+					MarkSelectionDirty(entities);
 					changed = true;
 				}
 				if (isSelected) {
