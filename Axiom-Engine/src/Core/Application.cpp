@@ -20,7 +20,7 @@
 #include "Scripting/ScriptEngine.hpp"
 
 #ifdef AIM_PLATFORM_WINDOWS
-// E21: bring in windows.h + winmm for timeBeginPeriod/timeEndPeriod (used to
+// bring in windows.h + winmm for timeBeginPeriod/timeEndPeriod (used to
 // raise the system timer resolution to 1ms during the app lifetime so the
 // frame-cap sleep_until below stops undershooting). winmm.lib is already
 // linked by the project; psapi is only needed by the profiler block.
@@ -120,7 +120,7 @@ namespace Axiom {
 					: now;
 
 				// CPU idling for runtime fps caps. The editor renders Game View pacing separately.
-				// E21: replaced the previous "sleep_until(target - 10ms) + busy yield"
+				// replaced the previous "sleep_until(target - 10ms) + busy yield"
 				// pattern with a single sleep_until(target - 1ms). On Windows the
 				// system timer resolution is raised to 1ms via timeBeginPeriod(1)
 				// in Initialize() (released in Shutdown()), so sleep_until's
@@ -159,12 +159,28 @@ namespace Axiom {
 
 					m_Time.Update(deltaTime);
 
-					m_FixedUpdateAccumulator += m_Time.GetDeltaTime();
+					// Input pipeline ordering: snapshot prev-state BEFORE we
+					// poll new events, then poll, so that GetKeyDown/GetKeyUp
+					// in this same frame's BeginFrame()/CoreInput() reflect
+					// events that arrived between last frame's poll and now.
+					// Previously Update() ran inside EndFrame() and poll ran
+					// AFTER, which delayed input reads by one frame.
+					m_Input.Update();
+					glfwPollEvents();
+					TryCompleteQuitRequest();
+
+					// Fixed-update accumulator must be driven entirely by
+					// UNSCALED time. Mixing scaled dt with unscaled fixed-dt
+					// caused the accumulator to drift with TimeScale, and
+					// also double-applied the scale when GetFixedDeltaTime()
+					// (also scaled) was passed to systems. Time-scaling is
+					// opt-in per system — they can multiply if they want.
+					m_FixedUpdateAccumulator += m_Time.GetUnscaledDeltaTime();
 					while (m_FixedUpdateAccumulator >= m_Time.GetUnscaledFixedDeltaTime()) {
 						if (!IsEnginePaused() && !m_IsPlaymodePaused) {
 							BeginFixedFrame();
 							for (const auto& layer : m_LayerStack) {
-								layer->OnFixedUpdate(*this, m_Time.GetFixedDeltaTime());
+								layer->OnFixedUpdate(*this, m_Time.GetUnscaledFixedDeltaTime());
 							}
 							EndFixedFrame();
 						}
@@ -174,9 +190,6 @@ namespace Axiom {
 
 					BeginFrame();
 					EndFrame();
-					TryCompleteQuitRequest();
-
-					glfwPollEvents();
 					TryCompleteQuitRequest();
 
 					m_LastFrameTime = frameStart;
@@ -257,12 +270,20 @@ namespace Axiom {
 
 			if (!m_CanReload) break;
 			m_CanReload = false;
+
+			// Reload-tail: rebuild SceneManager so Initialize() does not
+			// re-call Initialize() on an already-shutdown manager. Other
+			// subsystems (Window, Renderer2D, etc.) are owned by unique_ptrs
+			// that get reset() in Shutdown(); SceneManager wasn't, so a
+			// post-reload Initialize() touched a half-dead object.
+			m_SceneManager.reset();
+			m_SceneManager = std::make_unique<SceneManager>();
 		}
 	}
 
 	void Application::Initialize() {
 #ifdef AIM_PLATFORM_WINDOWS
-		// E21: raise the Windows system timer resolution to 1ms once at app
+		// raise the Windows system timer resolution to 1ms once at app
 		// init so sleep_until in the frame-cap path is accurate. Paired with
 		// timeEndPeriod(1) in Shutdown(). Do NOT call this per frame.
 		timeBeginPeriod(1);
@@ -429,7 +450,9 @@ namespace Axiom {
 			RenderPipelineOnly();
 		}
 
-		m_Input.Update();
+		// Note: m_Input.Update() (advance prev-state) now runs at the TOP
+		// of the next iteration, immediately before glfwPollEvents(), so
+		// that GetKeyDown reflects events delivered to this frame.
 		m_IsRenderingFrame = false;
 	}
 
@@ -513,8 +536,11 @@ namespace Axiom {
 		if (!m_IsPlaying) return;
 
 		if (m_SceneManager) m_SceneManager->FixedUpdateScenes();
-		if (m_PhysicsSystem2D) m_PhysicsSystem2D->FixedUpdate(m_Time.GetFixedDeltaTime());
-		// H7: GlobalSystem.OnFixedUpdate dispatch — paired with the per-scene
+		// Pass UNSCALED fixed dt — the accumulator above is driven by
+		// unscaled time, so feeding scaled dt here would compound the
+		// time-scale. Systems that want scaling can opt in by multiplying.
+		if (m_PhysicsSystem2D) m_PhysicsSystem2D->FixedUpdate(m_Time.GetUnscaledFixedDeltaTime());
+		// GlobalSystem.OnFixedUpdate dispatch — paired with the per-scene
 		// FixedUpdate above. Runs after physics so global systems observe
 		// transforms already synced from the physics step.
 		ScriptEngine::FixedUpdateGlobalSystems();
@@ -635,7 +661,7 @@ namespace Axiom {
 		m_EventBus.Clear();
 		m_LayerStack.Clear();
 
-		// H10: PackageHost::UnloadAll() must run AFTER every subsystem that
+		// PackageHost::UnloadAll() must run AFTER every subsystem that
 		// could call into package code. Packages may register components,
 		// script bindings, or other callbacks; FreeLibrary'ing them while
 		// any subsystem still holds those callbacks is a recipe for use-
@@ -654,7 +680,7 @@ namespace Axiom {
 		if (AudioManager::IsInitialized())
 			AudioManager::Shutdown();
 
-		// H10: PackageHost teardown is the last subsystem call. By this
+		// PackageHost teardown is the last subsystem call. By this
 		// point no engine callback table or registry holds package code.
 		if (m_Configuration.EnablePackageHost) PackageHost::UnloadAll();
 
@@ -680,7 +706,7 @@ namespace Axiom {
 #endif
 
 #ifdef AIM_PLATFORM_WINDOWS
-		// E21: pair to the timeBeginPeriod(1) in Initialize().
+		// pair to the timeBeginPeriod(1) in Initialize().
 		timeEndPeriod(1);
 #endif
 

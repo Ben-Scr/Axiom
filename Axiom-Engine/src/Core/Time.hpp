@@ -10,6 +10,7 @@ namespace Axiom {
 		float GetDeltaTime() const { return m_DeltaTime * m_TimeScale; }
 		float GetFrameRate() const { return m_DeltaTime > 0.0f ? 1.0f / m_DeltaTime : 0.0f; }
 		float GetDeltaTimeUnscaled() const { return m_DeltaTime; }
+		float GetUnscaledDeltaTime() const { return m_DeltaTime; }
 		void SetTargetFramerate(float fps);
 
 		float GetFixedDeltaTime() const { return m_FixedDeltaTime * m_TimeScale; }

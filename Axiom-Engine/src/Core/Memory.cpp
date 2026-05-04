@@ -62,9 +62,13 @@ namespace Axiom {
 				totalLeaked);
 			WriteMemoryReportLine(buffer);
 
+			constexpr size_t k_MaxReportedLeaks = 32;
 			size_t reportedAllocations = 0;
 			for (const auto& [memory, allocation] : allocations)
 			{
+				if (reportedAllocations >= k_MaxReportedLeaks)
+					break;
+
 				std::snprintf(
 					buffer,
 					sizeof(buffer),
@@ -73,17 +77,18 @@ namespace Axiom {
 					allocation.Size,
 					allocation.Category ? allocation.Category : "<uncategorized>");
 				WriteMemoryReportLine(buffer);
+				++reportedAllocations;
+			}
 
-				if (++reportedAllocations == 32 && reportedAllocations < allocations.size())
-				{
-					std::snprintf(
-						buffer,
-						sizeof(buffer),
-						"[Memory]  ... %zu additional allocation(s) omitted.\n",
-						allocations.size() - reportedAllocations);
-					WriteMemoryReportLine(buffer);
-					break;
-				}
+			if (allocations.size() > k_MaxReportedLeaks)
+			{
+				std::snprintf(
+					buffer,
+					sizeof(buffer),
+					"[Memory]  ... showing first %zu of %zu total leaked allocation(s).\n",
+					k_MaxReportedLeaks,
+					allocations.size());
+				WriteMemoryReportLine(buffer);
 			}
 		}
 #endif
@@ -92,32 +97,33 @@ namespace Axiom {
 
 	void Allocator::Init()
 	{
-		if (s_Data || s_IsShutdown.load(std::memory_order_acquire))
+		if (s_Data.load(std::memory_order_acquire) || s_IsShutdown.load(std::memory_order_acquire))
 			return;
 
 		std::call_once(s_InitOnce, []() {
 			ScopedInitGuard guard;
 			AllocatorData* data = static_cast<AllocatorData*>(Allocator::AllocateRaw(sizeof(AllocatorData)));
 			new(data) AllocatorData();
-			s_Data = data;
+			s_Data.store(data, std::memory_order_release);
 		});
 	}
 
 	void Allocator::Shutdown()
 	{
-		if (!s_Data)
+		AllocatorData* data = s_Data.load(std::memory_order_acquire);
+		if (!data)
 			return;
 
 		ScopedInitGuard guard;
 #ifndef AIM_DIST
 		{
-			std::scoped_lock<std::mutex> lock(s_Data->m_Mutex);
-			WriteAllocationLeakReport(*s_Data);
+			std::scoped_lock<std::mutex> lock(data->m_Mutex);
+			WriteAllocationLeakReport(*data);
 		}
 #endif
-		s_Data->~AllocatorData();
-		free(s_Data);
-		s_Data = nullptr;
+		data->~AllocatorData();
+		free(data);
+		s_Data.store(nullptr, std::memory_order_release);
 		s_IsShutdown.store(true, std::memory_order_release);
 	}
 
@@ -131,14 +137,15 @@ namespace Axiom {
 		if (s_InInit || s_IsShutdown.load(std::memory_order_acquire))
 			return AllocateRaw(size);
 
-		if (!s_Data)
+		if (!s_Data.load(std::memory_order_acquire))
 			Init();
 
+		AllocatorData* data = s_Data.load(std::memory_order_acquire);
 		void* memory = AllocateOrThrow(size);
 
 		{
-			std::scoped_lock<std::mutex> lock(s_Data->m_Mutex);
-			Allocation& alloc = s_Data->m_AllocationMap[memory];
+			std::scoped_lock<std::mutex> lock(data->m_Mutex);
+			Allocation& alloc = data->m_AllocationMap[memory];
 			alloc.Memory = memory;
 			alloc.Size = size;
 
@@ -157,21 +164,22 @@ namespace Axiom {
 		if (s_InInit || s_IsShutdown.load(std::memory_order_acquire))
 			return AllocateRaw(size);
 
-		if (!s_Data)
+		if (!s_Data.load(std::memory_order_acquire))
 			Init();
 
+		AllocatorData* data = s_Data.load(std::memory_order_acquire);
 		void* memory = AllocateOrThrow(size);
 
 		{
-			std::scoped_lock<std::mutex> lock(s_Data->m_Mutex);
-			Allocation& alloc = s_Data->m_AllocationMap[memory];
+			std::scoped_lock<std::mutex> lock(data->m_Mutex);
+			Allocation& alloc = data->m_AllocationMap[memory];
 			alloc.Memory = memory;
 			alloc.Size = size;
 			alloc.Category = desc;
 
 			s_GlobalStats.TotalAllocated += size;
 			if (desc)
-				s_Data->m_AllocationStatsMap[desc].TotalAllocated += size;
+				data->m_AllocationStatsMap[desc].TotalAllocated += size;
 		}
 
 #if HZ_ENABLE_PROFILING
@@ -186,20 +194,21 @@ namespace Axiom {
 		if (s_InInit || s_IsShutdown.load(std::memory_order_acquire))
 			return AllocateRaw(size);
 
-		if (!s_Data)
+		if (!s_Data.load(std::memory_order_acquire))
 			Init();
 
+		AllocatorData* data = s_Data.load(std::memory_order_acquire);
 		void* memory = AllocateOrThrow(size);
 
 		{
-			std::scoped_lock<std::mutex> lock(s_Data->m_Mutex);
-			Allocation& alloc = s_Data->m_AllocationMap[memory];
+			std::scoped_lock<std::mutex> lock(data->m_Mutex);
+			Allocation& alloc = data->m_AllocationMap[memory];
 			alloc.Memory = memory;
 			alloc.Size = size;
 			alloc.Category = file;
 
 			s_GlobalStats.TotalAllocated += size;
-			s_Data->m_AllocationStatsMap[file].TotalAllocated += size;
+			data->m_AllocationStatsMap[file].TotalAllocated += size;
 		}
 
 #if AIM_ENABLE_PROFILING
@@ -214,7 +223,8 @@ namespace Axiom {
 		if (memory == nullptr)
 			return;
 
-		if (!s_Data || s_IsShutdown.load(std::memory_order_acquire)) {
+		AllocatorData* data = s_Data.load(std::memory_order_acquire);
+		if (!data || s_IsShutdown.load(std::memory_order_acquire)) {
 			free(memory);
 			return;
 		}
@@ -222,17 +232,17 @@ namespace Axiom {
 		{
 			bool found = false;
 			{
-				std::scoped_lock<std::mutex> lock(s_Data->m_Mutex);
-				auto allocMapIt = s_Data->m_AllocationMap.find(memory);
-				found = allocMapIt != s_Data->m_AllocationMap.end();
+				std::scoped_lock<std::mutex> lock(data->m_Mutex);
+				auto allocMapIt = data->m_AllocationMap.find(memory);
+				found = allocMapIt != data->m_AllocationMap.end();
 				if (found)
 				{
 					const Allocation& alloc = allocMapIt->second;
 					s_GlobalStats.TotalFreed += alloc.Size;
 					if (alloc.Category)
-						s_Data->m_AllocationStatsMap[alloc.Category].TotalFreed += alloc.Size;
+						data->m_AllocationStatsMap[alloc.Category].TotalFreed += alloc.Size;
 
-					s_Data->m_AllocationMap.erase(memory);
+					data->m_AllocationMap.erase(memory);
 				}
 			}
 
@@ -249,6 +259,20 @@ namespace Axiom {
 		}
 
 		free(memory);
+	}
+
+	std::map<std::string, AllocationStats> Allocator::GetAllocationStats()
+	{
+		std::map<std::string, AllocationStats> result;
+		AllocatorData* data = s_Data.load(std::memory_order_acquire);
+		if (!data)
+			return result;
+
+		std::scoped_lock<std::mutex> lock(data->m_Mutex);
+		for (const auto& [category, stats] : data->m_AllocationStatsMap) {
+			result.emplace(category ? category : "<uncategorized>", stats);
+		}
+		return result;
 	}
 
 	namespace Memory {

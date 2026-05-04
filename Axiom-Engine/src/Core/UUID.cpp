@@ -5,15 +5,14 @@
 
 namespace Axiom {
 
-	static std::random_device s_RandomDevice;
-	static std::mt19937_64 eng(s_RandomDevice());
-	static std::uniform_int_distribution<uint64_t> s_UniformDistribution;
+	thread_local std::mt19937_64 t_Engine{ std::random_device{}() };
+	thread_local std::uniform_int_distribution<uint64_t> t_Distribution;
 
-	static std::mt19937 eng32(s_RandomDevice());
-	static std::uniform_int_distribution<uint32_t> s_UniformDistribution32;
+	thread_local std::mt19937 t_Engine32{ std::random_device{}() };
+	thread_local std::uniform_int_distribution<uint32_t> t_Distribution32;
 
 	UUID::UUID()
-		: m_UUID(s_UniformDistribution(eng))
+		: m_UUID(t_Distribution(t_Engine))
 	{
 	}
 
@@ -29,7 +28,7 @@ namespace Axiom {
 
 
 	UUID32::UUID32()
-		: m_UUID(s_UniformDistribution32(eng32))
+		: m_UUID(t_Distribution32(t_Engine32))
 	{
 	}
 

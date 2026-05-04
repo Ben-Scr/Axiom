@@ -2,12 +2,14 @@
 
 #include "Core/Export.hpp"
 
+#include <atomic>
 #include <cstddef>
 #include <cstdlib>
 #include <limits>
 #include <map>
 #include <mutex>
 #include <new>
+#include <string>
 #include <utility>
 
 namespace Axiom {
@@ -66,7 +68,7 @@ namespace Axiom {
 		std::map<const void*, Allocation, std::less<const void*>, MapAlloc> m_AllocationMap;
 		AllocationStatsMap m_AllocationStatsMap;
 
-		std::mutex m_Mutex, m_StatsMutex;
+		std::mutex m_Mutex;
 	};
 
 
@@ -83,9 +85,9 @@ namespace Axiom {
 		static void* Allocate(size_t size, const char* file, int line);
 		static void Free(void* memory);
 
-		static const AllocatorData::AllocationStatsMap& GetAllocationStats() { return s_Data->m_AllocationStatsMap; }
+		static std::map<std::string, AllocationStats> GetAllocationStats();
 	private:
-		inline static AllocatorData* s_Data = nullptr;
+		inline static std::atomic<AllocatorData*> s_Data{ nullptr };
 	};
 
 }
