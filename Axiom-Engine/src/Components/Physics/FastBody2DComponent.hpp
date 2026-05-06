@@ -1,6 +1,7 @@
 #pragma once
 #include "Core/Export.hpp"
 #include "Collections/Vec2.hpp"
+#include "Physics/AxiomPhysicsInterop.hpp"
 
 #include <Body.hpp>
 #include <BodyType.hpp>

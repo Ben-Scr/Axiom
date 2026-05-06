@@ -1,5 +1,6 @@
 #pragma once
 #include "Core/Export.hpp"
+#include "Physics/AxiomPhysicsInterop.hpp"
 
 #include <CircleCollider.hpp>
 

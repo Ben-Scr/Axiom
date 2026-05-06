@@ -2,6 +2,7 @@
 #include "Collections/Vec2.hpp"
 #include "Core/Export.hpp"
 #include "Physics/AxiomContact2D.hpp"
+#include "Physics/AxiomPhysicsInterop.hpp"
 #include "Scene/EntityHandle.hpp"
 
 #include <PhysicsWorld.hpp>
