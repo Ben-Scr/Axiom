@@ -54,7 +54,7 @@
 - `Debugging/Logger.hpp/.cpp` is dead code (superseded by `Core/Log`). Can be deleted.
 - `AxiomProject.cpp` has hand-rolled JSON parsing — fragile for nested structures.
 - `SoundRequest::GetHandle` is a data member named like an accessor.
-- `Scene::CreateDetachedEditorScene` and `Scene::IsEditorPreview` are editor-aware methods on the core `Scene` class (Scene.hpp:25-30) — editor concerns leaking into core.
+- `Scene::CreateDetachedScene` / `Scene::IsDetached` (renamed from `CreateDetachedEditorScene` / `IsEditorPreview`) are still in the core surface — kept engine-neutral so the editor *uses* them but the engine doesn't *know* about the editor.
 - `Application::SetPlaymodePaused` / `IsPlaymodePaused` / `IsGameInputEnabled` leak editor concepts into the core API surface (Application.hpp:106-109).
 - `TextureManager::UnloadTexture` and `AudioManager::UnloadAudio` are exposed but never called — assets accumulate across scene reloads.
 - `Cereal` is in the dependency list but has zero callers — `Serialization/Cereal.hpp` is dead code (only `CsprojParser.cpp` uses one rapidxml header from inside the Cereal repo).

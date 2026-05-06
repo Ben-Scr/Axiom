@@ -82,6 +82,24 @@ internal unsafe struct NativeBindingsStruct
     public delegate* unmanaged<ulong, int> SpriteRenderer_GetSortingLayer;
     public delegate* unmanaged<ulong, int, void> SpriteRenderer_SetSortingLayer;
 
+    // ── TextRenderer ─────────────────────────────────────────────
+    public delegate* unmanaged<ulong, byte*> TextRenderer_GetText;
+    public delegate* unmanaged<ulong, byte*, void> TextRenderer_SetText;
+    public delegate* unmanaged<ulong, ulong> TextRenderer_GetFont;
+    public delegate* unmanaged<ulong, ulong, void> TextRenderer_SetFont;
+    public delegate* unmanaged<ulong, float> TextRenderer_GetFontSize;
+    public delegate* unmanaged<ulong, float, void> TextRenderer_SetFontSize;
+    public delegate* unmanaged<ulong, float*, float*, float*, float*, void> TextRenderer_GetColor;
+    public delegate* unmanaged<ulong, float, float, float, float, void> TextRenderer_SetColor;
+    public delegate* unmanaged<ulong, float> TextRenderer_GetLetterSpacing;
+    public delegate* unmanaged<ulong, float, void> TextRenderer_SetLetterSpacing;
+    public delegate* unmanaged<ulong, int> TextRenderer_GetHAlign;
+    public delegate* unmanaged<ulong, int, void> TextRenderer_SetHAlign;
+    public delegate* unmanaged<ulong, int> TextRenderer_GetSortingOrder;
+    public delegate* unmanaged<ulong, int, void> TextRenderer_SetSortingOrder;
+    public delegate* unmanaged<ulong, int> TextRenderer_GetSortingLayer;
+    public delegate* unmanaged<ulong, int, void> TextRenderer_SetSortingLayer;
+
     // ── Camera2D ─────────────────────────────────────────────────
     public delegate* unmanaged<ulong, float> Camera2D_GetOrthographicSize;
     public delegate* unmanaged<ulong, float, void> Camera2D_SetOrthographicSize;
@@ -173,6 +191,7 @@ internal unsafe struct NativeBindingsStruct
     public delegate* unmanaged<ulong, int> Texture_GetHeight;
     public delegate* unmanaged<ulong, int> Audio_LoadAsset;
     public delegate* unmanaged<ulong, float, void> Audio_PlayOneShotAsset;
+    public delegate* unmanaged<ulong, int> Font_LoadAsset;
 
     // ── ParticleSystem2D ─────────────────────────────────────────
     public delegate* unmanaged<ulong, void> ParticleSystem2D_Play;

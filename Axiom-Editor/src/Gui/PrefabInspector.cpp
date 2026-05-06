@@ -30,7 +30,7 @@ namespace Axiom {
 	void PrefabInspector::Open(const std::string& prefabPath) {
 		Close();
 
-		m_PrefabScene = Scene::CreateDetachedEditorScene("##PrefabInspector");
+		m_PrefabScene = Scene::CreateDetachedScene("##PrefabInspector");
 		m_PrefabPath = prefabPath;
 
 		if (!File::Exists(prefabPath)) {
@@ -67,7 +67,7 @@ namespace Axiom {
 
 	void PrefabInspector::Close() {
 		// unique_ptr destruction tears down the scene's registry, which fires
-		// destroy hooks. The hooks gated by Scene::IsEditorPreview() will skip,
+		// destroy hooks. The hooks gated by Scene::IsDetached() will skip,
 		// so we don't leak into the global physics/audio/script subsystems.
 		m_RootEntity = entt::null;
 		m_PrefabScene.reset();

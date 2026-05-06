@@ -737,6 +737,9 @@ namespace Axiom::PropertyDrawer {
 		case PropertyType::AudioRef:
 			changed = DrawAssetRefByKind(entities, d, fieldKey, AssetKind::Audio,
 				PropertyType::AudioRef, "Select Audio"); break;
+		case PropertyType::FontRef:
+			changed = DrawAssetRefByKind(entities, d, fieldKey, AssetKind::Font,
+				PropertyType::FontRef, "Select Font"); break;
 		case PropertyType::SceneRef:
 			changed = DrawAssetRefByKind(entities, d, fieldKey, AssetKind::Scene,
 				PropertyType::SceneRef, "Select Scene"); break;

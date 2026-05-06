@@ -108,6 +108,72 @@ public class SpriteRenderer : Component
     }
 }
 
+
+// ── TextRenderer ────────────────────────────────────────────────────
+
+public enum TextAlignment { Left = 0, Center = 1, Right = 2 }
+
+public class TextRenderer : Component
+{
+    public string Text
+    {
+        get => InternalCalls.TextRenderer_GetText(RequireComponent<TextRenderer>());
+        set => InternalCalls.TextRenderer_SetText(RequireComponent<TextRenderer>(), value ?? "");
+    }
+
+    // Returns null when the entity references a missing or invalid font asset.
+    public Font? Font
+    {
+        get
+        {
+            ulong assetId = InternalCalls.TextRenderer_GetFont(RequireComponent<TextRenderer>());
+            return Font.FromAssetUUID(assetId);
+        }
+        set => InternalCalls.TextRenderer_SetFont(RequireComponent<TextRenderer>(), value?.UUID ?? 0);
+    }
+
+    public float FontSize
+    {
+        get => InternalCalls.TextRenderer_GetFontSize(RequireComponent<TextRenderer>());
+        set => InternalCalls.TextRenderer_SetFontSize(RequireComponent<TextRenderer>(), value);
+    }
+
+    public Vector4 Color
+    {
+        get
+        {
+            ulong entityId = RequireComponent<TextRenderer>();
+            InternalCalls.TextRenderer_GetColor(entityId, out float r, out float g, out float b, out float a);
+            return new Color(r, g, b, a);
+        }
+        set => InternalCalls.TextRenderer_SetColor(RequireComponent<TextRenderer>(), value.X, value.Y, value.Z, value.W);
+    }
+
+    public float LetterSpacing
+    {
+        get => InternalCalls.TextRenderer_GetLetterSpacing(RequireComponent<TextRenderer>());
+        set => InternalCalls.TextRenderer_SetLetterSpacing(RequireComponent<TextRenderer>(), value);
+    }
+
+    public TextAlignment Alignment
+    {
+        get => (TextAlignment)InternalCalls.TextRenderer_GetHAlign(RequireComponent<TextRenderer>());
+        set => InternalCalls.TextRenderer_SetHAlign(RequireComponent<TextRenderer>(), (int)value);
+    }
+
+    public int SortingOrder
+    {
+        get => InternalCalls.TextRenderer_GetSortingOrder(RequireComponent<TextRenderer>());
+        set => InternalCalls.TextRenderer_SetSortingOrder(RequireComponent<TextRenderer>(), value);
+    }
+
+    public int SortingLayer
+    {
+        get => InternalCalls.TextRenderer_GetSortingLayer(RequireComponent<TextRenderer>());
+        set => InternalCalls.TextRenderer_SetSortingLayer(RequireComponent<TextRenderer>(), value);
+    }
+}
+
 // ── Camera2D ────────────────────────────────────────────────────────
 
 public class Camera2D : Component

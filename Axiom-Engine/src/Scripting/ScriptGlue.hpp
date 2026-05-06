@@ -81,6 +81,24 @@ namespace Axiom {
 		int  (*SpriteRenderer_GetSortingLayer)(uint64_t entityID);
 		void (*SpriteRenderer_SetSortingLayer)(uint64_t entityID, int layer);
 
+		// ── TextRenderer ─────────────────────────────────────────────
+		const char* (*TextRenderer_GetText)(uint64_t entityID);
+		void        (*TextRenderer_SetText)(uint64_t entityID, const char* text);
+		uint64_t    (*TextRenderer_GetFont)(uint64_t entityID);
+		void        (*TextRenderer_SetFont)(uint64_t entityID, uint64_t assetId);
+		float       (*TextRenderer_GetFontSize)(uint64_t entityID);
+		void        (*TextRenderer_SetFontSize)(uint64_t entityID, float size);
+		void        (*TextRenderer_GetColor)(uint64_t entityID, float* r, float* g, float* b, float* a);
+		void        (*TextRenderer_SetColor)(uint64_t entityID, float r, float g, float b, float a);
+		float       (*TextRenderer_GetLetterSpacing)(uint64_t entityID);
+		void        (*TextRenderer_SetLetterSpacing)(uint64_t entityID, float spacing);
+		int         (*TextRenderer_GetHAlign)(uint64_t entityID);
+		void        (*TextRenderer_SetHAlign)(uint64_t entityID, int alignment);
+		int         (*TextRenderer_GetSortingOrder)(uint64_t entityID);
+		void        (*TextRenderer_SetSortingOrder)(uint64_t entityID, int order);
+		int         (*TextRenderer_GetSortingLayer)(uint64_t entityID);
+		void        (*TextRenderer_SetSortingLayer)(uint64_t entityID, int layer);
+
 		// ── Camera2D ─────────────────────────────────────────────────
 		float (*Camera2D_GetOrthographicSize)(uint64_t entityID);
 		void  (*Camera2D_SetOrthographicSize)(uint64_t entityID, float size);
@@ -177,6 +195,7 @@ namespace Axiom {
 		int         (*Texture_GetHeight)(uint64_t assetId);
 		int         (*Audio_LoadAsset)(uint64_t assetId);
 		void        (*Audio_PlayOneShotAsset)(uint64_t assetId, float volume);
+		int         (*Font_LoadAsset)(uint64_t assetId);
 
 		// ── ParticleSystem2D ─────────────────────────────────────────
 		void  (*ParticleSystem2D_Play)(uint64_t entityID);

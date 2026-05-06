@@ -100,6 +100,7 @@
     <Compile Include="Source\Axiom\Cryptography\AesKey.cs" />
     <Compile Include="Source\Axiom\Cryptography\Encryptor.cs" />
     <Compile Include="Source\Axiom\Cryptography\RandomSecure.cs" />
+    <Compile Include="Source\Axiom\Graphics\Font.cs" />
     <Compile Include="Source\Axiom\Graphics\Gizmo.cs" />
     <Compile Include="Source\Axiom\Graphics\Renderer2D.cs" />
     <Compile Include="Source\Axiom\Graphics\Texture.cs" />

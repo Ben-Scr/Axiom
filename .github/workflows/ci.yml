@@ -71,6 +71,10 @@ jobs:
           if errorlevel 1 exit /b %errorlevel%
           "@ | cmd /Q
 
+      - name: Windows Engine Tests
+        shell: pwsh
+        run: scripts/RunTests.bat --release
+
       - name: Windows Runtime Smoke Test
         shell: pwsh
         run: python scripts/ci/runtime_smoke_test.py --binary bin/Release-windows-x86_64/Axiom-Runtime/Axiom-Runtime.exe
@@ -111,6 +115,11 @@ jobs:
 
       - name: Build Linux Targets
         run: make config=release -j"$(nproc)" Axiom-Engine Axiom-Runtime Axiom-Editor
+
+      - name: Linux Engine Tests
+        run: |
+          make config=release -j"$(nproc)" Axiom-Engine-Tests
+          ./bin/Release-linux-x86_64/Axiom-Engine-Tests/Axiom-Engine-Tests
 
       - name: Build Linux Debug Targets
         run: make config=debug -j"$(nproc)" Axiom-Engine Axiom-Runtime Axiom-Editor

@@ -48,7 +48,9 @@ namespace Axiom {
 			return candidates;
 		}
 
-		PackageOperationResult RestoreAndRebuildProject(const std::string& csprojPath) {
+		PackageOperationResult RestoreAndRebuildProject(const std::string& csprojPath,
+			const std::string& buildConfig,
+			const std::string& defineConstantsArg) {
 			if (csprojPath.empty()) {
 				return { false, "No project loaded" };
 			}
@@ -72,10 +74,10 @@ namespace Axiom {
 				"dotnet",
 				"build",
 				csprojPath,
-				"-c", AxiomProject::GetActiveBuildConfiguration(),
+				"-c", buildConfig,
 				"--nologo",
 				"-v", "q",
-				"-p:DefineConstants=" + AxiomProject::BuildManagedDefineConstants("AXIOM_EDITOR")
+				defineConstantsArg
 			});
 			if (!buildResult.Succeeded()) {
 				AIM_CORE_ERROR_TAG("PackageManager", "dotnet build failed (exit code {})", buildResult.ExitCode);
@@ -233,10 +235,16 @@ namespace Axiom {
 			});
 		}
 
-		return std::async(std::launch::async, [source = std::move(source), packageId, version, csproj, sharedState = std::move(sharedState)]() -> PackageOperationResult {
+		// Snapshot AxiomProject statics on the calling thread so the worker
+		// doesn't race with project reload (M9).
+		const std::string buildConfig = AxiomProject::GetActiveBuildConfiguration();
+		const std::string defineConstantsArg =
+			"-p:DefineConstants=" + AxiomProject::BuildManagedDefineConstants("AXIOM_EDITOR");
+
+		return std::async(std::launch::async, [source = std::move(source), packageId, version, csproj, sharedState = std::move(sharedState), buildConfig, defineConstantsArg]() -> PackageOperationResult {
 			auto result = source->Install(packageId, version, csproj);
 			if (result.Success) {
-				auto rebuild = RestoreAndRebuildProject(csproj);
+				auto rebuild = RestoreAndRebuildProject(csproj, buildConfig, defineConstantsArg);
 				if (!rebuild.Success)
 					return { false, "Install succeeded but rebuild failed: " + rebuild.Message };
 				sharedState->NeedsReload.store(true, std::memory_order_release);
@@ -258,10 +266,15 @@ namespace Axiom {
 			});
 		}
 
-		return std::async(std::launch::async, [source = std::move(source), packageId, csproj, sharedState = std::move(sharedState)]() -> PackageOperationResult {
+		// Snapshot — see InstallAsync.
+		const std::string buildConfig = AxiomProject::GetActiveBuildConfiguration();
+		const std::string defineConstantsArg =
+			"-p:DefineConstants=" + AxiomProject::BuildManagedDefineConstants("AXIOM_EDITOR");
+
+		return std::async(std::launch::async, [source = std::move(source), packageId, csproj, sharedState = std::move(sharedState), buildConfig, defineConstantsArg]() -> PackageOperationResult {
 			auto result = source->Remove(packageId, csproj);
 			if (result.Success) {
-				auto rebuild = RestoreAndRebuildProject(csproj);
+				auto rebuild = RestoreAndRebuildProject(csproj, buildConfig, defineConstantsArg);
 				if (!rebuild.Success)
 					return { false, "Remove succeeded but rebuild failed: " + rebuild.Message };
 				sharedState->NeedsReload.store(true, std::memory_order_release);
@@ -271,7 +284,10 @@ namespace Axiom {
 	}
 
 	PackageOperationResult PackageManager::RestoreAndRebuild() {
-		return RestoreAndRebuildProject(GetCsprojPath());
+		const std::string buildConfig = AxiomProject::GetActiveBuildConfiguration();
+		const std::string defineConstantsArg =
+			"-p:DefineConstants=" + AxiomProject::BuildManagedDefineConstants("AXIOM_EDITOR");
+		return RestoreAndRebuildProject(GetCsprojPath(), buildConfig, defineConstantsArg);
 	}
 
 	std::vector<PackageInfo> PackageManager::GetInstalledPackages() const {

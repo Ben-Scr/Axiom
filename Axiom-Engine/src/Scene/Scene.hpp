@@ -22,22 +22,19 @@ namespace Axiom {
 	public:
 		Scene(const Scene&) = delete;
 
-		// ─── Editor-only access surface (H12) ────────────────────────────
-		// These methods exist for the editor's prefab/inspector machinery and
-		// have no use in a standalone runtime. They live on `Scene` for
-		// implementation simplicity (private state access) but should be
-		// considered editor-internal. A future refactor should push them
-		// behind a friend `SceneEditorAccess` struct in a header consumed
-		// only by Axiom-Editor; until then, treat as unstable in the public
-		// surface.
-
-		// Detached scene used by the editor (e.g. prefab inspector). Has no
-		// SceneDefinition, is not registered with SceneManager, will not tick,
-		// and component-construction hooks that touch global subsystems
-		// (physics worlds, audio, scripts) are gated off — see IsEditorPreview().
-		static std::unique_ptr<Scene> CreateDetachedEditorScene(const std::string& name);
-		bool IsEditorPreview() const { return m_IsEditorPreview; }
-		// ─── End editor-only access surface ──────────────────────────────
+		// ─── Detached-scene surface ──────────────────────────────────────
+		// A detached scene has no SceneDefinition, is not registered with
+		// SceneManager, will not tick, and component-construction hooks
+		// that touch global subsystems (physics worlds, audio, scripts)
+		// are gated off — see IsDetached().
+		//
+		// The editor uses these for prefab/inspector preview machinery,
+		// but the engine itself has no opinion about *who* uses detached
+		// scenes — the flag means "this scene is isolated from world
+		// hooks", not "this scene runs inside the editor".
+		static std::unique_ptr<Scene> CreateDetachedScene(const std::string& name);
+		bool IsDetached() const { return m_IsDetached; }
+		// ─── End detached-scene surface ──────────────────────────────────
 
 		// Info: Creates an entity with a Transform2D component
 		Entity CreateEntity();
@@ -310,7 +307,7 @@ namespace Axiom {
 		bool m_IsLoaded = false;
 		bool m_Persistent = false;
 		bool m_Dirty = false;
-		bool m_IsEditorPreview = false;
+		bool m_IsDetached = false;
 		EntityID m_NextRuntimeEntityID = 1;
 		std::unordered_map<EntityID, EntityHandle> m_RuntimeIdToEntity;
 		std::unordered_map<uint64_t, EntityHandle> m_SceneGuidToEntity;

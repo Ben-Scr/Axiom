@@ -60,8 +60,13 @@ namespace Axiom {
 		// matching FastBoxCollider2D / FastCircleCollider2D destroy hook so
 		// removing one component never invalidates the other.
 		void DestroyCollider(EntityHandle entity, FastColliderKind kind);
-		// Destroy every collider on this entity. Used by DestroyBody (which
-		// must clean up all attachments before the body itself goes away).
+		// Destroy every collider on this entity. Standalone API for callers
+		// that want to wipe all colliders without removing the body.
+		// Note: DestroyBody intentionally does NOT call this — collider
+		// components own their own lifetime and are torn down via their
+		// own on_destroy hook. Calling DestroyAllCollidersOnEntity from
+		// DestroyBody would dangle the raw m_Collider pointers stored
+		// inside FastBoxCollider2D / FastCircleCollider2D components.
 		void DestroyAllCollidersOnEntity(EntityHandle entity);
 
 		// Contact callbacks per entity
@@ -96,6 +101,15 @@ namespace Axiom {
 		// Ownership: bodies keyed by entity, colliders keyed by (entity, kind)
 		std::unordered_map<uint32_t, std::unique_ptr<AxiomPhys::Body>> m_Bodies;
 		std::unordered_map<ColliderKey, std::unique_ptr<AxiomPhys::Collider>, ColliderKeyHash> m_Colliders;
+
+		// Per-entity: which collider kind is currently attached to its body
+		// (if any). AxiomPhys::Body supports only one attached collider at a
+		// time, so the storage allows two kinds to coexist but only one is
+		// "live" on the body. This map records which one. Without it,
+		// DestroyCollider could not tell whether to call DetachCollider on
+		// the body — a destroy on the *non-attached* kind would otherwise
+		// detach the wrong collider.
+		std::unordered_map<uint32_t, FastColliderKind> m_AttachedColliderKind;
 
 		// Entity lookup from Body pointer (reverse map)
 		std::unordered_map<AxiomPhys::Body*, EntityHandle> m_BodyToEntity;

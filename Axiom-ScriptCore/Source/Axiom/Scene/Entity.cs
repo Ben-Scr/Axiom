@@ -112,6 +112,7 @@ public class Entity : IEquatable<Entity>
         { typeof(NameComponent),         "Name" },
         { typeof(Transform2D),           "Transform 2D" },
         { typeof(SpriteRenderer),        "Sprite Renderer" },
+        { typeof(TextRenderer),          "Text Renderer" },
         { typeof(Camera2D),              "Camera 2D" },
         { typeof(Rigidbody2D),           "Rigidbody 2D" },
         { typeof(BoxCollider2D),         "Box Collider 2D" },

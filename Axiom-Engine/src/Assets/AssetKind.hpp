@@ -9,6 +9,7 @@ namespace Axiom {
 		Scene,
 		Prefab,
 		Script,
+		Font,
 		Other
 	};
 

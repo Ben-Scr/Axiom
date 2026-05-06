@@ -183,8 +183,8 @@ namespace Axiom {
 		AssetBrowser m_AssetBrowser;
 		bool m_AssetBrowserInitialized = false;
 
-		// Editor-side inspector for `.prefab` assets. Owns a detached editor-preview
-		// scene (Scene::CreateDetachedEditorScene) where the prefab is unpacked
+		// Editor-side inspector for `.prefab` assets. Owns a detached preview
+		// scene (Scene::CreateDetachedScene) where the prefab is unpacked
 		// for editing. RenderAssetInspector dispatches to it when the selected
 		// asset's extension is `.prefab`.
 		PrefabInspector m_PrefabInspector;

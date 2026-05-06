@@ -15,6 +15,7 @@
 #include "Scene/Scene.hpp"
 #include "Graphics/TextureManager.hpp"
 #include "Graphics/StaticRenderData.hpp"
+#include "Graphics/Text/TextRenderer.hpp"
 
 #include <glad/glad.h>
 
@@ -116,6 +117,11 @@ namespace Axiom {
 		m_GpuTimer->Initialize();
 #endif
 
+		// Text overlay pass. Failure to init the text shader is non-fatal —
+		// sprite rendering keeps working without it.
+		m_TextRenderer = std::make_unique<TextRenderer>();
+		m_TextRenderer->Initialize();
+
 		m_IsInitialized = true;
 	}
 
@@ -198,17 +204,17 @@ namespace Axiom {
 
 	void Renderer2D::RenderScenes() {
 		if (m_SceneProvider) {
-			m_SceneProvider([this](const Scene& scene) { RenderScene(scene); });
+			m_SceneProvider([this](Scene& scene) { RenderScene(scene); });
 		}
 		else {
-			SceneManager::Get().ForeachLoadedScene([this](const Scene& scene) {
+			SceneManager::Get().ForeachLoadedScene([this](Scene& scene) {
 				RenderScene(scene);
 			});
 		}
 	}
 
-	void Renderer2D::RenderScene(const Scene& scene) {
-		Camera2DComponent* camera2D = const_cast<Camera2DComponent*>(scene.GetMainCamera());
+	void Renderer2D::RenderScene(Scene& scene) {
+		Camera2DComponent* camera2D = scene.GetMainCamera();
 		if (!camera2D) {
 			AIM_WARN_TAG("Renderer2D", "No main camera found in the scene. Nothing will be rendered.");
 			return;
@@ -218,12 +224,12 @@ namespace Axiom {
 		CollectAndRenderInstances(scene, camera2D->GetViewProjectionMatrix(), camera2D->GetViewportAABB());
 	}
 
-	void Renderer2D::RenderSceneWithVP(const Scene& scene, const glm::mat4& vp, const AABB& viewportAABB) {
+	void Renderer2D::RenderSceneWithVP(Scene& scene, const glm::mat4& vp, const AABB& viewportAABB) {
 		if (!m_IsInitialized || !m_IsEnabled) return;
 		CollectAndRenderInstances(scene, vp, viewportAABB);
 	}
 
-	void Renderer2D::CollectAndRenderInstances(const Scene& scene, const glm::mat4& vp, const AABB& viewportAABB) {
+	void Renderer2D::CollectAndRenderInstances(Scene& scene, const glm::mat4& vp, const AABB& viewportAABB) {
 		if (!m_SpriteShader.IsValid()) {
 			AIM_CORE_ERROR_TAG("Renderer2D", "Sprite shader is invalid — cannot render");
 			return;
@@ -233,8 +239,7 @@ namespace Axiom {
 
 		m_Instances.clear();
 
-		// const_cast for lazy StaticRenderData cache + Transform2D dirty-flag clear.
-		entt::registry& registry = const_cast<entt::registry&>(scene.GetRegistry());
+		entt::registry& registry = scene.GetRegistry();
 
 		auto ptsView = registry.view<ParticleSystem2DComponent>(entt::exclude<DisabledTag>);
 		auto srView = registry.view<Transform2DComponent, SpriteRendererComponent>(entt::exclude<DisabledTag>);
@@ -361,6 +366,13 @@ namespace Axiom {
 		m_QuadMesh.Unbind();
 		m_SpriteShader.Unbind();
 		m_RenderedInstancesCount = m_Instances.size();
+
+		// Text pass: drawn after sprites so it always overlays. Uses
+		// the same scene + view-projection so it culls and animates with
+		// the camera that just rendered the sprite layer.
+		if (m_TextRenderer && m_TextRenderer->IsInitialized()) {
+			m_TextRenderer->RenderScene(scene, vp, viewportAABB);
+		}
 	}
 
 	void Renderer2D::Shutdown() {
@@ -371,6 +383,11 @@ namespace Axiom {
 			m_GpuTimer.reset();
 		}
 #endif
+		// Text renderer torn down before our own GL context is gone.
+		if (m_TextRenderer) {
+			m_TextRenderer->Shutdown();
+			m_TextRenderer.reset();
+		}
 		m_QuadMesh.Shutdown();
 		m_SpriteShader.Shutdown();
 		m_Instances.clear();

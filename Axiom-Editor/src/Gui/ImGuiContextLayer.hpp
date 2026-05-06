@@ -2,6 +2,8 @@
 
 #include "Core/Layer.hpp"
 
+#include <string>
+
 namespace Axiom {
 
 	// Owns the ImGui context for an Axiom application. Push this Layer first (before
@@ -18,6 +20,7 @@ namespace Axiom {
 
 	private:
 		static void ApplyAxiomTheme();
+		std::string m_IniFilePath;
 		bool m_IsInitialized = false;
 	};
 

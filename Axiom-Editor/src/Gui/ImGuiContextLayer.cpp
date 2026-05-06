@@ -4,14 +4,85 @@
 #include "Core/Assert.hpp"
 #include "Core/Window.hpp"
 #include "Packages/PackageImGuiBridge.hpp"
+#include "Serialization/Path.hpp"
 
 #include <imgui.h>
 #include <backends/imgui_impl_glfw.h>
 #include <backends/imgui_impl_opengl3.h>
 
 #include <algorithm>
+#include <array>
+#include <filesystem>
 
 namespace Axiom {
+	namespace {
+		constexpr const char* k_ImGuiIniFileName = "imgui.ini";
+
+		std::filesystem::path GetCanonicalFileIfExists(const std::filesystem::path& path) {
+			std::error_code ec;
+			if (!std::filesystem::is_regular_file(path, ec) || ec) {
+				return {};
+			}
+
+			std::filesystem::path canonicalPath = std::filesystem::weakly_canonical(path, ec);
+			return ec ? path : canonicalPath;
+		}
+
+		std::filesystem::path FindDefaultEditorIniFile() {
+			std::filesystem::path executableDir;
+			std::error_code ec;
+
+			try {
+				executableDir = Path::ExecutableDir();
+			} catch (...) {
+				executableDir.clear();
+			}
+
+			const std::filesystem::path currentDir = std::filesystem::current_path(ec);
+			const std::array<std::filesystem::path, 4> candidates = {
+				currentDir / "Axiom-Editor" / k_ImGuiIniFileName,
+				executableDir / ".." / ".." / ".." / "Axiom-Editor" / k_ImGuiIniFileName,
+				currentDir / k_ImGuiIniFileName,
+				executableDir / k_ImGuiIniFileName
+			};
+
+			for (const std::filesystem::path& candidate : candidates) {
+				std::filesystem::path defaultIniFile = GetCanonicalFileIfExists(candidate);
+				if (!defaultIniFile.empty()) {
+					return defaultIniFile;
+				}
+			}
+
+			return {};
+		}
+
+		std::filesystem::path GetEditorUserIniFilePath() {
+			try {
+				return std::filesystem::path(Path::GetSpecialFolderPath(SpecialFolder::LocalAppData)) /
+					"Axiom" / "Editor" / k_ImGuiIniFileName;
+			} catch (...) {
+				return std::filesystem::path(k_ImGuiIniFileName);
+			}
+		}
+
+		std::string ResolveEditorIniFilePath() {
+			std::filesystem::path userIniFile = GetEditorUserIniFilePath();
+			std::error_code ec;
+
+			if (!userIniFile.parent_path().empty()) {
+				std::filesystem::create_directories(userIniFile.parent_path(), ec);
+			}
+
+			if (!std::filesystem::is_regular_file(userIniFile, ec)) {
+				if (std::filesystem::path defaultIniFile = FindDefaultEditorIniFile(); !defaultIniFile.empty()) {
+					ec.clear();
+					std::filesystem::copy_file(defaultIniFile, userIniFile, std::filesystem::copy_options::none, ec);
+				}
+			}
+
+			return userIniFile.make_preferred().string();
+		}
+	}
 
 	void ImGuiContextLayer::OnAttach(Application& app) {
 		if (m_IsInitialized) {
@@ -44,6 +115,8 @@ namespace Axiom {
 		}
 
 		ImGuiIO& io = ImGui::GetIO();
+		m_IniFilePath = ResolveEditorIniFilePath();
+		io.IniFilename = m_IniFilePath.c_str();
 		io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
 		// Edge-resize left at default (true). Forcing it false combined with the
 		// transparent ResizeGrip colors below made undocked floating windows
@@ -82,6 +155,7 @@ namespace Axiom {
 		ImGui_ImplGlfw_Shutdown();
 		PackageImGuiBridge::Clear();
 		ImGui::DestroyContext();
+		m_IniFilePath.clear();
 
 		m_IsInitialized = false;
 	}

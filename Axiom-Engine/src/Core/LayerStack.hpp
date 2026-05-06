@@ -69,6 +69,18 @@ namespace Axiom {
 		bool Empty() const { return m_Layers.empty(); }
 		std::size_t Size() const { return m_Layers.size(); }
 
+		// Index-based access. Returns nullptr on out-of-range. Callers that
+		// dispatch into Layer callbacks should iterate with a fresh
+		// `Size()` check each step rather than range-for, since user code
+		// inside the callback may PushLayer/PopLayer and invalidate
+		// iterators (the underlying vector can reallocate).
+		Layer* At(std::size_t index) {
+			return index < m_Layers.size() ? m_Layers[index].get() : nullptr;
+		}
+		const Layer* At(std::size_t index) const {
+			return index < m_Layers.size() ? m_Layers[index].get() : nullptr;
+		}
+
 		iterator begin() { return m_Layers.begin(); }
 		iterator end() { return m_Layers.end(); }
 		const_iterator begin() const { return m_Layers.begin(); }

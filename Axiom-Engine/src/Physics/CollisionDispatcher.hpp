@@ -1,7 +1,6 @@
 #pragma once
 #include <box2d/box2d.h>
 #include "Physics/Collision2D.hpp"
-#include "Physics/PhysicsUtility.hpp"
 
 #include <unordered_map>
 #include <functional>
@@ -16,7 +15,14 @@ namespace Axiom {
 	using ContactStayCallback = std::function<void(const Collision2D&)>;
 	using ContactEndCallback = std::function<void(const Collision2D&)>;
 	using ContactHitCallback = std::function<void(const Collision2D&)>;
-	
+
+	struct CollisionBodyRef {
+		EntityHandle Entity = entt::null;
+		Scene* OwningScene = nullptr;
+	};
+
+	using ShapeResolver = std::function<CollisionBodyRef(b2ShapeId)>;
+
 	struct ShapeIdHash {
 		size_t operator()(b2ShapeId id) const noexcept {
 			return std::hash<uint64_t>()(b2StoreShapeId(id));
@@ -29,18 +35,20 @@ namespace Axiom {
 		}
 	};
 
-
 	class CollisionDispatcher {
 	public:
 		void RegisterBegin(b2ShapeId id, ContactBeginCallback cb) {
 			m_begin[id].push_back(std::move(cb));
 		}
+
 		void RegisterEnd(b2ShapeId id, ContactEndCallback cb) {
 			m_end[id].push_back(std::move(cb));
 		}
+
 		void RegisterHit(b2ShapeId id, ContactHitCallback cb) {
 			m_hit[id].push_back(std::move(cb));
 		}
+
 		void UnregisterShape(b2ShapeId id) {
 			m_begin.erase(id);
 			m_end.erase(id);
@@ -54,6 +62,7 @@ namespace Axiom {
 				}
 			}
 		}
+
 		void Clear() {
 			m_begin.clear();
 			m_end.clear();
@@ -61,14 +70,19 @@ namespace Axiom {
 			m_activeContacts.clear();
 		}
 
-		void Process(b2WorldId world, const ContactBeginCallback& onBegin = {}, const ContactEndCallback& onEnd = {}, const ContactStayCallback& onStay = {}) {
+		void Process(
+			b2WorldId world,
+			const ShapeResolver& resolveShape,
+			const ContactBeginCallback& onBegin = {},
+			const ContactEndCallback& onEnd = {},
+			const ContactStayCallback& onStay = {}) {
 			b2ContactEvents ev = b2World_GetContactEvents(world);
 
-			// Callbacks may destroy entities and re-enter UnregisterShape — DispatchSafe snapshots first.
+			// Callbacks may destroy entities and re-enter UnregisterShape; DispatchSafe snapshots first.
 			for (int i = 0; i < ev.beginCount; ++i) {
 				auto& e = ev.beginEvents[i];
-				auto collision2D = MakeCollision(e.shapeIdA, e.shapeIdB);
-				m_activeContacts[MakeContactKey(collision2D.entityA, collision2D.entityB)] = { e.shapeIdA, e.shapeIdB, collision2D };
+				auto collision2D = MakeCollision(e.shapeIdA, e.shapeIdB, resolveShape);
+				m_activeContacts[MakeContactKey(e.shapeIdA, e.shapeIdB)] = { e.shapeIdA, e.shapeIdB, collision2D };
 				if (onBegin) onBegin(collision2D);
 				DispatchSafe(e.shapeIdA, collision2D, m_begin);
 				DispatchSafe(e.shapeIdB, collision2D, m_begin);
@@ -76,8 +90,8 @@ namespace Axiom {
 
 			for (int i = 0; i < ev.endCount; ++i) {
 				auto& e = ev.endEvents[i];
-				auto collision2D = MakeCollision(e.shapeIdA, e.shapeIdB);
-				const uint64_t key = MakeContactKey(collision2D.entityA, collision2D.entityB);
+				auto collision2D = MakeCollision(e.shapeIdA, e.shapeIdB, resolveShape);
+				const ContactKey key = MakeContactKey(e.shapeIdA, e.shapeIdB);
 				if (auto active = m_activeContacts.find(key); active != m_activeContacts.end()) {
 					collision2D = active->second.Collision;
 					m_activeContacts.erase(active);
@@ -89,8 +103,8 @@ namespace Axiom {
 
 			for (int i = 0; i < ev.hitCount; ++i) {
 				auto& e = ev.hitEvents[i];
-				auto collision2D = MakeCollision(e.shapeIdA, e.shapeIdB, Vec2{ e.point.x, e.point.y });
-				const uint64_t key = MakeContactKey(collision2D.entityA, collision2D.entityB);
+				auto collision2D = MakeCollision(e.shapeIdA, e.shapeIdB, resolveShape, Vec2{ e.point.x, e.point.y });
+				const ContactKey key = MakeContactKey(e.shapeIdA, e.shapeIdB);
 				if (auto active = m_activeContacts.find(key); active != m_activeContacts.end()) {
 					active->second.Collision.contactPoint = collision2D.contactPoint;
 				}
@@ -99,7 +113,7 @@ namespace Axiom {
 			}
 
 			if (onStay) {
-				// Snapshot — entity-destroying callbacks would invalidate our iterator otherwise.
+				// Snapshot because callbacks may destroy entities and invalidate active contacts.
 				std::vector<Collision2D> stayCollisions;
 				stayCollisions.reserve(m_activeContacts.size());
 				for (const auto& [_, active] : m_activeContacts) {
@@ -118,13 +132,30 @@ namespace Axiom {
 			Collision2D Collision;
 		};
 
-		static uint64_t MakeContactKey(EntityHandle a, EntityHandle b) {
-			uint32_t ia = static_cast<uint32_t>(a);
-			uint32_t ib = static_cast<uint32_t>(b);
+		struct ContactKey {
+			uint64_t ShapeA = 0;
+			uint64_t ShapeB = 0;
+
+			bool operator==(const ContactKey& other) const noexcept {
+				return ShapeA == other.ShapeA && ShapeB == other.ShapeB;
+			}
+		};
+
+		struct ContactKeyHash {
+			size_t operator()(const ContactKey& key) const noexcept {
+				const size_t hashA = std::hash<uint64_t>()(key.ShapeA);
+				const size_t hashB = std::hash<uint64_t>()(key.ShapeB);
+				return hashA ^ (hashB + 0x9e3779b97f4a7c15ull + (hashA << 6) + (hashA >> 2));
+			}
+		};
+
+		static ContactKey MakeContactKey(b2ShapeId a, b2ShapeId b) {
+			uint64_t ia = b2StoreShapeId(a);
+			uint64_t ib = b2StoreShapeId(b);
 			if (ia > ib) {
 				std::swap(ia, ib);
 			}
-			return (static_cast<uint64_t>(ia) << 32) | ib;
+			return ContactKey{ ia, ib };
 		}
 
 		static Vec2 EstimateContactPoint(b2ShapeId shapeA, b2ShapeId shapeB) {
@@ -138,10 +169,18 @@ namespace Axiom {
 			};
 		}
 
-		static Collision2D MakeCollision(b2ShapeId shapeA, b2ShapeId shapeB, std::optional<Vec2> contactPoint = std::nullopt) {
+		static Collision2D MakeCollision(
+			b2ShapeId shapeA,
+			b2ShapeId shapeB,
+			const ShapeResolver& resolveShape,
+			std::optional<Vec2> contactPoint = std::nullopt) {
+			CollisionBodyRef bodyA = resolveShape ? resolveShape(shapeA) : CollisionBodyRef{};
+			CollisionBodyRef bodyB = resolveShape ? resolveShape(shapeB) : CollisionBodyRef{};
 			return Collision2D{
-				.entityA = PhysicsUtility::GetEntityHandleFromShapeID(shapeA),
-				.entityB = PhysicsUtility::GetEntityHandleFromShapeID(shapeB),
+				.entityA = bodyA.Entity,
+				.entityB = bodyB.Entity,
+				.sceneA = bodyA.OwningScene,
+				.sceneB = bodyB.OwningScene,
 				.contactPoint = contactPoint.value_or(EstimateContactPoint(shapeA, shapeB))
 			};
 		}
@@ -169,6 +208,6 @@ namespace Axiom {
 			ShapeIdEqual> m_begin;
 		std::unordered_map<b2ShapeId, std::vector<ContactEndCallback>, ShapeIdHash, ShapeIdEqual> m_end;
 		std::unordered_map<b2ShapeId, std::vector<ContactHitCallback>, ShapeIdHash, ShapeIdEqual> m_hit;
-		std::unordered_map<uint64_t, ActiveContact> m_activeContacts;
+		std::unordered_map<ContactKey, ActiveContact, ContactKeyHash> m_activeContacts;
 	};
 }

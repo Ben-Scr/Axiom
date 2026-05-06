@@ -221,6 +221,12 @@ namespace Axiom {
 			return std::nullopt;
 		}
 
+		// Reject zero direction up-front — Normalized below would otherwise
+		// produce NaN, which Box2D would happily ray-cast to garbage.
+		if (direction.x == 0.0f && direction.y == 0.0f) {
+			return std::nullopt;
+		}
+
 		auto& phys = PhysicsSystem2D::GetMainPhysicsWorld();
 		b2WorldId world = phys.m_WorldId;
 

@@ -1,4 +1,3 @@
-#pragma once
 #include "pch.hpp"
 #include "ParticleUpdateSystem.hpp"
 #include "Scene/SceneManager.hpp"

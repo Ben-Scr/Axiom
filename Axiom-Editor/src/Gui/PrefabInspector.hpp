@@ -8,15 +8,15 @@ namespace Axiom {
 	class Scene;
 	namespace Json { class Value; }
 
-	// Inspector body for a `.prefab` asset. Owns a detached editor-preview
-	// `Scene` (see `Scene::CreateDetachedEditorScene`) into which the prefab's
+	// Inspector body for a `.prefab` asset. Owns a detached preview
+	// `Scene` (see `Scene::CreateDetachedScene`) into which the prefab's
 	// root entity is deserialized for editing. Saving re-serializes the
 	// detached entity back to disk via `SceneSerializer::SaveEntityToFile`.
 	//
 	// Lifetime: the detached scene is held by `m_PrefabScene` and torn down
 	// when `Close()` is called or when a different prefab is `Open`'d. The
 	// scene's destructor fires component-destroy hooks; those that touch
-	// global subsystems are gated by `Scene::IsEditorPreview()`.
+	// global subsystems are gated by `Scene::IsDetached()`.
 	//
 	// Dirty tracking: any component-drawer interaction on the prefab window
 	// marks the detached scene dirty via `Scene::MarkDirty`. `HasUnsavedChanges`

@@ -58,7 +58,7 @@ namespace Axiom {
 		glClearColor(clearColor.r, clearColor.g, clearColor.b, clearColor.a);
 		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-		SceneManager::Get().ForeachLoadedScene([&](const Scene& s) {
+		SceneManager::Get().ForeachLoadedScene([&](Scene& s) {
 			renderer->RenderSceneWithVP(s, vp, viewportAABB);
 			});
 

@@ -88,6 +88,18 @@ namespace Axiom {
 #endif
 		}
 
+		// Filename of a premake `kind "SharedLib"` target on the current platform.
+		// Windows: <Name>.dll, Linux: lib<Name>.so, macOS: lib<Name>.dylib.
+		std::string SharedLibraryFilename(std::string_view projectName) {
+#if defined(AIM_PLATFORM_WINDOWS)
+			return std::string(projectName) + ".dll";
+#elif defined(__APPLE__)
+			return "lib" + std::string(projectName) + ".dylib";
+#else
+			return "lib" + std::string(projectName) + ".so";
+#endif
+		}
+
 		std::string NormalizePreviewTexturePath(const std::filesystem::path& path) {
 			std::error_code ec;
 			std::filesystem::path normalized = std::filesystem::weakly_canonical(path, ec);
@@ -381,6 +393,22 @@ namespace Axiom {
 		copyFile(runtimeOutputDirectory / GetEngineRuntimeFilename(),
 			outDir / GetEngineRuntimeFilename(),
 			GetEngineRuntimeFilename());
+
+		// GLFW and Glad are SharedLibs (premake5.lua: one shared copy across
+		// engine.dll + runtime.exe). Tracy is also shared, but only when the
+		// engine was built without --no-profiler. The runtime postbuild stages
+		// all of them next to Axiom-Runtime.exe, so we copy from there.
+		for (std::string_view depName : { std::string_view{"GLFW"}, std::string_view{"Glad"} }) {
+			const std::string filename = SharedLibraryFilename(depName);
+			copyFile(runtimeOutputDirectory / filename, outDir / filename, filename);
+		}
+		{
+			const std::string tracyFilename = SharedLibraryFilename("Tracy");
+			const std::filesystem::path tracySource = runtimeOutputDirectory / tracyFilename;
+			if (std::filesystem::exists(tracySource)) {
+				copyFile(tracySource, outDir / tracyFilename, tracyFilename);
+			}
+		}
 
 		auto scriptCoreDir = exeDir / ".." / "Axiom-ScriptCore";
 		copyFile(scriptCoreDir / "Axiom-ScriptCore.dll", outDir / "Axiom-ScriptCore.dll", "Axiom-ScriptCore.dll");

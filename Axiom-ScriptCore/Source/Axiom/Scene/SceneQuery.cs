@@ -27,7 +27,6 @@ public class Scene
         }
     }
 
-    // ── Query entry points (1-4 type params) ───────────────────
 
     public QueryBuilder<T1> Query<T1>()
         where T1 : Component, new()

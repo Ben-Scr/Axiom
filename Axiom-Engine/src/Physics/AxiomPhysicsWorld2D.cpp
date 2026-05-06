@@ -20,6 +20,7 @@ namespace Axiom {
 	void AxiomPhysicsWorld2D::Destroy() {
 		m_ContactCallbacks.clear();
 		m_BodyToEntity.clear();
+		m_AttachedColliderKind.clear();
 
 		for (auto& [key, body] : m_Bodies) {
 			m_World.DetachCollider(*body);
@@ -52,13 +53,20 @@ namespace Axiom {
 	void AxiomPhysicsWorld2D::DestroyBody(EntityHandle entity) {
 		uint32_t key = static_cast<uint32_t>(entity);
 
-		// Tear down attached colliders before the body itself.
-		DestroyAllCollidersOnEntity(entity);
-
 		auto it = m_Bodies.find(key);
 		if (it == m_Bodies.end()) return;
 
 		AxiomPhys::Body* ptr = it->second.get();
+
+		// Detach (but do NOT destroy) any attached collider. Collider
+		// components own their own lifetime and clean up via their own
+		// on_destroy hook; destroying their AxiomPhys::Collider here
+		// would dangle the raw m_Collider pointer stored in the still-
+		// alive component. After detach, the surviving collider is
+		// registered-but-orphaned in the world until its component goes.
+		m_World.DetachCollider(*ptr);
+		m_AttachedColliderKind.erase(key);
+
 		m_World.UnregisterBody(*ptr);
 		m_BodyToEntity.erase(ptr);
 		m_Bodies.erase(it);
@@ -81,9 +89,17 @@ namespace Axiom {
 		AxiomPhys::BoxCollider* ptr = collider.get();
 		m_World.RegisterCollider(*ptr);
 
+		// Only attach to the body if nothing else is currently attached.
+		// Inspector blocks user-driven dual colliders via DeclareConflict,
+		// but deserialization and scripting can still produce both kinds
+		// on the same entity. In that case the second creation just
+		// registers in the world without attaching, so the previously
+		// attached collider keeps its body-side state.
 		auto bodyIt = m_Bodies.find(key);
-		if (bodyIt != m_Bodies.end()) {
+		if (bodyIt != m_Bodies.end()
+			&& m_AttachedColliderKind.find(key) == m_AttachedColliderKind.end()) {
 			m_World.AttachCollider(*bodyIt->second, *ptr);
+			m_AttachedColliderKind[key] = FastColliderKind::Box;
 		}
 
 		m_Colliders[ColliderKey{ key, FastColliderKind::Box }] = std::move(collider);
@@ -100,8 +116,10 @@ namespace Axiom {
 		m_World.RegisterCollider(*ptr);
 
 		auto bodyIt = m_Bodies.find(key);
-		if (bodyIt != m_Bodies.end()) {
+		if (bodyIt != m_Bodies.end()
+			&& m_AttachedColliderKind.find(key) == m_AttachedColliderKind.end()) {
 			m_World.AttachCollider(*bodyIt->second, *ptr);
+			m_AttachedColliderKind[key] = FastColliderKind::Circle;
 		}
 
 		m_Colliders[ColliderKey{ key, FastColliderKind::Circle }] = std::move(collider);
@@ -115,14 +133,35 @@ namespace Axiom {
 
 		AxiomPhys::Collider* ptr = it->second.get();
 
-		// AxiomPhys::DetachCollider drops whichever is attached; inspector blocks dual colliders via DeclareConflict.
+		// Only detach if THIS kind is the one currently attached to the
+		// body. Detaching when a different kind is attached would silently
+		// strip the wrong collider from the body's collision state.
 		auto bodyIt = m_Bodies.find(key);
-		if (bodyIt != m_Bodies.end()) {
+		auto attachedIt = m_AttachedColliderKind.find(key);
+		const bool wasAttached =
+			bodyIt != m_Bodies.end()
+			&& attachedIt != m_AttachedColliderKind.end()
+			&& attachedIt->second == kind;
+		if (wasAttached) {
 			m_World.DetachCollider(*bodyIt->second);
+			m_AttachedColliderKind.erase(attachedIt);
 		}
 
 		m_World.UnregisterCollider(*ptr);
 		m_Colliders.erase(it);
+
+		// If a different-kind collider still exists on this entity (the
+		// dual-collider case made possible by deserialization), promote
+		// it to the active attachment so the body keeps colliding.
+		if (wasAttached && bodyIt != m_Bodies.end()) {
+			const FastColliderKind otherKind =
+				kind == FastColliderKind::Box ? FastColliderKind::Circle : FastColliderKind::Box;
+			auto otherIt = m_Colliders.find(ColliderKey{ key, otherKind });
+			if (otherIt != m_Colliders.end()) {
+				m_World.AttachCollider(*bodyIt->second, *otherIt->second);
+				m_AttachedColliderKind[key] = otherKind;
+			}
+		}
 	}
 
 	void AxiomPhysicsWorld2D::DestroyAllCollidersOnEntity(EntityHandle entity) {
@@ -131,6 +170,7 @@ namespace Axiom {
 		if (bodyIt != m_Bodies.end()) {
 			m_World.DetachCollider(*bodyIt->second);
 		}
+		m_AttachedColliderKind.erase(key);
 		for (auto it = m_Colliders.begin(); it != m_Colliders.end(); ) {
 			if (it->first.entity == key) {
 				m_World.UnregisterCollider(*it->second);

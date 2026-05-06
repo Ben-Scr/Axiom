@@ -12,6 +12,7 @@
 #include "Components/General/NameComponent.hpp"
 #include "Components/General/Transform2DComponent.hpp"
 #include "Components/Graphics/SpriteRendererComponent.hpp"
+#include "Components/Graphics/TextRendererComponent.hpp"
 #include "Components/Graphics/Camera2DComponent.hpp"
 #include "Components/Physics/Rigidbody2DComponent.hpp"
 #include "Components/Physics/BoxCollider2DComponent.hpp"
@@ -344,6 +345,23 @@ namespace Axiom {
 				}
 
 				entityValue.AddMember("SpriteRenderer", std::move(spriteValue));
+			}
+
+			if (registry.all_of<TextRendererComponent>(entity)) {
+				const auto& text = registry.get<TextRendererComponent>(entity);
+				Value textValue = Value::MakeObject();
+				textValue.AddMember("text", Value(text.Text));
+				textValue.AddMember("fontAsset", Value(std::to_string(static_cast<uint64_t>(text.FontAssetId))));
+				textValue.AddMember("fontSize", Value(text.FontSize));
+				textValue.AddMember("r", Value(text.Color.r));
+				textValue.AddMember("g", Value(text.Color.g));
+				textValue.AddMember("b", Value(text.Color.b));
+				textValue.AddMember("a", Value(text.Color.a));
+				textValue.AddMember("alignment", Value(static_cast<int>(text.HAlign)));
+				textValue.AddMember("letterSpacing", Value(text.LetterSpacing));
+				textValue.AddMember("sortOrder", Value(static_cast<int>(text.SortingOrder)));
+				textValue.AddMember("sortLayer", Value(static_cast<int>(text.SortingLayer)));
+				entityValue.AddMember("TextRenderer", std::move(textValue));
 			}
 
 			if (registry.all_of<Rigidbody2DComponent>(entity)) {

@@ -13,6 +13,7 @@
 
 namespace Axiom {
 	class Scene;
+	class TextRenderer;
 #ifdef AXIOM_PROFILER_ENABLED
 	class GpuTimer;
 #endif
@@ -42,8 +43,13 @@ namespace Axiom {
 			m_OutputHeight = height;
 		}
 
-		void RenderScene(const Scene& scene);
-		void RenderSceneWithVP(const Scene& scene, const glm::mat4& vp, const AABB& viewportAABB);
+		// Render takes Scene&, not const Scene&: Renderer2D maintains a
+		// per-frame StaticRenderData cache and clears Transform2D dirty
+		// flags, both of which are real mutations. A const-Scene parameter
+		// would force a const_cast inside that hides those writes from
+		// callers — the explicit non-const signature documents them.
+		void RenderScene(Scene& scene);
+		void RenderSceneWithVP(Scene& scene, const glm::mat4& vp, const AABB& viewportAABB);
 
 		void SetSkipBeginFrameRender(bool skip) { m_SkipBeginFrameRender = skip; }
 
@@ -51,7 +57,7 @@ namespace Axiom {
 		size_t GetDrawCallsCount() const { return m_DrawCallsCount; }
 		float GetRenderLoopDuration() const { return m_RenderLoopDuration; }
 
-		using SceneProvider = std::function<void(const std::function<void(const Scene&)>&)>;
+		using SceneProvider = std::function<void(const std::function<void(Scene&)>&)>;
 		void SetSceneProvider(SceneProvider provider) { m_SceneProvider = std::move(provider); }
 
 		// External instance contribution. Each contributor is invoked once per
@@ -74,7 +80,7 @@ namespace Axiom {
 
 	private:
 		void RenderScenes();
-		void CollectAndRenderInstances(const Scene& scene, const glm::mat4& vp, const AABB& viewportAABB);
+		void CollectAndRenderInstances(Scene& scene, const glm::mat4& vp, const AABB& viewportAABB);
 
 		size_t m_RenderedInstancesCount = 0;
 		size_t m_DrawCallsCount = 0;
@@ -91,6 +97,11 @@ namespace Axiom {
 
 		QuadMesh m_QuadMesh;
 		SpriteShaderProgram m_SpriteShader;
+
+		// Text passes are layered on top of sprites within the same frame
+		// — owned here so Renderer2D's frame lifecycle drives them and
+		// callers don't need to thread TextRenderer through their own code.
+		std::unique_ptr<TextRenderer> m_TextRenderer;
 
 		SceneProvider m_SceneProvider;
 

@@ -125,6 +125,7 @@ namespace Axiom {
 					for (int i = 0; i < count; ++i) dispatcher.UnregisterShape(heap[i]);
 				}
 			}
+			PhysicsSystem2D::GetMainPhysicsWorld().UnregisterBodyBinding(m_BodyId);
 			b2DestroyBody(m_BodyId);
 		}
 

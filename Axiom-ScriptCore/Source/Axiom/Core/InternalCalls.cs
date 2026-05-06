@@ -296,6 +296,39 @@ internal static unsafe class InternalCalls
     internal static int SpriteRenderer_GetSortingLayer(ulong id) => NativeCallbacks.Bindings.SpriteRenderer_GetSortingLayer(id);
     internal static void SpriteRenderer_SetSortingLayer(ulong id, int layer) => NativeCallbacks.Bindings.SpriteRenderer_SetSortingLayer(id, layer);
 
+    // ── TextRenderer ────────────────────────────────────────────────
+
+    internal static string TextRenderer_GetText(ulong entityID)
+    {
+        byte* ptr = NativeCallbacks.Bindings.TextRenderer_GetText(entityID);
+        return Marshal.PtrToStringUTF8((IntPtr)ptr) ?? "";
+    }
+
+    internal static void TextRenderer_SetText(ulong entityID, string text)
+    {
+        text ??= "";
+        int len = Encoding.UTF8.GetByteCount(text);
+        Span<byte> buf = len <= 512 ? stackalloc byte[len + 1] : new byte[len + 1];
+        Encoding.UTF8.GetBytes(text, buf);
+        buf[len] = 0;
+        fixed (byte* ptr = buf) NativeCallbacks.Bindings.TextRenderer_SetText(entityID, ptr);
+    }
+
+    internal static ulong TextRenderer_GetFont(ulong id) => NativeCallbacks.Bindings.TextRenderer_GetFont(id);
+    internal static void TextRenderer_SetFont(ulong id, ulong assetId) => NativeCallbacks.Bindings.TextRenderer_SetFont(id, assetId);
+    internal static float TextRenderer_GetFontSize(ulong id) => NativeCallbacks.Bindings.TextRenderer_GetFontSize(id);
+    internal static void TextRenderer_SetFontSize(ulong id, float size) => NativeCallbacks.Bindings.TextRenderer_SetFontSize(id, size);
+    internal static void TextRenderer_GetColor(ulong id, out float r, out float g, out float b, out float a) { float cr, cg, cb, ca; NativeCallbacks.Bindings.TextRenderer_GetColor(id, &cr, &cg, &cb, &ca); r = cr; g = cg; b = cb; a = ca; }
+    internal static void TextRenderer_SetColor(ulong id, float r, float g, float b, float a) => NativeCallbacks.Bindings.TextRenderer_SetColor(id, r, g, b, a);
+    internal static float TextRenderer_GetLetterSpacing(ulong id) => NativeCallbacks.Bindings.TextRenderer_GetLetterSpacing(id);
+    internal static void TextRenderer_SetLetterSpacing(ulong id, float spacing) => NativeCallbacks.Bindings.TextRenderer_SetLetterSpacing(id, spacing);
+    internal static int TextRenderer_GetHAlign(ulong id) => NativeCallbacks.Bindings.TextRenderer_GetHAlign(id);
+    internal static void TextRenderer_SetHAlign(ulong id, int alignment) => NativeCallbacks.Bindings.TextRenderer_SetHAlign(id, alignment);
+    internal static int TextRenderer_GetSortingOrder(ulong id) => NativeCallbacks.Bindings.TextRenderer_GetSortingOrder(id);
+    internal static void TextRenderer_SetSortingOrder(ulong id, int order) => NativeCallbacks.Bindings.TextRenderer_SetSortingOrder(id, order);
+    internal static int TextRenderer_GetSortingLayer(ulong id) => NativeCallbacks.Bindings.TextRenderer_GetSortingLayer(id);
+    internal static void TextRenderer_SetSortingLayer(ulong id, int layer) => NativeCallbacks.Bindings.TextRenderer_SetSortingLayer(id, layer);
+
     // ── Camera2D ────────────────────────────────────────────────────
 
     internal static float Camera2D_GetOrthographicSize(ulong id) => NativeCallbacks.Bindings.Camera2D_GetOrthographicSize(id);
@@ -504,6 +537,8 @@ internal static unsafe class InternalCalls
 
     internal static bool Audio_LoadAsset(ulong assetId) => assetId != 0 && NativeCallbacks.Bindings.Audio_LoadAsset(assetId) != 0;
     internal static void Audio_PlayOneShotAsset(ulong assetId, float volume) => NativeCallbacks.Bindings.Audio_PlayOneShotAsset(assetId, volume);
+
+    internal static bool Font_LoadAsset(ulong assetId) => assetId != 0 && NativeCallbacks.Bindings.Font_LoadAsset(assetId) != 0;
 
     internal static void ParticleSystem2D_Play(ulong id) => NativeCallbacks.Bindings.ParticleSystem2D_Play(id);
     internal static void ParticleSystem2D_Pause(ulong id) => NativeCallbacks.Bindings.ParticleSystem2D_Pause(id);

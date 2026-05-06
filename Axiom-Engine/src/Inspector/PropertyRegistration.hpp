@@ -259,4 +259,27 @@ namespace Axiom::Properties {
 		return desc;
 	}
 
+	// Font reference field. Same shape as MakeTextureRef / MakeAudioRef but
+	// routes through AssetKind::Font so the picker filters to .ttf / .otf.
+	template <typename Getter, typename Setter>
+	PropertyDescriptor MakeFontRef(const std::string& name, const std::string& displayName,
+		Getter getter, Setter setter, PropertyMetadata metadata = {})
+	{
+		PropertyDescriptor desc;
+		desc.Name = name;
+		desc.DisplayName = displayName.empty() ? name : displayName;
+		desc.Type = PropertyType::FontRef;
+		desc.Metadata = std::move(metadata);
+		desc.Get = [getter](const Entity& e) -> PropertyValue {
+			PropertyValue v;
+			v.Type = PropertyType::FontRef;
+			v.UIntValue = static_cast<uint64_t>(getter(e));
+			return v;
+		};
+		desc.Set = [setter](Entity& e, const PropertyValue& v) {
+			setter(e, v.UIntValue);
+		};
+		return desc;
+	}
+
 } // namespace Axiom::Properties

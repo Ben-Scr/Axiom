@@ -14,6 +14,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace Axiom {
@@ -40,6 +41,29 @@ namespace Axiom {
 
 		static void MarkDirty() {
 			s_Dirty = true;
+			// Clear the known-missing cache: a FileWatcher event (or any
+			// other dirtying signal) means the on-disk layout might have
+			// changed and previously-missing assets could now exist.
+			s_KnownMissingIds.clear();
+		}
+
+		// Engine-shipped assets that live under <exeDir>/AxiomAssets/ rather
+		// than under the project's own Assets root. They are exposed to the
+		// picker / inspector / serializer through the same UUID surface as
+		// project assets, but with a fixed, hand-picked GUID instead of a
+		// random one — that keeps the GUID stable across installs so a
+		// scene saved with `BuiltIn::DefaultFont` still resolves on every
+		// machine without checking in the .ttf to every project.
+		static void RegisterBuiltInAsset(const std::string& absolutePath, uint64_t guid, AssetKind kind) {
+			if (absolutePath.empty() || guid == 0) {
+				return;
+			}
+			Record record;
+			record.Id = guid;
+			record.Path = absolutePath;
+			record.Kind = kind;
+			s_BuiltInById[guid] = record;
+			s_BuiltInPathToId[absolutePath] = guid;
 		}
 
 		static void Sync() {
@@ -52,6 +76,13 @@ namespace Axiom {
 				return 0;
 			}
 
+			// Built-in (engine-shipped) assets bypass the project-tracked
+			// path check — they live under <exeDir>/AxiomAssets/ and have
+			// pre-assigned stable GUIDs.
+			if (auto it = s_BuiltInPathToId.find(normalizedPath); it != s_BuiltInPathToId.end()) {
+				return it->second;
+			}
+
 			EnsureUpToDate();
 			if (!IsTrackedAsset(normalizedPath)) {
 				return 0;
@@ -62,12 +93,22 @@ namespace Axiom {
 			}
 
 			uint64_t id = ReadMetaId(normalizedPath);
-			if (id == 0 || s_IdToRecord.contains(id)) {
+			if (id == 0) {
+				id = static_cast<uint64_t>(UUID());
+			} else if (auto existing = s_IdToRecord.find(id); existing != s_IdToRecord.end()) {
+				// GUID collision: a different asset already owns this GUID.
+				// Regenerate so we don't break the existing reference, but
+				// surface the collision — silent overwrite breaks references
+				// in scene/prefab files that point at the original asset.
+				AIM_CORE_WARN_TAG("AssetRegistry",
+					"GUID collision while indexing '{}': id {} already owned by '{}' — regenerating new GUID for '{}'",
+					normalizedPath, id, existing->second.Path, normalizedPath);
 				id = static_cast<uint64_t>(UUID());
 			}
 
 			WriteMeta(normalizedPath, id, Classify(normalizedPath));
 			Register(normalizedPath, id, Classify(normalizedPath));
+			s_KnownMissingIds.erase(id);
 			return id;
 		}
 
@@ -76,6 +117,14 @@ namespace Axiom {
 		}
 
 		static std::string ResolvePath(uint64_t assetId) {
+			// Built-ins skip dirty/rebuild — their paths don't change at runtime.
+			if (auto it = s_BuiltInById.find(assetId); it != s_BuiltInById.end()) {
+				if (std::filesystem::exists(it->second.Path)) {
+					return it->second.Path;
+				}
+				return {};
+			}
+
 			EnsureUpToDate();
 			auto it = s_IdToRecord.find(assetId);
 			if (it == s_IdToRecord.end()) {
@@ -86,12 +135,21 @@ namespace Axiom {
 				return it->second.Path;
 			}
 
-			// A file may have moved outside the editor after the registry was
-			// built. Re-scan the project once and resolve by the stable meta GUID.
+			// A file may have moved outside the editor after the registry
+			// was built. Re-scan once to find it by the stable meta GUID,
+			// but cache the miss so we don't trigger an O(N) directory
+			// scan every frame for a permanently-missing asset (M4).
+			// `MarkDirty()` (e.g. on FileWatcher events) clears this cache,
+			// allowing genuinely-recovered assets to be picked up again.
+			if (s_KnownMissingIds.contains(assetId)) {
+				return {};
+			}
+
 			s_Dirty = true;
 			EnsureUpToDate();
 			it = s_IdToRecord.find(assetId);
 			if (it == s_IdToRecord.end() || !std::filesystem::exists(it->second.Path)) {
+				s_KnownMissingIds.insert(assetId);
 				return {};
 			}
 
@@ -99,6 +157,9 @@ namespace Axiom {
 		}
 
 		static AssetKind GetKind(uint64_t assetId) {
+			if (auto it = s_BuiltInById.find(assetId); it != s_BuiltInById.end()) {
+				return it->second.Kind;
+			}
 			EnsureUpToDate();
 			const auto it = s_IdToRecord.find(assetId);
 			return it != s_IdToRecord.end() ? it->second.Kind : AssetKind::Unknown;
@@ -116,17 +177,28 @@ namespace Axiom {
 			return GetKind(assetId) == AssetKind::Audio;
 		}
 
+		static bool IsFont(uint64_t assetId) {
+			return GetKind(assetId) == AssetKind::Font;
+		}
+
 		static std::vector<Record> GetAssetsByKind(AssetKind kind) {
 			EnsureUpToDate();
 
 			std::vector<Record> records;
-			records.reserve(s_IdToRecord.size());
+			records.reserve(s_IdToRecord.size() + s_BuiltInById.size());
 
 			for (const auto& [id, record] : s_IdToRecord) {
 				if (kind != AssetKind::Unknown && record.Kind != kind) {
 					continue;
 				}
-
+				records.push_back(record);
+			}
+			// Built-ins surface alongside project assets so the picker
+			// shows the engine's default font/etc. as selectable entries.
+			for (const auto& [id, record] : s_BuiltInById) {
+				if (kind != AssetKind::Unknown && record.Kind != kind) {
+					continue;
+				}
 				records.push_back(record);
 			}
 
@@ -272,6 +344,8 @@ namespace Axiom {
 		static void Rebuild() {
 			s_IdToRecord.clear();
 			s_PathToId.clear();
+			// New scan: previously-missing GUIDs may exist again.
+			s_KnownMissingIds.clear();
 
 			if (s_TrackedRoot.empty() || !std::filesystem::exists(s_TrackedRoot)) {
 				s_Dirty = false;
@@ -313,13 +387,25 @@ namespace Axiom {
 
 			AssetKind kind = Classify(assetPath);
 			uint64_t id = ReadMetaId(assetPath);
-			if (id == 0 || s_IdToRecord.contains(id)) {
+			if (id == 0) {
+				// Brand-new asset: mint an id and write its meta.
+				id = static_cast<uint64_t>(UUID());
+				WriteMeta(assetPath, id, kind);
+			} else if (auto existing = s_IdToRecord.find(id); existing != s_IdToRecord.end()) {
+				// Two assets claim the same GUID. Surface the collision so
+				// the user knows references to one of them will silently
+				// drift; the later-indexed asset gets a fresh GUID.
+				AIM_CORE_WARN_TAG("AssetRegistry",
+					"GUID collision while indexing '{}': id {} already owned by '{}' — regenerating new GUID for '{}'",
+					assetPath, id, existing->second.Path, assetPath);
 				id = static_cast<uint64_t>(UUID());
 				WriteMeta(assetPath, id, kind);
 			}
-			else {
-				WriteMeta(assetPath, id, kind);
-			}
+			// Else: meta is valid and unique. Don't rewrite — Record::Kind
+			// in memory is always populated by Classify() below, so the
+			// meta's `kind` field is purely informational and stale-meta
+			// is harmless. Skipping the write avoids spamming the disk
+			// (and the FileWatcher) on every rebuild (M5).
 
 			Register(assetPath, id, kind);
 		}
@@ -408,6 +494,9 @@ namespace Axiom {
 			if (extension == ".cs" || extension == ".cpp" || extension == ".c" || extension == ".hpp" || extension == ".h") {
 				return AssetKind::Script;
 			}
+			if (extension == ".ttf" || extension == ".otf") {
+				return AssetKind::Font;
+			}
 			if (!extension.empty()) {
 				return AssetKind::Other;
 			}
@@ -462,6 +551,7 @@ namespace Axiom {
 			case AssetKind::Scene: return "Scene";
 			case AssetKind::Prefab: return "Prefab";
 			case AssetKind::Script: return "Script";
+			case AssetKind::Font: return "Font";
 			case AssetKind::Other: return "Other";
 			case AssetKind::Unknown:
 			default:
@@ -481,6 +571,15 @@ namespace Axiom {
 		inline static std::string s_TrackedRoot;
 		inline static std::unordered_map<uint64_t, Record> s_IdToRecord;
 		inline static std::unordered_map<std::string, uint64_t> s_PathToId;
+		// GUIDs where ResolvePath already failed and a Rebuild() didn't
+		// recover the path. Cleared on MarkDirty() and Rebuild() so that
+		// FileWatcher events let recovered files re-resolve.
+		inline static std::unordered_set<uint64_t> s_KnownMissingIds;
+		// Engine-shipped assets registered via RegisterBuiltInAsset. Kept
+		// separate from s_IdToRecord so Rebuild() doesn't clobber them and
+		// .meta-file machinery never touches engine binaries.
+		inline static std::unordered_map<uint64_t, Record> s_BuiltInById;
+		inline static std::unordered_map<std::string, uint64_t> s_BuiltInPathToId;
 	};
 
 }

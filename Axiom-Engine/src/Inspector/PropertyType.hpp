@@ -138,6 +138,7 @@ namespace Axiom {
 		// References
 		TextureRef,
 		AudioRef,
+		FontRef,
 		AssetRef,     // Generic asset of unspecified kind (filtered by metadata)
 		SceneRef,
 		EntityRef,
@@ -184,6 +185,7 @@ namespace Axiom {
 		case PropertyType::FlagEnum:     return "flagenum";
 		case PropertyType::TextureRef:   return "texture";
 		case PropertyType::AudioRef:     return "audio";
+		case PropertyType::FontRef:      return "font";
 		case PropertyType::AssetRef:     return "asset";
 		case PropertyType::SceneRef:     return "scene";
 		case PropertyType::EntityRef:    return "entity";

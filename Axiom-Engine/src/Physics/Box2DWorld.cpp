@@ -16,7 +16,7 @@ namespace Axiom {
 	}
 
 	Box2DWorld::Box2DWorld(Box2DWorld&& other) noexcept
-		: m_WorldId(other.m_WorldId), m_Dispatcher(std::move(other.m_Dispatcher)) {
+		: m_WorldId(other.m_WorldId), m_Dispatcher(std::move(other.m_Dispatcher)), m_BodyBindings(std::move(other.m_BodyBindings)) {
 		other.m_WorldId = b2_nullWorldId;
 	}
 
@@ -28,6 +28,7 @@ namespace Axiom {
 		Destroy();
 		m_WorldId = other.m_WorldId;
 		m_Dispatcher = std::move(other.m_Dispatcher);
+		m_BodyBindings = std::move(other.m_BodyBindings);
 		other.m_WorldId = b2_nullWorldId;
 		return *this;
 	}
@@ -42,12 +43,13 @@ namespace Axiom {
 			m_WorldId = b2_nullWorldId;
 		}
 		m_Dispatcher.Clear();
+		m_BodyBindings.clear();
 	}
 
 	b2BodyId Box2DWorld::CreateBody(EntityHandle nativeEntity, Scene& scene, BodyType bodyType) {
 		Transform2DComponent defaultTransform{};
-		Transform2DComponent* tr = &defaultTransform;
-		if (!scene.TryGetComponent(nativeEntity, tr)) {
+		Transform2DComponent* tr = nullptr;
+		if (!scene.TryGetComponent(nativeEntity, tr) || tr == nullptr) {
 			AIM_CORE_WARN_TAG("PhysicsSystem", "CreateBody using default transform because entity {} has no Transform2DComponent", static_cast<uint32_t>(nativeEntity));
 			tr = &defaultTransform;
 		}
@@ -63,19 +65,19 @@ namespace Axiom {
 		bodyDef.linearDamping = 0.1f;
 
 		b2BodyId bodyId = b2CreateBody(m_WorldId, &bodyDef);
+		m_BodyBindings[b2StoreBodyId(bodyId)] = BodyBinding{ nativeEntity, &scene };
 		return bodyId;
 	}
 
 	b2ShapeId Box2DWorld::CreateShape(EntityHandle nativeEntity, Scene& scene, b2BodyId bodyId, ShapeType shapeType, bool isSensor) {
 		Transform2DComponent transform{};
-		Transform2DComponent* transformPtr = &transform;
-		if (!scene.TryGetComponent(nativeEntity, transformPtr)) {
+		Transform2DComponent* found = nullptr;
+		if (scene.TryGetComponent(nativeEntity, found) && found) {
+			transform = *found;
+		} else {
 			AIM_CORE_WARN_TAG("PhysicsSystem", "CreateShape using default transform because entity {} has no Transform2DComponent", static_cast<uint32_t>(nativeEntity));
-			transform = Transform2DComponent{};
-			transformPtr = &transform;
 		}
 
-		transform = *transformPtr;
 		b2ShapeId shapeId = b2_nullShapeId;
 
 		b2ShapeDef shapeDef = b2DefaultShapeDef();
@@ -100,6 +102,31 @@ namespace Axiom {
 
 		b2Body_SetTransform(bodyId, b2Vec2(transform.Position.x, transform.Position.y), transform.GetB2Rotation());
 		return shapeId;
+	}
+
+	CollisionBodyRef Box2DWorld::ResolveShape(b2ShapeId shapeId) const {
+		if (!b2Shape_IsValid(shapeId)) {
+			return {};
+		}
+
+		const b2BodyId bodyId = b2Shape_GetBody(shapeId);
+		const auto it = m_BodyBindings.find(b2StoreBodyId(bodyId));
+		if (it == m_BodyBindings.end()) {
+			return {};
+		}
+
+		return CollisionBodyRef{
+			.Entity = it->second.Entity,
+			.OwningScene = it->second.OwningScene
+		};
+	}
+
+	void Box2DWorld::UnregisterBodyBinding(b2BodyId bodyId) {
+		if (!b2Body_IsValid(bodyId)) {
+			return;
+		}
+
+		m_BodyBindings.erase(b2StoreBodyId(bodyId));
 	}
 
 	CollisionDispatcher& Box2DWorld::GetDispatcher() { return m_Dispatcher; }

@@ -37,6 +37,31 @@ namespace Axiom {
 		std::atomic<bool> Completed{ false };
 		std::atomic<bool> Abandoned{ false };
 		std::chrono::steady_clock::time_point StartedAt{ std::chrono::steady_clock::now() };
+
+		// Worker thread is owned by the state. The lambda capture only holds
+		// a weak_ptr to this state so destruction is not blocked on the
+		// worker finishing — the destructor below handles the std::thread
+		// in either direction.
+		std::thread Worker;
+
+		~ScriptSystemProcessTaskState() {
+			if (!Worker.joinable()) {
+				return;
+			}
+			if (Completed.load(std::memory_order_acquire)) {
+				// Worker function has already returned; just reap the thread.
+				Worker.join();
+			} else {
+				// Worker is still running (typically inside Process::Run).
+				// Mark abandoned so the worker's post-run path becomes a
+				// no-op when it tries to publish results, then detach so
+				// ~std::thread doesn't std::terminate(). The worker holds
+				// only a weak_ptr to this state, so the lock() in its tail
+				// will return empty and the thread exits cleanly.
+				Abandoned.store(true, std::memory_order_release);
+				Worker.detach();
+			}
+		}
 	};
 
 	namespace {
@@ -658,7 +683,13 @@ namespace Axiom {
 			auto task = std::make_shared<ProcessTaskState>();
 			task->StartedAt = std::chrono::steady_clock::now();
 
-			std::thread([task, work = std::move(work)]() mutable {
+			// Capture by weak_ptr so the worker doesn't keep the state
+			// alive — otherwise abandoning the task during shutdown would
+			// stall on the still-running worker. The state's destructor
+			// joins or detaches the std::thread depending on whether the
+			// worker has signalled completion.
+			std::weak_ptr<ProcessTaskState> weakTask = task;
+			task->Worker = std::thread([weakTask, work = std::move(work)]() mutable {
 				Process::Result result{};
 				try {
 					result = work();
@@ -672,13 +703,17 @@ namespace Axiom {
 					result.Output = "Unknown exception while running background rebuild task.";
 				}
 
-				{
-					std::scoped_lock lock(task->Mutex);
-					task->Result = std::move(result);
+				// Promote weak_ptr only for the brief publish window. If the
+				// state has already been destroyed (abandoned shutdown path),
+				// lock() returns empty and the worker exits silently.
+				if (auto state = weakTask.lock()) {
+					if (!state->Abandoned.load(std::memory_order_acquire)) {
+						std::scoped_lock lock(state->Mutex);
+						state->Result = std::move(result);
+					}
+					state->Completed.store(true, std::memory_order_release);
 				}
-
-				task->Completed.store(true, std::memory_order_release);
-			}).detach();
+			});
 
 			return task;
 		}
@@ -741,12 +776,56 @@ namespace Axiom {
 				return;
 			}
 
-			if (!task->Completed.load(std::memory_order_acquire)) {
+			const bool stillRunning = !task->Completed.load(std::memory_order_acquire);
+			if (stillRunning) {
 				task->Abandoned.store(true, std::memory_order_release);
-				AIM_CORE_WARN_TAG("ScriptSystem", "{} is still running during teardown; the result will be ignored so shutdown stays non-blocking", description);
+				AIM_CORE_WARN_TAG("ScriptSystem", "{} is still running during teardown; detaching so shutdown stays non-blocking", description);
 			}
 
+			// State destructor joins (if Completed) or detaches (if not).
+			// The thread, on completion, will see the empty weak_ptr and exit
+			// without touching destroyed state.
 			task.reset();
+		}
+
+		// Snapshot entity list before any user callback runs so that
+		// callbacks adding/removing ScriptComponents (which would
+		// invalidate the EnTT view) or destroying entities can't leave
+		// us iterating freed storage.
+		std::vector<EntityHandle> CollectScriptEntities(Scene& scene)
+		{
+			std::vector<EntityHandle> result;
+			auto view = scene.GetRegistry().view<ScriptComponent>(entt::exclude<DisabledTag>);
+			result.reserve(view.size_hint());
+			for (auto entity : view) {
+				result.push_back(entity);
+			}
+			return result;
+		}
+
+		// Walks ScriptComponent::Scripts on `entity` index-based, refetching
+		// the component every step. Required because user code in the
+		// callback may:
+		//   - add another script (vector reallocation → reference dangle)
+		//   - remove the ScriptComponent (component reference invalid)
+		//   - destroy the entity itself
+		// `fn(scriptComp, instance, index)` returns true to continue, false
+		// to stop walking this entity.
+		template <typename Fn>
+		void ForEachScriptOnEntitySafe(Scene& scene, EntityHandle entity, Fn&& fn)
+		{
+			for (size_t i = 0; ; ++i) {
+				if (!scene.IsValid(entity) || !scene.HasComponent<ScriptComponent>(entity)) {
+					return;
+				}
+				auto& scriptComp = scene.GetComponent<ScriptComponent>(entity);
+				if (i >= scriptComp.Scripts.size()) {
+					return;
+				}
+				if (!fn(scriptComp, scriptComp.Scripts[i], i)) {
+					return;
+				}
+			}
 		}
 	}
 
@@ -769,28 +848,29 @@ namespace Axiom {
 			if (ScriptEngine::IsInitialized())
 			{
 				ScriptSceneScope sceneScope(scene);
-				auto awakeView = scene.GetRegistry().view<ScriptComponent>(entt::exclude<DisabledTag>);
-				for (auto [entity, scriptComp] : awakeView.each())
+				const auto entities = CollectScriptEntities(scene);
+				for (EntityHandle entity : entities)
 				{
-					for (auto& instance : scriptComp.Scripts)
-					{
-						if (instance.GetClassName().empty()) continue;
-						if (instance.GetType() == ScriptType::Native) continue;
+					ForEachScriptOnEntitySafe(scene, entity,
+						[entity](ScriptComponent&, ScriptInstance& instance, size_t) -> bool {
+							if (instance.GetClassName().empty()) return true;
+							if (instance.GetType() == ScriptType::Native) return true;
 
-						if (!instance.IsBound()) {
-							instance.Bind(entity);
-						}
-						if (!instance.HasManagedInstance() && ScriptEngine::ClassExists(instance.GetClassName()))
-						{
-							uint32_t handle = ScriptEngine::CreateScriptInstance(instance.GetClassName(), entity);
-							if (handle != 0) {
-								instance.SetGCHandle(handle);
+							if (!instance.IsBound()) {
+								instance.Bind(entity);
 							}
-						}
-						if (instance.HasManagedInstance()) {
-							ScriptEngine::InvokeAwake(instance.GetGCHandle());
-						}
-					}
+							if (!instance.HasManagedInstance() && ScriptEngine::ClassExists(instance.GetClassName()))
+							{
+								uint32_t handle = ScriptEngine::CreateScriptInstance(instance.GetClassName(), entity);
+								if (handle != 0) {
+									instance.SetGCHandle(handle);
+								}
+							}
+							if (instance.HasManagedInstance()) {
+								ScriptEngine::InvokeAwake(instance.GetGCHandle());
+							}
+							return true;
+						});
 				}
 			}
 			return;
@@ -949,28 +1029,29 @@ namespace Axiom {
 		if (ScriptEngine::IsInitialized())
 		{
 			ScriptSceneScope sceneScope(scene);
-			auto awakeView = scene.GetRegistry().view<ScriptComponent>(entt::exclude<DisabledTag>);
-			for (auto [entity, scriptComp] : awakeView.each())
+			const auto entities = CollectScriptEntities(scene);
+			for (EntityHandle entity : entities)
 			{
-				for (auto& instance : scriptComp.Scripts)
-				{
-					if (instance.GetClassName().empty()) continue;
-					if (instance.GetType() == ScriptType::Native) continue;
+				ForEachScriptOnEntitySafe(scene, entity,
+					[entity](ScriptComponent&, ScriptInstance& instance, size_t) -> bool {
+						if (instance.GetClassName().empty()) return true;
+						if (instance.GetType() == ScriptType::Native) return true;
 
-					if (!instance.IsBound()) {
-						instance.Bind(entity);
-					}
-					if (!instance.HasManagedInstance() && ScriptEngine::ClassExists(instance.GetClassName()))
-					{
-						uint32_t handle = ScriptEngine::CreateScriptInstance(instance.GetClassName(), entity);
-						if (handle != 0) {
-							instance.SetGCHandle(handle);
+						if (!instance.IsBound()) {
+							instance.Bind(entity);
 						}
-					}
-					if (instance.HasManagedInstance()) {
-						ScriptEngine::InvokeAwake(instance.GetGCHandle());
-					}
-				}
+						if (!instance.HasManagedInstance() && ScriptEngine::ClassExists(instance.GetClassName()))
+						{
+							uint32_t handle = ScriptEngine::CreateScriptInstance(instance.GetClassName(), entity);
+							if (handle != 0) {
+								instance.SetGCHandle(handle);
+							}
+						}
+						if (instance.HasManagedInstance()) {
+							ScriptEngine::InvokeAwake(instance.GetGCHandle());
+						}
+						return true;
+					});
 			}
 		}
 	}
@@ -994,15 +1075,20 @@ namespace Axiom {
 		AIM_INFO_TAG("ScriptSystem", "Rebuilding C# scripts...");
 		m_LastRebuildFailed = false;
 		const std::string sandboxProjectPath = m_SandboxProjectPath;
-		m_RebuildTask = LaunchTask([sandboxProjectPath]() {
+		// Snapshot AxiomProject statics on the main thread so the worker
+		// can't race with a project reload that mutates them mid-build (M9).
+		const std::string buildConfig = AxiomProject::GetActiveBuildConfiguration();
+		const std::string defineConstantsArg =
+			"-p:DefineConstants=" + AxiomProject::BuildManagedDefineConstants("AXIOM_EDITOR");
+		m_RebuildTask = LaunchTask([sandboxProjectPath, buildConfig, defineConstantsArg]() {
 			return Process::Run({
 				"dotnet",
 				"build",
 				sandboxProjectPath,
-				"-c", AxiomProject::GetActiveBuildConfiguration(),
+				"-c", buildConfig,
 				"--nologo",
 				"-v", "q",
-				"-p:DefineConstants=" + AxiomProject::BuildManagedDefineConstants("AXIOM_EDITOR")
+				defineConstantsArg
 			});
 		});
 	}
@@ -1252,25 +1338,28 @@ namespace Axiom {
 				const uint64_t entityAID = scene.IsValid(collision.entityA) ? ToManagedEntityID(scene, collision.entityA) : 0;
 				const uint64_t entityBID = scene.IsValid(collision.entityB) ? ToManagedEntityID(scene, collision.entityB) : 0;
 
-				auto& scriptComp = scene.GetComponent<ScriptComponent>(self);
-				for (auto& instance : scriptComp.Scripts)
-				{
-					if (!instance.HasManagedInstance() || !instance.HasEnabled()) {
-						continue;
-					}
+				// Index-based walk with re-fetch — collision callbacks are
+				// user code that can AddScript (vector reallocation),
+				// RemoveScript, or Destroy(self).
+				ForEachScriptOnEntitySafe(scene, self,
+					[&, phase](ScriptComponent&, ScriptInstance& instance, size_t) -> bool {
+						if (!instance.HasManagedInstance() || !instance.HasEnabled()) {
+							return true;
+						}
 
-					switch (phase) {
-					case CollisionDispatchPhase::Enter:
-						ScriptEngine::InvokeCollisionEnter2D(instance.GetGCHandle(), selfID, otherID, entityAID, entityBID, collision.contactPoint.x, collision.contactPoint.y);
-						break;
-					case CollisionDispatchPhase::Stay:
-						ScriptEngine::InvokeCollisionStay2D(instance.GetGCHandle(), selfID, otherID, entityAID, entityBID, collision.contactPoint.x, collision.contactPoint.y);
-						break;
-					case CollisionDispatchPhase::Exit:
-						ScriptEngine::InvokeCollisionExit2D(instance.GetGCHandle(), selfID, otherID, entityAID, entityBID, collision.contactPoint.x, collision.contactPoint.y);
-						break;
-					}
-				}
+						switch (phase) {
+						case CollisionDispatchPhase::Enter:
+							ScriptEngine::InvokeCollisionEnter2D(instance.GetGCHandle(), selfID, otherID, entityAID, entityBID, collision.contactPoint.x, collision.contactPoint.y);
+							break;
+						case CollisionDispatchPhase::Stay:
+							ScriptEngine::InvokeCollisionStay2D(instance.GetGCHandle(), selfID, otherID, entityAID, entityBID, collision.contactPoint.x, collision.contactPoint.y);
+							break;
+						case CollisionDispatchPhase::Exit:
+							ScriptEngine::InvokeCollisionExit2D(instance.GetGCHandle(), selfID, otherID, entityAID, entityBID, collision.contactPoint.x, collision.contactPoint.y);
+							break;
+						}
+						return true;
+					});
 			};
 
 			dispatchToEntity(collision.entityA, collision.entityB);
@@ -1450,115 +1539,117 @@ namespace Axiom {
 
 		float dt = Application::GetInstance() ? Application::GetInstance()->GetTime().GetDeltaTime() : 0.0f;
 
-		auto view = scene.GetRegistry().view<ScriptComponent>(entt::exclude<DisabledTag>);
+		// Snapshot: user Update() may add/remove ScriptComponents and entities.
+		const auto entities = CollectScriptEntities(scene);
 
-		for (auto [entity, scriptComp] : view.each())
+		for (EntityHandle entity : entities)
 		{
-			for (auto& instance : scriptComp.Scripts)
-			{
-				if (instance.GetClassName().empty()) continue;
+			ForEachScriptOnEntitySafe(scene, entity,
+				[&, entity](ScriptComponent& scriptComp, ScriptInstance& instance, size_t) -> bool {
+					if (instance.GetClassName().empty()) return true;
 
-				if (!instance.IsBound())
-					instance.Bind(entity);
-
-				if (!instance.HasAnyInstance())
-				{
-					const ScriptType scriptType = instance.GetType();
-					const bool canUseManaged = scriptType == ScriptType::Managed || scriptType == ScriptType::Unknown;
-					const bool canUseNative = scriptType == ScriptType::Native || scriptType == ScriptType::Unknown;
-
-					if (canUseManaged && managedRuntimeReady && ScriptEngine::ClassExists(instance.GetClassName()))
-					{
-						uint32_t handle = ScriptEngine::CreateScriptInstance(
-							instance.GetClassName(), entity);
-						if (handle != 0)
-							instance.SetGCHandle(handle);
-					}
-					if (!instance.HasAnyInstance()
-						&& canUseNative
-						&& !IsTaskRunning(m_NativeRebuildTask)
-						&& m_NativeHost.IsLoaded())
-					{
-						NativeScript* native = m_NativeHost.CreateInstance(
-							instance.GetClassName(), entity, &scene);
-						if (native)
-							instance.SetNativePtr(native);
-					}
+					if (!instance.IsBound())
+						instance.Bind(entity);
 
 					if (!instance.HasAnyInstance())
-						continue;
+					{
+						const ScriptType scriptType = instance.GetType();
+						const bool canUseManaged = scriptType == ScriptType::Managed || scriptType == ScriptType::Unknown;
+						const bool canUseNative = scriptType == ScriptType::Native || scriptType == ScriptType::Unknown;
 
-					if (instance.HasManagedInstance() && !scriptComp.PendingFieldValues.empty()) {
-						std::string prefix = instance.GetClassName() + ".";
-						auto& callbacks = ScriptEngine::GetCallbacks();
-						if (callbacks.SetScriptField) {
-							for (auto it = scriptComp.PendingFieldValues.begin(); it != scriptComp.PendingFieldValues.end(); ) {
-								if (it->first.rfind(prefix, 0) == 0) {
-									std::string fieldName = it->first.substr(prefix.size());
-									callbacks.SetScriptField(
-										static_cast<int32_t>(instance.GetGCHandle()),
-										fieldName.c_str(), it->second.c_str());
-									it = scriptComp.PendingFieldValues.erase(it);
-								} else {
-									++it;
+						if (canUseManaged && managedRuntimeReady && ScriptEngine::ClassExists(instance.GetClassName()))
+						{
+							uint32_t handle = ScriptEngine::CreateScriptInstance(
+								instance.GetClassName(), entity);
+							if (handle != 0)
+								instance.SetGCHandle(handle);
+						}
+						if (!instance.HasAnyInstance()
+							&& canUseNative
+							&& !IsTaskRunning(m_NativeRebuildTask)
+							&& m_NativeHost.IsLoaded())
+						{
+							NativeScript* native = m_NativeHost.CreateInstance(
+								instance.GetClassName(), entity, &scene);
+							if (native)
+								instance.SetNativePtr(native);
+						}
+
+						if (!instance.HasAnyInstance())
+							return true;
+
+						if (instance.HasManagedInstance() && !scriptComp.PendingFieldValues.empty()) {
+							std::string prefix = instance.GetClassName() + ".";
+							auto& callbacks = ScriptEngine::GetCallbacks();
+							if (callbacks.SetScriptField) {
+								for (auto it = scriptComp.PendingFieldValues.begin(); it != scriptComp.PendingFieldValues.end(); ) {
+									if (it->first.rfind(prefix, 0) == 0) {
+										std::string fieldName = it->first.substr(prefix.size());
+										callbacks.SetScriptField(
+											static_cast<int32_t>(instance.GetGCHandle()),
+											fieldName.c_str(), it->second.c_str());
+										it = scriptComp.PendingFieldValues.erase(it);
+									} else {
+										++it;
+									}
 								}
 							}
 						}
 					}
-				}
 
-				if (instance.GetType() == ScriptType::Managed)
-				{
-					if (!managedRuntimeReady || !instance.HasManagedInstance()) {
-						continue;
-					}
-
-					if (!instance.HasEnabled())
+					if (instance.GetType() == ScriptType::Managed)
 					{
-						ScriptEngine::InvokeOnEnable(instance.GetGCHandle());
-						instance.MarkEnabled();
-					}
+						if (!managedRuntimeReady || !instance.HasManagedInstance()) {
+							return true;
+						}
 
-					if (!instance.HasStarted())
+						if (!instance.HasEnabled())
+						{
+							ScriptEngine::InvokeOnEnable(instance.GetGCHandle());
+							instance.MarkEnabled();
+						}
+
+						if (!instance.HasStarted())
+						{
+							instance.MarkStarted();
+							ScriptEngine::InvokeStart(instance.GetGCHandle());
+						}
+						ScriptEngine::InvokeUpdate(instance.GetGCHandle());
+					}
+					else if (instance.GetType() == ScriptType::Native)
 					{
-						instance.MarkStarted();
-						ScriptEngine::InvokeStart(instance.GetGCHandle());
-					}
-					ScriptEngine::InvokeUpdate(instance.GetGCHandle());
-				}
-				else if (instance.GetType() == ScriptType::Native)
-				{
-					if (IsTaskRunning(m_NativeRebuildTask) || !instance.HasNativeInstance()) {
-						continue;
-					}
+						if (IsTaskRunning(m_NativeRebuildTask) || !instance.HasNativeInstance()) {
+							return true;
+						}
 
-					NativeScript* nativeInstance = instance.GetNativePtr();
-					if (!nativeInstance) {
-						instance.Unbind();
-						continue;
-					}
+						NativeScript* nativeInstance = instance.GetNativePtr();
+						if (!nativeInstance) {
+							instance.Unbind();
+							return true;
+						}
 
-					if (!instance.HasStarted())
-					{
-						if (!TryInvokeNativeScript(instance, "Start", [nativeInstance]() {
-							nativeInstance->Start();
+						if (!instance.HasStarted())
+						{
+							if (!TryInvokeNativeScript(instance, "Start", [nativeInstance]() {
+								nativeInstance->Start();
+							})) {
+								m_NativeHost.DestroyInstance(nativeInstance);
+								instance.Unbind();
+								return true;
+							}
+							instance.MarkStarted();
+						}
+
+						if (!TryInvokeNativeScript(instance, "Update", [nativeInstance, dt]() {
+							nativeInstance->Update(dt);
 						})) {
 							m_NativeHost.DestroyInstance(nativeInstance);
 							instance.Unbind();
-							continue;
+							return true;
 						}
-						instance.MarkStarted();
 					}
-
-					if (!TryInvokeNativeScript(instance, "Update", [nativeInstance, dt]() {
-						nativeInstance->Update(dt);
-					})) {
-						m_NativeHost.DestroyInstance(nativeInstance);
-						instance.Unbind();
-						continue;
-					}
-				}
-			}
+					return true;
+				});
 		}
 	}
 
@@ -1569,27 +1660,28 @@ namespace Axiom {
 		const bool managedRuntimeReady = ScriptEngine::IsInitialized();
 		const float fixedDt = Application::GetInstance() ? Application::GetInstance()->GetTime().GetFixedDeltaTime() : 0.0f;
 
-		auto view = scene.GetRegistry().view<ScriptComponent>(entt::exclude<DisabledTag>);
-		for (auto [entity, scriptComp] : view.each())
+		const auto entities = CollectScriptEntities(scene);
+		for (EntityHandle entity : entities)
 		{
-			for (auto& instance : scriptComp.Scripts)
-			{
-				if (instance.GetClassName().empty() || !instance.IsBound() || !instance.HasStarted()) continue;
+			ForEachScriptOnEntitySafe(scene, entity,
+				[&](ScriptComponent&, ScriptInstance& instance, size_t) -> bool {
+					if (instance.GetClassName().empty() || !instance.IsBound() || !instance.HasStarted()) return true;
 
-				if (instance.GetType() == ScriptType::Managed)
-				{
-					if (!managedRuntimeReady || !instance.HasManagedInstance()) continue;
-					ScriptEngine::InvokeFixedUpdate(instance.GetGCHandle());
-				}
-				else if (instance.GetType() == ScriptType::Native)
-				{
-					if (IsTaskRunning(m_NativeRebuildTask) || !instance.HasNativeInstance()) continue;
-					NativeScript* nativeInstance = instance.GetNativePtr();
-					if (!nativeInstance) continue;
-					// TODO: native OnFixedUpdate hook
-					(void)fixedDt;
-				}
-			}
+					if (instance.GetType() == ScriptType::Managed)
+					{
+						if (!managedRuntimeReady || !instance.HasManagedInstance()) return true;
+						ScriptEngine::InvokeFixedUpdate(instance.GetGCHandle());
+					}
+					else if (instance.GetType() == ScriptType::Native)
+					{
+						if (IsTaskRunning(m_NativeRebuildTask) || !instance.HasNativeInstance()) return true;
+						NativeScript* nativeInstance = instance.GetNativePtr();
+						if (!nativeInstance) return true;
+						// TODO: native OnFixedUpdate hook
+						(void)fixedDt;
+					}
+					return true;
+				});
 		}
 	}
 

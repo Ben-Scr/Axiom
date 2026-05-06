@@ -13,6 +13,7 @@
 #include "Audio/AudioManager.hpp"
 #include "Events/EventDispatcher.hpp"
 #include "Events/WindowEvents.hpp"
+#include "Graphics/Text/FontManager.hpp"
 #include "Graphics/TextureManager.hpp"
 #include "Physics/PhysicsSystem2D.hpp"
 #include "Profiling/Profiler.hpp"
@@ -147,16 +148,29 @@ namespace Axiom {
 					// for stability, and per-call dt staying fixed prevents script integration
 					// (vel * Time.FixedDeltaTime) from compounding with the changed call rate.
 					m_FixedUpdateAccumulator += m_Time.GetDeltaTime();
-					while (m_FixedUpdateAccumulator >= m_Time.GetUnscaledFixedDeltaTime()) {
-						if (!IsEnginePaused() && !m_IsGameplayPaused) {
-							BeginFixedFrame();
-							for (const auto& layer : m_LayerStack) {
-								layer->OnFixedUpdate(*this, m_Time.GetUnscaledFixedDeltaTime());
+					const double fixedDt = m_Time.GetUnscaledFixedDeltaTime();
+					if (fixedDt <= 0.0) {
+						// Misconfigured fixed-step: a zero/negative step would make the
+						// accumulator loop infinite. Drop accumulated time and skip the
+						// FixedUpdate dispatch this frame.
+						m_FixedUpdateAccumulator = 0.0;
+					} else {
+						while (m_FixedUpdateAccumulator >= fixedDt) {
+							if (!IsEnginePaused() && !m_IsGameplayPaused) {
+								BeginFixedFrame();
+								// Index-based with re-check: a layer's OnFixedUpdate
+								// may PushLayer/PopLayer, which would invalidate
+								// a range-for iterator.
+								for (size_t i = 0; i < m_LayerStack.Size(); ++i) {
+									Layer* layer = m_LayerStack.At(i);
+									if (!layer) break;
+									layer->OnFixedUpdate(*this, m_Time.GetUnscaledFixedDeltaTime());
+								}
+								EndFixedFrame();
 							}
-							EndFixedFrame();
-						}
 
-						m_FixedUpdateAccumulator -= m_Time.GetUnscaledFixedDeltaTime();
+							m_FixedUpdateAccumulator -= fixedDt;
+						}
 					}
 
 					BeginFrame();
@@ -262,7 +276,7 @@ namespace Axiom {
 			timer.Reset();
 			m_Renderer2D = std::make_unique<Renderer2D>();
 			m_Renderer2D->Initialize();
-			m_Renderer2D->SetSceneProvider([this](const std::function<void(const Scene&)>& fn) {
+			m_Renderer2D->SetSceneProvider([this](const std::function<void(Scene&)>& fn) {
 				if (m_SceneManager) {
 					m_SceneManager->ForeachLoadedScene(fn);
 				}
@@ -295,6 +309,16 @@ namespace Axiom {
 			timer.Reset();
 			TextureManager::Initialize();
 			AIM_INFO_TAG("TextureManager", "Initialization took " + StringHelper::ToString(timer));
+		}
+
+		// FontManager piggy-backs on Renderer2D's GL context but lives on
+		// the same enable flag as TextureManager (both are GPU asset
+		// caches). No extra config knob — text without a renderer is
+		// pointless anyway.
+		if (m_Configuration.EnableTextureManager && m_Configuration.EnableRenderer2D) {
+			timer.Reset();
+			FontManager::Initialize();
+			AIM_INFO_TAG("FontManager", "Initialization took " + StringHelper::ToString(timer));
 		}
 
 		if (m_Configuration.EnableAudio) {
@@ -361,7 +385,10 @@ namespace Axiom {
 
 			Update();
 
-			for (const auto& layer : m_LayerStack) {
+			// Index-based: a layer's OnUpdate may PushLayer/PopLayer.
+			for (size_t i = 0; i < m_LayerStack.Size(); ++i) {
+				Layer* layer = m_LayerStack.At(i);
+				if (!layer) break;
 				layer->OnUpdate(*this, m_Time.GetDeltaTime());
 			}
 
@@ -371,7 +398,9 @@ namespace Axiom {
 			if (m_PhysicsSystem2D) m_PhysicsSystem2D->Update();
 
 			if (m_SceneManager) m_SceneManager->OnPreRenderScenes();
-			for (const auto& layer : m_LayerStack) {
+			for (size_t i = 0; i < m_LayerStack.Size(); ++i) {
+				Layer* layer = m_LayerStack.At(i);
+				if (!layer) break;
 				AXIOM_TRY_CATCH_LOG(layer->OnPreRender(*this));
 			}
 
@@ -417,11 +446,14 @@ namespace Axiom {
 			return false;
 			});
 
-		for (auto it = m_LayerStack.rbegin(); it != m_LayerStack.rend(); ++it) {
+		// Reverse index-based: a layer's OnEvent may PushLayer/PopLayer.
+		for (size_t i = m_LayerStack.Size(); i > 0; --i) {
 			if (event.Handled) {
 				break;
 			}
-			(*it)->OnEvent(*this, event);
+			Layer* layer = m_LayerStack.At(i - 1);
+			if (!layer) continue;
+			layer->OnEvent(*this, event);
 		}
 
 		if (!event.Handled) {
@@ -491,7 +523,9 @@ namespace Axiom {
 		if (m_Renderer2D)
 			AXIOM_TRY_CATCH_LOG(m_Renderer2D->EndFrame());
 
-		for (const auto& layer : m_LayerStack) {
+		for (size_t i = 0; i < m_LayerStack.Size(); ++i) {
+			Layer* layer = m_LayerStack.At(i);
+			if (!layer) break;
 			AXIOM_TRY_CATCH_LOG(layer->OnPostRender(*this));
 		}
 
@@ -526,7 +560,9 @@ namespace Axiom {
 		RefreshRenderGuard guard(*this);
 
 		if (m_SceneManager) AXIOM_TRY_CATCH_LOG(m_SceneManager->OnPreRenderScenes());
-		for (const auto& layer : m_LayerStack) {
+		for (size_t i = 0; i < m_LayerStack.Size(); ++i) {
+			Layer* layer = m_LayerStack.At(i);
+			if (!layer) break;
 			AXIOM_TRY_CATCH_LOG(layer->OnPreRender(*this));
 		}
 
@@ -535,7 +571,9 @@ namespace Axiom {
 			AXIOM_TRY_CATCH_LOG(m_Renderer2D->EndFrame());
 		}
 
-		for (const auto& layer : m_LayerStack) {
+		for (size_t i = 0; i < m_LayerStack.Size(); ++i) {
+			Layer* layer = m_LayerStack.At(i);
+			if (!layer) break;
 			AXIOM_TRY_CATCH_LOG(layer->OnPostRender(*this));
 		}
 
@@ -587,8 +625,17 @@ namespace Axiom {
 			}
 		}
 
-		for (auto it = m_LayerStack.rbegin(); it != m_LayerStack.rend(); ++it) {
-			(*it)->OnDetach(*this);
+		// Snapshot raw pointers — layer OnDetach may pop other layers
+		// (legitimate during shutdown), and we need to detach each one
+		// exactly once regardless of mutations.
+		std::vector<Layer*> detachOrder;
+		detachOrder.reserve(m_LayerStack.Size());
+		for (size_t i = m_LayerStack.Size(); i > 0; --i) {
+			Layer* layer = m_LayerStack.At(i - 1);
+			if (layer) detachOrder.push_back(layer);
+		}
+		for (Layer* layer : detachOrder) {
+			layer->OnDetach(*this);
 		}
 		m_EventBus.Clear();
 		m_LayerStack.Clear();
@@ -596,6 +643,7 @@ namespace Axiom {
 		// Order matters: subsystems that hold package callbacks tear down BEFORE PackageHost::UnloadAll.
 		if (m_SceneManager) m_SceneManager->Shutdown();
 		if (ScriptEngine::IsInitialized()) ScriptEngine::Shutdown();
+		if (FontManager::IsInitialized()) FontManager::Shutdown();
 		if (m_Configuration.EnableTextureManager) TextureManager::Shutdown();
 
 		if (m_PhysicsSystem2D) m_PhysicsSystem2D->Shutdown();

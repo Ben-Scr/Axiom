@@ -9,6 +9,7 @@
 #include "Components/General/NameComponent.hpp"
 #include "Components/General/Transform2DComponent.hpp"
 #include "Components/Graphics/SpriteRendererComponent.hpp"
+#include "Components/Graphics/TextRendererComponent.hpp"
 #include "Components/Graphics/Camera2DComponent.hpp"
 #include "Components/Physics/Rigidbody2DComponent.hpp"
 #include "Components/Physics/BoxCollider2DComponent.hpp"
@@ -233,6 +234,23 @@ namespace Axiom {
 				}
 
 				entityValue.AddMember("SpriteRenderer", std::move(spriteValue));
+			}
+
+			if (registry.all_of<TextRendererComponent>(entity)) {
+				const auto& text = registry.get<TextRendererComponent>(entity);
+				Value textValue = Value::MakeObject();
+				textValue.AddMember("text", Value(text.Text));
+				textValue.AddMember("fontAsset", Value(std::to_string(static_cast<uint64_t>(text.FontAssetId))));
+				textValue.AddMember("fontSize", Value(text.FontSize));
+				textValue.AddMember("r", Value(text.Color.r));
+				textValue.AddMember("g", Value(text.Color.g));
+				textValue.AddMember("b", Value(text.Color.b));
+				textValue.AddMember("a", Value(text.Color.a));
+				textValue.AddMember("alignment", Value(static_cast<int>(text.HAlign)));
+				textValue.AddMember("letterSpacing", Value(text.LetterSpacing));
+				textValue.AddMember("sortOrder", Value(static_cast<int>(text.SortingOrder)));
+				textValue.AddMember("sortLayer", Value(static_cast<int>(text.SortingLayer)));
+				entityValue.AddMember("TextRenderer", std::move(textValue));
 			}
 
 			if (registry.all_of<Rigidbody2DComponent>(entity)) {
@@ -937,6 +955,29 @@ namespace Axiom {
 				&spriteRenderer.TextureAssetId);
 		}
 
+		if (const Value* textValue = GetObjectMember(entityValue, "TextRenderer")) {
+			auto& text = scene.AddComponent<TextRendererComponent>(entity);
+			text.Text = GetStringMember(*textValue, "text", text.Text);
+			const std::string fontAssetStr = GetStringMember(*textValue, "fontAsset", std::string{});
+			if (!fontAssetStr.empty()) {
+				try {
+					text.FontAssetId = UUID(std::stoull(fontAssetStr));
+				} catch (...) {
+					text.FontAssetId = UUID(0);
+				}
+			}
+			text.FontSize = GetFloatMember(*textValue, "fontSize", text.FontSize);
+			text.Color.r = GetFloatMember(*textValue, "r", text.Color.r);
+			text.Color.g = GetFloatMember(*textValue, "g", text.Color.g);
+			text.Color.b = GetFloatMember(*textValue, "b", text.Color.b);
+			text.Color.a = GetFloatMember(*textValue, "a", text.Color.a);
+			text.LetterSpacing = GetFloatMember(*textValue, "letterSpacing", text.LetterSpacing);
+			text.HAlign = static_cast<TextAlignment>(GetIntMember(*textValue, "alignment", static_cast<int>(text.HAlign)));
+			text.SortingOrder = static_cast<int16_t>(GetIntMember(*textValue, "sortOrder", text.SortingOrder));
+			text.SortingLayer = static_cast<uint8_t>(GetIntMember(*textValue, "sortLayer", text.SortingLayer));
+			text.ResolvedFont = FontHandle{};
+		}
+
 		if (const Value* rigidbodyValue = GetObjectMember(entityValue, "Rigidbody2D")) {
 			auto& rigidbody = scene.AddComponent<Rigidbody2DComponent>(entity);
 			rigidbody.SetBodyType(static_cast<BodyType>(GetIntMember(*rigidbodyValue, "bodyType", static_cast<int>(BodyType::Dynamic))));
@@ -1292,6 +1333,32 @@ namespace Axiom {
 				wrapU,
 				wrapV,
 				&spriteRenderer.TextureAssetId);
+			return true;
+		}
+
+		if (component == "TextRenderer") {
+			auto& text = scene.HasComponent<TextRendererComponent>(entity)
+				? scene.GetComponent<TextRendererComponent>(entity)
+				: scene.AddComponent<TextRendererComponent>(entity);
+			text.Text = GetStringMember(componentValue, "text", text.Text);
+			const std::string fontAssetStr = GetStringMember(componentValue, "fontAsset", std::string{});
+			if (!fontAssetStr.empty()) {
+				try {
+					text.FontAssetId = UUID(std::stoull(fontAssetStr));
+				} catch (...) {
+					text.FontAssetId = UUID(0);
+				}
+			}
+			text.FontSize = GetFloatMember(componentValue, "fontSize", text.FontSize);
+			text.Color.r = GetFloatMember(componentValue, "r", text.Color.r);
+			text.Color.g = GetFloatMember(componentValue, "g", text.Color.g);
+			text.Color.b = GetFloatMember(componentValue, "b", text.Color.b);
+			text.Color.a = GetFloatMember(componentValue, "a", text.Color.a);
+			text.LetterSpacing = GetFloatMember(componentValue, "letterSpacing", text.LetterSpacing);
+			text.HAlign = static_cast<TextAlignment>(GetIntMember(componentValue, "alignment", static_cast<int>(text.HAlign)));
+			text.SortingOrder = static_cast<int16_t>(GetIntMember(componentValue, "sortOrder", text.SortingOrder));
+			text.SortingLayer = static_cast<uint8_t>(GetIntMember(componentValue, "sortLayer", text.SortingLayer));
+			text.ResolvedFont = FontHandle{};
 			return true;
 		}
 

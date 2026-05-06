@@ -4,6 +4,8 @@
 #include "Assets/AssetRegistry.hpp"
 #include "Audio/AudioManager.hpp"
 #include "Components/Components.hpp"
+#include "Components/Graphics/TextRendererComponent.hpp"
+#include "Graphics/Text/FontManager.hpp"
 #include "Graphics/TextureManager.hpp"
 #include "Inspector/PropertyRegistration.hpp"
 #include "Physics/PhysicsTypes.hpp"
@@ -188,6 +190,59 @@ namespace Axiom {
 		// Custom drawInspector — variant shapes / play-pause don't map to PropertyDescriptors.
 		RegisterComponent<ParticleSystem2DComponent>(sceneManager, "Particle System 2D",
 			ComponentCategory::Component, "Rendering", "ParticleSystem2D");
+
+		RegisterComponent<TextRendererComponent>(sceneManager, "Text Renderer",
+			ComponentCategory::Component, "Rendering", "TextRenderer",
+			{
+				Properties::Make("Text", "Text", &TextRendererComponent::Text),
+				Properties::MakeFontRef("Font", "Font",
+					[](const Entity& e) -> uint64_t {
+						return static_cast<uint64_t>(e.GetComponent<TextRendererComponent>().FontAssetId);
+					},
+					[](Entity& e, uint64_t uuid) {
+						auto& text = e.GetComponent<TextRendererComponent>();
+						text.FontAssetId = UUID(uuid);
+						// Force re-resolve next frame — atlas might need
+						// a different size if FontSize changed at the same
+						// time, but ResolvedFont = invalid is enough either way.
+						text.ResolvedFont = FontHandle{};
+					}),
+				Properties::MakeWith<float>("FontSize", "Font Size",
+					[](const Entity& e) { return e.GetComponent<TextRendererComponent>().FontSize; },
+					[](Entity& e, float v) {
+						auto& text = e.GetComponent<TextRendererComponent>();
+						text.FontSize = v;
+						// Different px size means different atlas slot.
+						text.ResolvedFont = FontHandle{};
+					},
+					[]() { PropertyMetadata m; m.HasClamp = true; m.ClampMin = 1.0; m.ClampMax = 512.0; m.DragSpeed = 0.5f; return m; }()),
+				Properties::Make("Color", "Color", &TextRendererComponent::Color),
+				Properties::MakeWith<float>("LetterSpacing", "Letter Spacing",
+					[](const Entity& e) { return e.GetComponent<TextRendererComponent>().LetterSpacing; },
+					[](Entity& e, float v) {
+						e.GetComponent<TextRendererComponent>().LetterSpacing = v;
+					},
+					[]() { PropertyMetadata m; m.HasClamp = true; m.ClampMin = -64.0; m.ClampMax = 64.0; m.DragSpeed = 0.1f; return m; }()),
+				Properties::MakeWith<TextAlignment>("Alignment", "Alignment",
+					[](const Entity& e) { return e.GetComponent<TextRendererComponent>().HAlign; },
+					[](Entity& e, TextAlignment v) {
+						e.GetComponent<TextRendererComponent>().HAlign = v;
+					}),
+				Properties::MakeWith<int16_t>("SortingOrder", "Sorting Order",
+					[](const Entity& e) { return e.GetComponent<TextRendererComponent>().SortingOrder; },
+					[](Entity& e, int16_t v) {
+						e.GetComponent<TextRendererComponent>().SortingOrder = v;
+					}),
+				Properties::MakeWith<uint8_t>("SortingLayer", "Sorting Layer",
+					[](const Entity& e) { return e.GetComponent<TextRendererComponent>().SortingLayer; },
+					[](Entity& e, uint8_t v) {
+						e.GetComponent<TextRendererComponent>().SortingLayer = v;
+					}),
+			});
+
+		DeclareConflict<SpriteRendererComponent, TextRendererComponent>(sceneManager);
+		DeclareConflict<ImageComponent, TextRendererComponent>(sceneManager);
+		DeclareConflict<ParticleSystem2DComponent, TextRendererComponent>(sceneManager);
 
 		// ── Physics (Box2D-backed) ──────────────────────────────────
 

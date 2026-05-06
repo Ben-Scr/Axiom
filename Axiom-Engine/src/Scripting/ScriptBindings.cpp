@@ -22,6 +22,7 @@
 #include "Components/General/Transform2DComponent.hpp"
 #include "Components/General/NameComponent.hpp"
 #include "Components/Graphics/SpriteRendererComponent.hpp"
+#include "Components/Graphics/TextRendererComponent.hpp"
 #include "Components/Graphics/Camera2DComponent.hpp"
 #include "Components/Physics/Rigidbody2DComponent.hpp"
 #include "Components/Physics/BoxCollider2DComponent.hpp"
@@ -33,6 +34,7 @@
 #include "Components/Tags.hpp"
 #include "Audio/AudioManager.hpp"
 #include "Graphics/TextureManager.hpp"
+#include "Graphics/Text/FontManager.hpp"
 #include "Graphics/Gizmo.hpp"
 #include "Physics/Physics2D.hpp"
 
@@ -675,6 +677,16 @@ namespace Axiom {
 		return AudioManager::LoadAudioByUUID(assetId).IsValid() ? 1 : 0;
 	}
 
+	static int Axiom_Font_LoadAsset(uint64_t assetId)
+	{
+		// Validity check only — DO NOT bake an atlas here. Atlas slots are
+		// per (uuid, pixelSize) so picking a default size would waste a GL
+		// texture every time `Font.IsValid` is called from script while the
+		// consumer's actual FontSize differs. The TextRenderer system bakes
+		// at TextRendererComponent::FontSize on first draw.
+		return assetId != 0 && AssetRegistry::IsFont(assetId) ? 1 : 0;
+	}
+
 	static void Axiom_Audio_PlayOneShotAsset(uint64_t assetId, float volume)
 	{
 		AudioHandle handle = AudioManager::LoadAudioByUUID(assetId);
@@ -904,6 +916,123 @@ namespace Axiom {
 	static void Axiom_SpriteRenderer_SetSortingLayer(uint64_t entityID, int layer)
 	{
 		GET_COMPONENT(SpriteRendererComponent, entityID, );
+		comp.SortingLayer = static_cast<uint8_t>(layer);
+	}
+
+	// ── TextRenderer ────────────────────────────────────────────────────
+
+	static const char* Axiom_TextRenderer_GetText(uint64_t entityID)
+	{
+		Scene* scene = nullptr;
+		EntityHandle handle = entt::null;
+		if (!ResolveEntityReference(entityID, scene, handle) || !scene->HasComponent<TextRendererComponent>(handle)) {
+			s_StringReturnBuffer.clear();
+			return s_StringReturnBuffer.c_str();
+		}
+		s_StringReturnBuffer = scene->GetComponent<TextRendererComponent>(handle).Text;
+		return s_StringReturnBuffer.c_str();
+	}
+
+	static void Axiom_TextRenderer_SetText(uint64_t entityID, const char* text)
+	{
+		GET_COMPONENT(TextRendererComponent, entityID, );
+		comp.Text = text ? text : "";
+	}
+
+	static uint64_t Axiom_TextRenderer_GetFont(uint64_t entityID)
+	{
+		GET_COMPONENT(TextRendererComponent, entityID, 0);
+
+		uint64_t assetId = static_cast<uint64_t>(comp.FontAssetId);
+		if (assetId == 0 && FontManager::IsValid(comp.ResolvedFont)) {
+			assetId = FontManager::GetFontAssetUUID(comp.ResolvedFont);
+			if (assetId != 0) {
+				comp.FontAssetId = UUID(assetId);
+			}
+		}
+		return assetId;
+	}
+
+	static void Axiom_TextRenderer_SetFont(uint64_t entityID, uint64_t assetId)
+	{
+		GET_COMPONENT(TextRendererComponent, entityID, );
+
+		comp.FontAssetId = UUID(assetId);
+		// Force the renderer to re-resolve next frame at the current FontSize.
+		comp.ResolvedFont = FontHandle{};
+	}
+
+	static float Axiom_TextRenderer_GetFontSize(uint64_t entityID)
+	{
+		GET_COMPONENT(TextRendererComponent, entityID, 32.0f);
+		return comp.FontSize;
+	}
+
+	static void Axiom_TextRenderer_SetFontSize(uint64_t entityID, float size)
+	{
+		GET_COMPONENT(TextRendererComponent, entityID, );
+		comp.FontSize = size;
+		// A new pixel size needs a different atlas slot — invalidate the cache.
+		comp.ResolvedFont = FontHandle{};
+	}
+
+	static void Axiom_TextRenderer_GetColor(uint64_t entityID, float* r, float* g, float* b, float* a)
+	{
+		GET_COMPONENT(TextRendererComponent, entityID, (void)(*r = 1, *g = 1, *b = 1, *a = 1));
+		*r = comp.Color.r; *g = comp.Color.g; *b = comp.Color.b; *a = comp.Color.a;
+	}
+
+	static void Axiom_TextRenderer_SetColor(uint64_t entityID, float r, float g, float b, float a)
+	{
+		GET_COMPONENT(TextRendererComponent, entityID, );
+		comp.Color = { r, g, b, a };
+	}
+
+	static float Axiom_TextRenderer_GetLetterSpacing(uint64_t entityID)
+	{
+		GET_COMPONENT(TextRendererComponent, entityID, 0.0f);
+		return comp.LetterSpacing;
+	}
+
+	static void Axiom_TextRenderer_SetLetterSpacing(uint64_t entityID, float spacing)
+	{
+		GET_COMPONENT(TextRendererComponent, entityID, );
+		comp.LetterSpacing = spacing;
+	}
+
+	static int Axiom_TextRenderer_GetHAlign(uint64_t entityID)
+	{
+		GET_COMPONENT(TextRendererComponent, entityID, 0);
+		return static_cast<int>(comp.HAlign);
+	}
+
+	static void Axiom_TextRenderer_SetHAlign(uint64_t entityID, int align)
+	{
+		GET_COMPONENT(TextRendererComponent, entityID, );
+		comp.HAlign = static_cast<TextAlignment>(align);
+	}
+
+	static int Axiom_TextRenderer_GetSortingOrder(uint64_t entityID)
+	{
+		GET_COMPONENT(TextRendererComponent, entityID, 0);
+		return comp.SortingOrder;
+	}
+
+	static void Axiom_TextRenderer_SetSortingOrder(uint64_t entityID, int order)
+	{
+		GET_COMPONENT(TextRendererComponent, entityID, );
+		comp.SortingOrder = static_cast<int16_t>(order);
+	}
+
+	static int Axiom_TextRenderer_GetSortingLayer(uint64_t entityID)
+	{
+		GET_COMPONENT(TextRendererComponent, entityID, 0);
+		return comp.SortingLayer;
+	}
+
+	static void Axiom_TextRenderer_SetSortingLayer(uint64_t entityID, int layer)
+	{
+		GET_COMPONENT(TextRendererComponent, entityID, );
 		comp.SortingLayer = static_cast<uint8_t>(layer);
 	}
 
@@ -1401,6 +1530,23 @@ namespace Axiom {
 		b.SpriteRenderer_GetSortingLayer = &Axiom_SpriteRenderer_GetSortingLayer;
 		b.SpriteRenderer_SetSortingLayer = &Axiom_SpriteRenderer_SetSortingLayer;
 
+		b.TextRenderer_GetText = &Axiom_TextRenderer_GetText;
+		b.TextRenderer_SetText = &Axiom_TextRenderer_SetText;
+		b.TextRenderer_GetFont = &Axiom_TextRenderer_GetFont;
+		b.TextRenderer_SetFont = &Axiom_TextRenderer_SetFont;
+		b.TextRenderer_GetFontSize = &Axiom_TextRenderer_GetFontSize;
+		b.TextRenderer_SetFontSize = &Axiom_TextRenderer_SetFontSize;
+		b.TextRenderer_GetColor = &Axiom_TextRenderer_GetColor;
+		b.TextRenderer_SetColor = &Axiom_TextRenderer_SetColor;
+		b.TextRenderer_GetLetterSpacing = &Axiom_TextRenderer_GetLetterSpacing;
+		b.TextRenderer_SetLetterSpacing = &Axiom_TextRenderer_SetLetterSpacing;
+		b.TextRenderer_GetHAlign = &Axiom_TextRenderer_GetHAlign;
+		b.TextRenderer_SetHAlign = &Axiom_TextRenderer_SetHAlign;
+		b.TextRenderer_GetSortingOrder = &Axiom_TextRenderer_GetSortingOrder;
+		b.TextRenderer_SetSortingOrder = &Axiom_TextRenderer_SetSortingOrder;
+		b.TextRenderer_GetSortingLayer = &Axiom_TextRenderer_GetSortingLayer;
+		b.TextRenderer_SetSortingLayer = &Axiom_TextRenderer_SetSortingLayer;
+
 		b.Camera2D_GetOrthographicSize = &Axiom_Camera2D_GetOrthographicSize;
 		b.Camera2D_SetOrthographicSize = &Axiom_Camera2D_SetOrthographicSize;
 		b.Camera2D_GetZoom = &Axiom_Camera2D_GetZoom;
@@ -1487,6 +1633,7 @@ namespace Axiom {
 		b.Texture_GetHeight = &Axiom_Texture_GetHeight;
 		b.Audio_LoadAsset = &Axiom_Audio_LoadAsset;
 		b.Audio_PlayOneShotAsset = &Axiom_Audio_PlayOneShotAsset;
+		b.Font_LoadAsset = &Axiom_Font_LoadAsset;
 
 		b.ParticleSystem2D_Play = &Axiom_ParticleSystem2D_Play;
 		b.ParticleSystem2D_Pause = &Axiom_ParticleSystem2D_Pause;

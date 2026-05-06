@@ -26,6 +26,7 @@
 #include "Scripting/ScriptComponent.hpp"
 #include "Scripting/ScriptEngine.hpp"
 #include "Scripting/ScriptSystem.hpp"
+#include "Serialization/SceneSerializer.hpp"
 
 #include <algorithm>
 #include <exception>
@@ -160,18 +161,21 @@ namespace Axiom {
 	}
 
 	Entity Scene::CreatePrefabInstance(AssetGUID prefabGuid, const std::string& name) {
-		// STUB: returned entity is tagged with the prefab GUID but only Transform2D + Name are added.
-		// TODO: deserialize the prefab's component graph from a PrefabAsset.
-		static bool s_WarnedPrefabStub = false;
-		if (!s_WarnedPrefabStub) {
-			s_WarnedPrefabStub = true;
-			AIM_CORE_WARN_TAG("Scene",
-				"CreatePrefabInstance is a STUB — prefab '{}' will be empty (Transform + Name only).",
-				static_cast<uint64_t>(prefabGuid));
+		// Instantiate through the serializer so prefab component data, identity, and overrides follow one path.
+		const EntityHandle entityHandle = SceneSerializer::InstantiatePrefab(*this, static_cast<uint64_t>(prefabGuid));
+		if (entityHandle == entt::null) {
+			AIM_CORE_WARN_TAG("Scene", "Failed to instantiate prefab '{}'", static_cast<uint64_t>(prefabGuid));
+			return Entity::Null;
 		}
-		auto entityHandle = CreateEntityHandle(EntityOrigin::Prefab, prefabGuid);
-		AddComponent<Transform2DComponent>(entityHandle);
-		AddComponent<NameComponent>(entityHandle, name);
+
+		if (!name.empty()) {
+			if (HasComponent<NameComponent>(entityHandle)) {
+				GetComponent<NameComponent>(entityHandle).Name = name;
+			}
+			else {
+				AddComponent<NameComponent>(entityHandle, name);
+			}
+		}
 		return Entity(entityHandle, *this);
 	}
 
@@ -392,6 +396,7 @@ namespace Axiom {
 					managedSystem->OnDisable(*this);
 					managedSystem->OnDestroy(*this);
 				}
+				m_AwakenedSystems.erase(std::remove(m_AwakenedSystems.begin(), m_AwakenedSystems.end(), managedSystem), m_AwakenedSystems.end());
 				m_Systems.erase(it);
 				break;
 			}
@@ -408,25 +413,64 @@ namespace Axiom {
 			return false;
 		}
 
-		const std::string moved = m_GameSystemClassNames[fromIndex];
+		// Reorder the names list.
+		const std::string movedClassName = m_GameSystemClassNames[fromIndex];
 		m_GameSystemClassNames.erase(m_GameSystemClassNames.begin() + static_cast<std::ptrdiff_t>(fromIndex));
-		m_GameSystemClassNames.insert(m_GameSystemClassNames.begin() + static_cast<std::ptrdiff_t>(toIndex), moved);
+		m_GameSystemClassNames.insert(m_GameSystemClassNames.begin() + static_cast<std::ptrdiff_t>(toIndex), movedClassName);
 
-		for (auto it = m_Systems.begin(); it != m_Systems.end(); ) {
-			if (IsManagedGameSystem(*it)) {
-				if (m_IsLoaded) {
-					(*it)->OnDisable(*this);
-					(*it)->OnDestroy(*this);
-				}
-				it = m_Systems.erase(it);
-			}
-			else {
-				++it;
+		// Reorder the m_Systems entries that correspond to managed systems
+		// to match the new name order, WITHOUT calling OnDisable/OnDestroy
+		// on the way out and OnAwake/OnEnable on the way back in. Native
+		// (non-managed) systems keep their slot positions so a simple
+		// reorder doesn't disturb the rest of the system list. Reordering
+		// is a UX-level concern; user OnDestroy/OnAwake callbacks should
+		// not see a phantom destroy+recreate just because someone dragged
+		// a system in the inspector.
+		std::vector<std::unique_ptr<ISystem>> managedExtracted;
+		std::vector<size_t> managedSlots;
+		managedExtracted.reserve(m_GameSystemClassNames.size());
+		managedSlots.reserve(m_GameSystemClassNames.size());
+
+		for (size_t i = 0; i < m_Systems.size(); ++i) {
+			if (IsManagedGameSystem(m_Systems[i])) {
+				managedExtracted.push_back(std::move(m_Systems[i]));
+				managedSlots.push_back(i);
 			}
 		}
 
+		// Build the reordered managed list following the names order. A name
+		// without a matching extracted system (shouldn't happen in practice,
+		// since AddGameSystem is the only path that grows the list) gets a
+		// fresh ManagedGameSystem so the lists stay in lock-step (L5).
+		std::vector<std::unique_ptr<ISystem>> managedReordered;
+		managedReordered.reserve(m_GameSystemClassNames.size());
 		for (const std::string& className : m_GameSystemClassNames) {
-			m_Systems.push_back(std::make_unique<ManagedGameSystem>(className));
+			bool placed = false;
+			for (auto it = managedExtracted.begin(); it != managedExtracted.end(); ++it) {
+				if (!*it) continue;
+				auto* mg = static_cast<ManagedGameSystem*>(it->get());
+				if (mg->GetClassName() == className) {
+					managedReordered.push_back(std::move(*it));
+					placed = true;
+					break;
+				}
+			}
+			if (!placed) {
+				managedReordered.push_back(std::make_unique<ManagedGameSystem>(className));
+			}
+		}
+
+		// Slot reordered managed systems back into the original managed
+		// positions. Surplus extracted systems (a name was dropped) are
+		// discarded — that path also calls OnDisable/OnDestroy so the
+		// user observes a clean shutdown for the dropped system.
+		for (size_t i = 0; i < managedSlots.size() && i < managedReordered.size(); ++i) {
+			m_Systems[managedSlots[i]] = std::move(managedReordered[i]);
+		}
+		// If managedReordered grew beyond the original slot count (a new
+		// system was injected), append the extras at the back.
+		for (size_t i = managedSlots.size(); i < managedReordered.size(); ++i) {
+			m_Systems.push_back(std::move(managedReordered[i]));
 		}
 
 		MarkDirty();
@@ -437,10 +481,12 @@ namespace Axiom {
 	{
 		for (auto it = m_Systems.begin(); it != m_Systems.end(); ) {
 			if (IsManagedGameSystem(*it)) {
+				ISystem* system = it->get();
 				if (m_IsLoaded) {
-					(*it)->OnDisable(*this);
-					(*it)->OnDestroy(*this);
+					system->OnDisable(*this);
+					system->OnDestroy(*this);
 				}
+				m_AwakenedSystems.erase(std::remove(m_AwakenedSystems.begin(), m_AwakenedSystems.end(), system), m_AwakenedSystems.end());
 				it = m_Systems.erase(it);
 			}
 			else {
@@ -492,7 +538,27 @@ namespace Axiom {
 	}
 
 	const Camera2DComponent* Scene::GetMainCamera() const {
-		return const_cast<Scene*>(this)->GetMainCamera();
+		// m_MainCameraEntity is `mutable` so this const overload can do
+		// the same lazy-cache update without const_casting the registry.
+		const auto isUsableCamera = [this](EntityHandle entity) {
+			return entity != entt::null
+				&& m_Registry.valid(entity)
+				&& m_Registry.all_of<Camera2DComponent>(entity)
+				&& !m_Registry.all_of<DisabledTag>(entity);
+		};
+
+		if (isUsableCamera(m_MainCameraEntity)) {
+			return &m_Registry.get<Camera2DComponent>(m_MainCameraEntity);
+		}
+
+		auto view = m_Registry.view<Camera2DComponent>(entt::exclude<DisabledTag>);
+		for (EntityHandle entity : view) {
+			m_MainCameraEntity = entity;
+			return &view.get<Camera2DComponent>(entity);
+		}
+
+		m_MainCameraEntity = entt::null;
+		return nullptr;
 	}
 
 	EntityHandle Scene::GetMainCameraEntity() {
@@ -556,7 +622,19 @@ namespace Axiom {
 	}
 
 	void Scene::AwakeSystems(size_t* enteredSystemCount) {
-		RunLifecycleSystems([this](ISystem& s) { s.Awake(*this); }, enteredSystemCount);
+		m_AwakenedSystems.clear();
+		for (const auto& systemPointer : m_Systems) {
+			ISystem& system = *systemPointer;
+			if (!system.IsEnabled()) {
+				continue;
+			}
+
+			system.Awake(*this);
+			m_AwakenedSystems.push_back(&system);
+			if (enteredSystemCount) {
+				++(*enteredSystemCount);
+			}
+		}
 	}
 
 	void Scene::StartSystems(size_t* enteredSystemCount) {
@@ -604,15 +682,21 @@ namespace Axiom {
 		std::vector<ISystem*> systemsToDestroy;
 		systemsToDestroy.reserve(m_Systems.size());
 
-		for (const auto& systemPointer : m_Systems) {
-			ISystem& system = *systemPointer;
-			if (!system.IsEnabled()) {
-				continue;
-			}
+		if (!m_AwakenedSystems.empty()) {
+			const size_t count = std::min(enabledSystemCount, m_AwakenedSystems.size());
+			systemsToDestroy.insert(systemsToDestroy.end(), m_AwakenedSystems.begin(), m_AwakenedSystems.begin() + static_cast<std::ptrdiff_t>(count));
+		}
+		else {
+			for (const auto& systemPointer : m_Systems) {
+				ISystem& system = *systemPointer;
+				if (!system.IsEnabled()) {
+					continue;
+				}
 
-			systemsToDestroy.push_back(&system);
-			if (systemsToDestroy.size() >= enabledSystemCount) {
-				break;
+				systemsToDestroy.push_back(&system);
+				if (systemsToDestroy.size() >= enabledSystemCount) {
+					break;
+				}
 			}
 		}
 
@@ -635,14 +719,16 @@ namespace Axiom {
 			}
 		}
 
+		m_AwakenedSystems.clear();
+
 		if (firstFailure) {
 			std::rethrow_exception(firstFailure);
 		}
 	}
 
-	std::unique_ptr<Scene> Scene::CreateDetachedEditorScene(const std::string& name) {
+	std::unique_ptr<Scene> Scene::CreateDetachedScene(const std::string& name) {
 		auto scene = std::unique_ptr<Scene>(new Scene(name, nullptr, false));
-		scene->m_IsEditorPreview = true;
+		scene->m_IsDetached = true;
 		return scene;
 	}
 
@@ -682,7 +768,7 @@ namespace Axiom {
 		// thumbnails). Without this gate, every preview entity would push a real body
 		// into the singleton physics world and corrupt simulation state on the live scene.
 		// Drawers must defend against rb2D.IsValid() == false rather than assume.
-		if (m_IsEditorPreview) return;
+		if (m_IsDetached) return;
 
 		if (!registry.all_of<Transform2DComponent>(entity)) {
 			AIM_CORE_WARN_TAG("Scene", "Adding missing Transform2DComponent before creating Rigidbody2D for entity {}", static_cast<uint32_t>(entity));
@@ -704,7 +790,7 @@ namespace Axiom {
 	}
 
 	void Scene::OnRigidBody2DComponentDestroy(entt::registry& registry, EntityHandle entity) {
-		if (m_IsEditorPreview) return;
+		if (m_IsDetached) return;
 		auto& rb2D = GetComponent<Rigidbody2DComponent>(entity);
 
 		if (!rb2D.IsValid()) return;
@@ -721,7 +807,7 @@ namespace Axiom {
 	}
 
 	void Scene::OnBoxCollider2DComponentConstruct(entt::registry& registry, EntityHandle entity) {
-		if (m_IsEditorPreview) return;
+		if (m_IsDetached) return;
 		if (!registry.all_of<Transform2DComponent>(entity)) {
 			AIM_CORE_WARN_TAG("Scene", "Adding missing Transform2DComponent before creating BoxCollider2D for entity {}", static_cast<uint32_t>(entity));
 			registry.emplace<Transform2DComponent>(entity);
@@ -745,7 +831,7 @@ namespace Axiom {
 	}
 
 	void Scene::OnBoxCollider2DComponentDestroy(entt::registry& registry, EntityHandle entity) {
-		if (m_IsEditorPreview) return;
+		if (m_IsDetached) return;
 		auto& boxCollider2D = GetComponent<BoxCollider2DComponent>(entity);
 		if (IsEntityBeingDestroyed(entity) || !registry.all_of<Rigidbody2DComponent>(entity)) {
 			boxCollider2D.Destroy();
@@ -757,13 +843,13 @@ namespace Axiom {
 
 	void Scene::OnAudioSourceComponentDestroy(entt::registry& registry, EntityHandle entity)
 	{
-		if (m_IsEditorPreview) return;
+		if (m_IsDetached) return;
 		registry.get<AudioSourceComponent>(entity).Destroy();
 	}
 
 	void Scene::OnScriptComponentDestroy(entt::registry& registry, EntityHandle entity)
 	{
-		if (m_IsEditorPreview) return; // No script lifecycle ran in this scene.
+		if (m_IsDetached) return; // No script lifecycle ran in this scene.
 		(void)registry;
 		ScriptSystem::RemoveAllScripts(Entity(entity, *this));
 	}
@@ -835,8 +921,13 @@ namespace Axiom {
 	}
 
 	// ── Axiom-Physics component hooks ────────────────────────────────
+	// All Fast* hooks gate on m_IsDetached the same way the Box2D
+	// hooks above do — without it, prefab-inspector preview entities
+	// would push real bodies/colliders into the singleton AxiomPhysicsWorld
+	// and corrupt simulation state on the live scene.
 
 	void Scene::OnFastBody2DConstruct(entt::registry& registry, EntityHandle entity) {
+		if (m_IsDetached) return;
 		auto& comp = registry.get<FastBody2DComponent>(entity);
 		auto& axiomWorld = PhysicsSystem2D::GetAxiomPhysicsWorld();
 
@@ -855,26 +946,31 @@ namespace Axiom {
 	}
 
 	void Scene::OnFastBody2DDestroy(entt::registry& registry, EntityHandle entity) {
+		if (m_IsDetached) return;
 		PhysicsSystem2D::GetAxiomPhysicsWorld().DestroyBody(entity);
 	}
 
 	void Scene::OnFastBoxCollider2DConstruct(entt::registry& registry, EntityHandle entity) {
+		if (m_IsDetached) return;
 		auto& comp = registry.get<FastBoxCollider2DComponent>(entity);
 		auto& axiomWorld = PhysicsSystem2D::GetAxiomPhysicsWorld();
 		comp.m_Collider = axiomWorld.CreateBoxCollider(entity, comp.HalfExtents);
 	}
 
 	void Scene::OnFastBoxCollider2DDestroy(entt::registry& registry, EntityHandle entity) {
+		if (m_IsDetached) return;
 		PhysicsSystem2D::GetAxiomPhysicsWorld().DestroyCollider(entity, AxiomPhysicsWorld2D::FastColliderKind::Box);
 	}
 
 	void Scene::OnFastCircleCollider2DConstruct(entt::registry& registry, EntityHandle entity) {
+		if (m_IsDetached) return;
 		auto& comp = registry.get<FastCircleCollider2DComponent>(entity);
 		auto& axiomWorld = PhysicsSystem2D::GetAxiomPhysicsWorld();
 		comp.m_Collider = axiomWorld.CreateCircleCollider(entity, comp.Radius);
 	}
 
 	void Scene::OnFastCircleCollider2DDestroy(entt::registry& registry, EntityHandle entity) {
+		if (m_IsDetached) return;
 		PhysicsSystem2D::GetAxiomPhysicsWorld().DestroyCollider(entity, AxiomPhysicsWorld2D::FastColliderKind::Circle);
 	}
 

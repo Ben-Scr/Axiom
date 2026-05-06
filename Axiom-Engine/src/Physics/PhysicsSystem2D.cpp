@@ -111,27 +111,31 @@ namespace Axiom {
 			}
 		});
 
+		auto dispatchToCollisionScenes = [](const Collision2D& collision, const auto& dispatch) {
+			if (collision.sceneA && collision.sceneA->IsValid(collision.entityA)) {
+				dispatch(*collision.sceneA, collision);
+			}
+			if (collision.sceneB && collision.sceneB != collision.sceneA && collision.sceneB->IsValid(collision.entityB)) {
+				dispatch(*collision.sceneB, collision);
+			}
+		};
+
 		s_MainWorld->GetDispatcher().Process(
 			s_MainWorld->GetWorldID(),
-			[](const Collision2D& collision) {
-				SceneManager::Get().ForeachLoadedScene([&](Scene& scene) {
-					if (scene.IsValid(collision.entityA) && scene.IsValid(collision.entityB)) {
-						ScriptSystem::DispatchCollisionEnter2D(scene, collision);
-					}
+			[world = &*s_MainWorld](b2ShapeId shapeId) { return world->ResolveShape(shapeId); },
+			[&dispatchToCollisionScenes](const Collision2D& collision) {
+				dispatchToCollisionScenes(collision, [](Scene& scene, const Collision2D& c) {
+					ScriptSystem::DispatchCollisionEnter2D(scene, c);
 				});
 			},
-			[](const Collision2D& collision) {
-				SceneManager::Get().ForeachLoadedScene([&](Scene& scene) {
-					if (scene.IsValid(collision.entityA) && scene.IsValid(collision.entityB)) {
-						ScriptSystem::DispatchCollisionExit2D(scene, collision);
-					}
+			[&dispatchToCollisionScenes](const Collision2D& collision) {
+				dispatchToCollisionScenes(collision, [](Scene& scene, const Collision2D& c) {
+					ScriptSystem::DispatchCollisionExit2D(scene, c);
 				});
 			},
-			[](const Collision2D& collision) {
-				SceneManager::Get().ForeachLoadedScene([&](Scene& scene) {
-					if (scene.IsValid(collision.entityA) && scene.IsValid(collision.entityB)) {
-						ScriptSystem::DispatchCollisionStay2D(scene, collision);
-					}
+			[&dispatchToCollisionScenes](const Collision2D& collision) {
+				dispatchToCollisionScenes(collision, [](Scene& scene, const Collision2D& c) {
+					ScriptSystem::DispatchCollisionStay2D(scene, c);
 				});
 			});
 	}
