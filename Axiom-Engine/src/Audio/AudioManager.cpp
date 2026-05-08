@@ -276,11 +276,24 @@ namespace Axiom {
 	}
 
 	AudioHandle AudioManager::LoadAudioByUUID(uint64_t assetId) {
-		if (assetId == 0 || !AssetRegistry::IsAudio(assetId)) {
+		if (assetId == 0) {
 			return AudioHandle();
 		}
 
-		const std::string path = AssetRegistry::ResolvePath(assetId);
+		if (!AssetRegistry::IsAudio(assetId)) {
+			AssetRegistry::MarkDirty();
+			AssetRegistry::Sync();
+			if (!AssetRegistry::IsAudio(assetId)) {
+				return AudioHandle();
+			}
+		}
+
+		std::string path = AssetRegistry::ResolvePath(assetId);
+		if (path.empty()) {
+			AssetRegistry::MarkDirty();
+			AssetRegistry::Sync();
+			path = AssetRegistry::ResolvePath(assetId);
+		}
 		if (path.empty()) {
 			return AudioHandle();
 		}
@@ -299,6 +312,16 @@ namespace Axiom {
 				s_audioPathToHandle.erase(it->second->GetFilepath());
 			}
 
+			// Lifetime ordering — DO NOT REORDER:
+			//   1. Recycle every SoundInstance referencing this audio. Each
+			//      calls ma_sound_uninit + ma_resource_manager_data_source_uninit,
+			//      so miniaudio's audio thread releases its hold on the buffer.
+			//   2. Unregister the resource manager entry. miniaudio drops its
+			//      pointer to audio->GetData() / GetFilepath().
+			//   3. Erase from s_audioMap. Audio destructor runs HERE, freeing
+			//      the PCM buffer and the filepath string. By this point no
+			//      miniaudio code path can reach the buffer — without the
+			//      ordering, the audio thread could read a freed buffer.
 			for (size_t i = 0; i < s_soundInstances.size(); ++i) {
 				auto& slot = s_soundInstances[i];
 				if (slot && slot->IsValid && slot->AudioHandle == audioHandle) {

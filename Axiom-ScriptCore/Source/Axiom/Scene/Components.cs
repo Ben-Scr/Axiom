@@ -438,6 +438,117 @@ public class BoxCollider2D : Component
     }
 }
 
+// ── CircleCollider2D ────────────────────────────────────────────────
+
+public class CircleCollider2D : Component
+{
+    // Local-space radius — the world radius is this multiplied by the larger
+    // axis of the entity's transform scale (Unity's CircleCollider2D contract).
+    public float Radius
+    {
+        get => InternalCalls.CircleCollider2D_GetRadius(RequireComponent<CircleCollider2D>());
+        set => InternalCalls.CircleCollider2D_SetRadius(RequireComponent<CircleCollider2D>(), value);
+    }
+
+    public Vector2 Center
+    {
+        get
+        {
+            ulong entityId = RequireComponent<CircleCollider2D>();
+            InternalCalls.CircleCollider2D_GetCenter(entityId, out float x, out float y);
+            return new Vector2(x, y);
+        }
+        set => InternalCalls.CircleCollider2D_SetCenter(RequireComponent<CircleCollider2D>(), value.X, value.Y);
+    }
+
+    public bool Enabled
+    {
+        set => InternalCalls.CircleCollider2D_SetEnabled(RequireComponent<CircleCollider2D>(), value);
+    }
+}
+
+// ── PolygonCollider2D ───────────────────────────────────────────────
+
+public class PolygonCollider2D : Component
+{
+    // Box2D's hard cap on convex-polygon vertex count.
+    public const int MaxVertices = 8;
+    public const int MinVertices = 3;
+
+    public int VertexCount => InternalCalls.PolygonCollider2D_GetVertexCount(RequireComponent<PolygonCollider2D>());
+
+    public Vector2 Center
+    {
+        get
+        {
+            ulong entityId = RequireComponent<PolygonCollider2D>();
+            InternalCalls.PolygonCollider2D_GetCenter(entityId, out float x, out float y);
+            return new Vector2(x, y);
+        }
+        set => InternalCalls.PolygonCollider2D_SetCenter(RequireComponent<PolygonCollider2D>(), value.X, value.Y);
+    }
+
+    public Vector2 Size
+    {
+        get
+        {
+            ulong entityId = RequireComponent<PolygonCollider2D>();
+            InternalCalls.PolygonCollider2D_GetSize(entityId, out float x, out float y);
+            return new Vector2(x, y);
+        }
+        set => InternalCalls.PolygonCollider2D_SetSize(RequireComponent<PolygonCollider2D>(), value.X, value.Y);
+    }
+
+    public bool Enabled
+    {
+        set => InternalCalls.PolygonCollider2D_SetEnabled(RequireComponent<PolygonCollider2D>(), value);
+    }
+
+    // Replace the polygon with a regular n-gon (3..MaxVertices). Sides outside
+    // that range are clamped on the native side, matching the inspector.
+    public void SetSides(int sides)
+        => InternalCalls.PolygonCollider2D_SetSides(RequireComponent<PolygonCollider2D>(), sides);
+
+    // Set the polygon's local-space vertex list. Caller must provide 3..MaxVertices
+    // points; the native side runs ComputeHull so winding doesn't matter, but
+    // duplicate / collinear points may still drop the count.
+    public void SetPoints(ReadOnlySpan<Vector2> points)
+    {
+        if (points.Length < MinVertices || points.Length > MaxVertices)
+        {
+            Log.Error($"PolygonCollider2D.SetPoints requires {MinVertices}..{MaxVertices} points, got {points.Length}");
+            return;
+        }
+
+        // Pack into interleaved (x, y) floats — the native side reads it back
+        // as Vec2[]. Stack alloc keeps the call allocation-free.
+        Span<float> packed = stackalloc float[points.Length * 2];
+        for (int i = 0; i < points.Length; ++i)
+        {
+            packed[i * 2 + 0] = points[i].X;
+            packed[i * 2 + 1] = points[i].Y;
+        }
+        InternalCalls.PolygonCollider2D_SetPoints(RequireComponent<PolygonCollider2D>(), packed, points.Length);
+    }
+
+    // Snapshot of the polygon's world-space vertices (after offset, scale, and
+    // any custom hull). Fills `outPoints` and returns the number of vertices
+    // copied; the slice may be shorter than `outPoints` if the polygon has
+    // fewer vertices than the buffer.
+    public int GetWorldPoints(Span<Vector2> outPoints)
+    {
+        if (outPoints.Length == 0) return 0;
+
+        Span<float> packed = stackalloc float[outPoints.Length * 2];
+        int written = InternalCalls.PolygonCollider2D_GetWorldPoints(RequireComponent<PolygonCollider2D>(), packed);
+        for (int i = 0; i < written; ++i)
+        {
+            outPoints[i] = new Vector2(packed[i * 2 + 0], packed[i * 2 + 1]);
+        }
+        return written;
+    }
+}
+
 // ── AudioSource ─────────────────────────────────────────────────────
 
 public class AudioSource : Component

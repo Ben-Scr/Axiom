@@ -146,6 +146,24 @@ internal unsafe struct NativeBindingsStruct
     public delegate* unmanaged<ulong, float*, float*, void> BoxCollider2D_GetCenter;
     public delegate* unmanaged<ulong, int, void> BoxCollider2D_SetEnabled;
 
+    // ── CircleCollider2D ─────────────────────────────────────────
+    public delegate* unmanaged<ulong, float> CircleCollider2D_GetRadius;
+    public delegate* unmanaged<ulong, float, void> CircleCollider2D_SetRadius;
+    public delegate* unmanaged<ulong, float*, float*, void> CircleCollider2D_GetCenter;
+    public delegate* unmanaged<ulong, float, float, void> CircleCollider2D_SetCenter;
+    public delegate* unmanaged<ulong, int, void> CircleCollider2D_SetEnabled;
+
+    // ── PolygonCollider2D ────────────────────────────────────────
+    public delegate* unmanaged<ulong, int> PolygonCollider2D_GetVertexCount;
+    public delegate* unmanaged<ulong, float*, int, int> PolygonCollider2D_GetWorldPoints;
+    public delegate* unmanaged<ulong, float*, int, void> PolygonCollider2D_SetPoints;
+    public delegate* unmanaged<ulong, int, void> PolygonCollider2D_SetSides;
+    public delegate* unmanaged<ulong, float*, float*, void> PolygonCollider2D_GetCenter;
+    public delegate* unmanaged<ulong, float, float, void> PolygonCollider2D_SetCenter;
+    public delegate* unmanaged<ulong, float*, float*, void> PolygonCollider2D_GetSize;
+    public delegate* unmanaged<ulong, float, float, void> PolygonCollider2D_SetSize;
+    public delegate* unmanaged<ulong, int, void> PolygonCollider2D_SetEnabled;
+
     // ── AudioSource ──────────────────────────────────────────────
     public delegate* unmanaged<ulong, void> AudioSource_Play;
     public delegate* unmanaged<ulong, void> AudioSource_Pause;

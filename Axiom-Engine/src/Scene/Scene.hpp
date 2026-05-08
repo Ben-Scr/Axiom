@@ -51,6 +51,14 @@ namespace Axiom {
 			EntityID runtimeId = 0);
 
 		Entity GetEntity(EntityHandle nativeEntity) { return Entity(nativeEntity, *this); }
+		// CAVEAT: returns an `Entity` that can mutate this Scene even though the
+		// caller holds a `const Scene&`. The const_cast is intentional to keep the
+		// API symmetrical, but it is a known footgun: a caller treating a const
+		// Scene reference as immutable will silently corrupt state if they mutate
+		// through the returned Entity. Prefer `GetComponent<T>(handle) const` on
+		// the Scene directly when you actually need read-only access. New code
+		// should treat this overload as deprecated.
+		[[deprecated("Returns a writable Entity from a const Scene; prefer Scene::GetComponent<T>(handle) const for read-only access")]]
 		Entity GetEntity(EntityHandle nativeEntity) const { return Entity(nativeEntity, const_cast<Scene&>(*this)); }
 
 		void DestroyEntity(Entity entity);
@@ -133,6 +141,14 @@ namespace Axiom {
 				AIM_CORE_ERROR_TAG("Scene", "Singleton entity with component '{}' not found", typeid(TComponent).name());
 				return entt::null;
 			}
+			// In non-shipping builds, multiple "singletons" indicate a setup bug:
+			// either the user added the same component to two entities, or a
+			// system that should have de-duplicated didn't. Failing fast in dev
+			// catches it; the fall-through warn-and-return-first preserves behavior
+			// in shipping where we don't want to crash on a recoverable mistake.
+			AIM_ASSERT(count == 1, AxiomErrorCode::InvalidValue,
+				"Multiple instances of singleton component '" + std::string(typeid(TComponent).name()) +
+				"' (count=" + std::to_string(count) + "). Caller expects exactly one.");
 			if (count > 1) {
 				AIM_CORE_WARN_TAG("Scene", "Multiple ({}) instances of singleton component '{}', returning first", count, typeid(TComponent).name());
 			}
@@ -244,6 +260,10 @@ namespace Axiom {
 		void OnRigidBody2DComponentDestroy(entt::registry& registry, EntityHandle entity);
 		void OnBoxCollider2DComponentConstruct(entt::registry& registry, EntityHandle entity);
 		void OnBoxCollider2DComponentDestroy(entt::registry& registry, EntityHandle entity);
+		void OnCircleCollider2DComponentConstruct(entt::registry& registry, EntityHandle entity);
+		void OnCircleCollider2DComponentDestroy(entt::registry& registry, EntityHandle entity);
+		void OnPolygonCollider2DComponentConstruct(entt::registry& registry, EntityHandle entity);
+		void OnPolygonCollider2DComponentDestroy(entt::registry& registry, EntityHandle entity);
 		void OnAudioSourceComponentDestroy(entt::registry& registry, EntityHandle entity);
 		void OnScriptComponentDestroy(entt::registry& registry, EntityHandle entity);
 

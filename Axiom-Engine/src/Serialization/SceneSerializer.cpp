@@ -16,6 +16,8 @@
 #include "Components/Graphics/Camera2DComponent.hpp"
 #include "Components/Physics/Rigidbody2DComponent.hpp"
 #include "Components/Physics/BoxCollider2DComponent.hpp"
+#include "Components/Physics/CircleCollider2DComponent.hpp"
+#include "Components/Physics/PolygonCollider2DComponent.hpp"
 #include "Components/Audio/AudioSourceComponent.hpp"
 #include "Components/General/RectTransform2DComponent.hpp"
 #include "Components/General/HierarchyComponent.hpp"
@@ -705,6 +707,47 @@ namespace Axiom {
 				entityValue.AddMember("BoxCollider2D", std::move(colliderValue));
 			}
 
+			if (registry.all_of<CircleCollider2DComponent>(entity)) {
+				auto& collider = registry.get<CircleCollider2DComponent>(entity);
+				const Vec2 center = collider.GetCenter();
+				Value colliderValue = Value::MakeObject();
+				colliderValue.AddMember("radius", Value(collider.GetLocalRadius(scene)));
+				colliderValue.AddMember("centerX", Value(center.x));
+				colliderValue.AddMember("centerY", Value(center.y));
+				colliderValue.AddMember("friction", Value(collider.GetFriction()));
+				colliderValue.AddMember("bounciness", Value(collider.GetBounciness()));
+				colliderValue.AddMember("layer", Value(collider.GetLayer()));
+				colliderValue.AddMember("registerContacts", Value(collider.CanRegisterContacts()));
+				colliderValue.AddMember("sensor", Value(collider.IsSensor()));
+				entityValue.AddMember("CircleCollider2D", std::move(colliderValue));
+			}
+
+			if (registry.all_of<PolygonCollider2DComponent>(entity)) {
+				auto& collider = registry.get<PolygonCollider2DComponent>(entity);
+				const Vec2 center = collider.GetCenter();
+				const Vec2 size = collider.GetLocalSize(scene);
+				Value colliderValue = Value::MakeObject();
+				colliderValue.AddMember("sizeX", Value(size.x));
+				colliderValue.AddMember("sizeY", Value(size.y));
+				colliderValue.AddMember("centerX", Value(center.x));
+				colliderValue.AddMember("centerY", Value(center.y));
+
+				Value pointsArr = Value::MakeArray();
+				for (const Vec2& p : collider.GetLocalPoints()) {
+					Value pt = Value::MakeObject();
+					pt.AddMember("x", Value(p.x));
+					pt.AddMember("y", Value(p.y));
+					pointsArr.Append(std::move(pt));
+				}
+				colliderValue.AddMember("points", std::move(pointsArr));
+				colliderValue.AddMember("friction", Value(collider.GetFriction()));
+				colliderValue.AddMember("bounciness", Value(collider.GetBounciness()));
+				colliderValue.AddMember("layer", Value(collider.GetLayer()));
+				colliderValue.AddMember("registerContacts", Value(collider.CanRegisterContacts()));
+				colliderValue.AddMember("sensor", Value(collider.IsSensor()));
+				entityValue.AddMember("PolygonCollider2D", std::move(colliderValue));
+			}
+
 			if (registry.all_of<AudioSourceComponent>(entity)) {
 				auto& audioSource = registry.get<AudioSourceComponent>(entity);
 				Value audioValue = Value::MakeObject();
@@ -731,7 +774,7 @@ namespace Axiom {
 			if (registry.all_of<StaticTag>(entity)) {
 				entityValue.AddMember("static", Value(true));
 			}
-			if (registry.all_of<DisabledTag>(entity)) {
+			if (registry.all_of<DisabledTag>(entity) && !registry.all_of<InheritedDisabledTag>(entity)) {
 				entityValue.AddMember("disabled", Value(true));
 			}
 			if (registry.all_of<DeadlyTag>(entity)) {

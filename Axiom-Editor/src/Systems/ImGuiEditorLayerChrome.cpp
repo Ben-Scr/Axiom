@@ -389,6 +389,12 @@ namespace Axiom {
 
 		PollPendingPlayModeRequest(scene);
 
+		// Reset every frame; the Game View panel republishes its rect
+		// while it's visible. If the user collapsed the Game View tab
+		// or closed the dock, we want UI systems to fall back to the
+		// OS window viewport instead of using a stale region.
+		Window::ClearUIRegion();
+
 		RenderToolbar();
 		RenderEntitiesPanel();
 		// Inspector + editor view follow the prefab-edit override when

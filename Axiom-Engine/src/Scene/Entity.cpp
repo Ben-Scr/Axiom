@@ -107,8 +107,30 @@ namespace Axiom {
 	}
 
 	void Entity::SetEnabled(bool enabled) {
-		if (enabled) { if (HasComponent<DisabledTag>()) RemoveComponent<DisabledTag>(); }
-		else { if (!HasComponent<DisabledTag>()) AddComponent<DisabledTag>(); }
+		if (!m_Registry || m_EntityHandle == entt::null) return;
+
+		const bool parentDisabled = HasParent() && GetParent().HasComponent<DisabledTag>();
+		if (enabled) {
+			if (parentDisabled) {
+				// User wants this entity enabled, but the parent is disabled. Keep it
+				// disabled by inheritance — but preserve any authored-disabled state.
+				// If the child already has DisabledTag without InheritedDisabledTag,
+				// the user authored it disabled; converting that to inherited would
+				// erase the authored intent on the next parent re-enable cascade.
+				if (!HasComponent<DisabledTag>()) {
+					AddComponent<InheritedDisabledTag>();
+					AddComponent<DisabledTag>();
+				}
+				return;
+			}
+
+			if (HasComponent<InheritedDisabledTag>()) RemoveComponent<InheritedDisabledTag>();
+			if (HasComponent<DisabledTag>()) RemoveComponent<DisabledTag>();
+		}
+		else {
+			if (HasComponent<InheritedDisabledTag>()) RemoveComponent<InheritedDisabledTag>();
+			if (!HasComponent<DisabledTag>()) AddComponent<DisabledTag>();
+		}
 	}
 
 	// ── Parent-child hierarchy ──────────────────────────────────────────
@@ -147,6 +169,20 @@ namespace Axiom {
 			}
 			hc.Parent = entt::null;
 		}
+
+		void ClearInheritedDisabled(entt::registry& registry, EntityHandle entity) {
+			if (!registry.valid(entity) || !registry.all_of<InheritedDisabledTag>(entity)) return;
+			registry.remove<InheritedDisabledTag>(entity);
+			if (registry.all_of<DisabledTag>(entity)) {
+				registry.remove<DisabledTag>(entity);
+			}
+		}
+
+		void ApplyInheritedDisabled(entt::registry& registry, EntityHandle entity) {
+			if (!registry.valid(entity) || registry.all_of<DisabledTag>(entity)) return;
+			registry.emplace<InheritedDisabledTag>(entity);
+			registry.emplace<DisabledTag>(entity);
+		}
 	}
 
 	void Entity::SetParent(Entity parent) {
@@ -170,6 +206,7 @@ namespace Axiom {
 		HierarchyComponent& myHc = GetComponent<HierarchyComponent>();
 		if (parentHandle == entt::null) {
 			myHc.Parent = entt::null;
+			ClearInheritedDisabled(*m_Registry, m_EntityHandle);
 			return;
 		}
 
@@ -180,13 +217,13 @@ namespace Axiom {
 		parentHc.Children.push_back(m_EntityHandle);
 		myHc.Parent = parentHandle;
 
-		// Inherit disable from the new parent. The reverse direction (un-disable
-		// when reparented to an enabled parent) intentionally is NOT applied —
-		// dropping into an enabled subtree shouldn't override the user's intent
-		// to keep the moved entity disabled. AddComponent fires the
-		// OnDisabledTagConstruct hook which cascades down this entity's subtree.
-		if (m_Registry->all_of<DisabledTag>(parentHandle) && !HasComponent<DisabledTag>()) {
-			AddComponent<DisabledTag>();
+		// Keep inherited disables tied to the current parent. Authored disables
+		// have plain DisabledTag only, so moving between parents won't clear them.
+		if (m_Registry->all_of<DisabledTag>(parentHandle)) {
+			ApplyInheritedDisabled(*m_Registry, m_EntityHandle);
+		}
+		else if (HasComponent<InheritedDisabledTag>()) {
+			ClearInheritedDisabled(*m_Registry, m_EntityHandle);
 		}
 	}
 
@@ -198,11 +235,11 @@ namespace Axiom {
 		return Entity(p, m_Scene);
 	}
 
-	const std::vector<EntityHandle>& Entity::GetChildren() const {
-		static const std::vector<EntityHandle> s_Empty;
-		if (!m_Registry || m_EntityHandle == entt::null) return s_Empty;
-		if (!HasComponent<HierarchyComponent>()) return s_Empty;
-		return GetComponent<HierarchyComponent>().Children;
+	std::span<const EntityHandle> Entity::GetChildren() const {
+		if (!m_Registry || m_EntityHandle == entt::null) return {};
+		if (!HasComponent<HierarchyComponent>()) return {};
+		const std::vector<EntityHandle>& children = GetComponent<HierarchyComponent>().Children;
+		return std::span<const EntityHandle>(children);
 	}
 
 	bool Entity::HasParent() const {

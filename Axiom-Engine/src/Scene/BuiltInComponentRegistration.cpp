@@ -363,6 +363,142 @@ namespace Axiom {
 					}),
 			});
 
+		RegisterComponent<CircleCollider2DComponent>(sceneManager, "Circle Collider 2D",
+			ComponentCategory::Component, "Physics", "CircleCollider2D",
+			{
+				Properties::MakeWith<Vec2>("Offset", "Offset",
+					[](const Entity& e) { return e.GetComponent<CircleCollider2DComponent>().GetCenter(); },
+					[](Entity& e, const Vec2& v) {
+						if (Scene* s = e.GetScene()) {
+							e.GetComponent<CircleCollider2DComponent>().SetCenter(v, *s);
+						}
+					},
+					[]() { PropertyMetadata m; m.DragSpeed = 0.05f; return m; }()),
+				Properties::MakeWith<float>("Radius", "Radius",
+					[](const Entity& e) {
+						const Scene* s = e.GetScene();
+						if (!s) return 0.5f;
+						return e.GetComponent<CircleCollider2DComponent>().GetLocalRadius(*s);
+					},
+					[](Entity& e, float radius) {
+						Scene* s = e.GetScene();
+						if (!s) return;
+						const float clamped = std::max(radius, 0.001f);
+						e.GetComponent<CircleCollider2DComponent>().SetRadius(clamped, *s);
+					},
+					[]() { PropertyMetadata m; m.HasClamp = true; m.ClampMin = 0.001; m.ClampMax = 1000.0; m.DragSpeed = 0.05f; return m; }()),
+				Properties::MakeWith<bool>("Sensor", "Sensor",
+					[](const Entity& e) { return e.GetComponent<CircleCollider2DComponent>().IsSensor(); },
+					[](Entity& e, bool v) {
+						auto& col = e.GetComponent<CircleCollider2DComponent>();
+						if (Scene* s = e.GetScene()) col.SetSensor(v, *s);
+					}),
+				Properties::MakeWith<bool>("ContactEvents", "Contact Events",
+					[](const Entity& e) { return e.GetComponent<CircleCollider2DComponent>().CanRegisterContacts(); },
+					[](Entity& e, bool v) {
+						e.GetComponent<CircleCollider2DComponent>().SetRegisterContacts(v);
+					}),
+				Properties::MakeWith<bool>("Enabled", "Collider Enabled",
+					[](const Entity& e) { return e.GetComponent<CircleCollider2DComponent>().IsEnabled(); },
+					[](Entity& e, bool v) {
+						e.GetComponent<CircleCollider2DComponent>().SetEnabled(v);
+					}),
+				Properties::MakeWith<float>("Friction", "Friction",
+					[](const Entity& e) { return e.GetComponent<CircleCollider2DComponent>().GetFriction(); },
+					[](Entity& e, float v) {
+						e.GetComponent<CircleCollider2DComponent>().SetFriction(v);
+					},
+					[]() { PropertyMetadata m; m.HasClamp = true; m.ClampMin = 0.0; m.ClampMax = 10.0; m.DragSpeed = 0.01f; return m; }()),
+				Properties::MakeWith<float>("Bounciness", "Bounciness",
+					[](const Entity& e) { return e.GetComponent<CircleCollider2DComponent>().GetBounciness(); },
+					[](Entity& e, float v) {
+						e.GetComponent<CircleCollider2DComponent>().SetBounciness(v);
+					},
+					[]() { PropertyMetadata m; m.HasClamp = true; m.ClampMin = 0.0; m.ClampMax = 1.0; m.DragSpeed = 0.01f; return m; }()),
+				Properties::MakeWith<uint64_t>("LayerMask", "Layer Mask",
+					[](const Entity& e) { return e.GetComponent<CircleCollider2DComponent>().GetLayer(); },
+					[](Entity& e, uint64_t v) {
+						e.GetComponent<CircleCollider2DComponent>().SetLayer(v);
+					}),
+			});
+
+		RegisterComponent<PolygonCollider2DComponent>(sceneManager, "Polygon Collider 2D",
+			ComponentCategory::Component, "Physics", "PolygonCollider2D",
+			{
+				Properties::MakeWith<Vec2>("Offset", "Offset",
+					[](const Entity& e) { return e.GetComponent<PolygonCollider2DComponent>().GetCenter(); },
+					[](Entity& e, const Vec2& v) {
+						if (Scene* s = e.GetScene()) {
+							e.GetComponent<PolygonCollider2DComponent>().SetCenter(v, *s);
+						}
+					},
+					[]() { PropertyMetadata m; m.DragSpeed = 0.05f; return m; }()),
+				Properties::MakeWith<int>("Sides", "Sides",
+					[](const Entity& e) { return e.GetComponent<PolygonCollider2DComponent>().GetSides(); },
+					[](Entity& e, int v) {
+						Scene* s = e.GetScene();
+						if (!s) return;
+						const int clamped = std::clamp(v,
+							PolygonCollider2DComponent::k_MinVertices,
+							PolygonCollider2DComponent::k_MaxVertices);
+						e.GetComponent<PolygonCollider2DComponent>().SetSides(clamped, *s);
+					},
+					[]() {
+						PropertyMetadata m;
+						m.HasClamp = true;
+						m.ClampMin = static_cast<double>(PolygonCollider2DComponent::k_MinVertices);
+						m.ClampMax = static_cast<double>(PolygonCollider2DComponent::k_MaxVertices);
+						m.DragSpeed = 1.0f;
+						return m;
+					}()),
+				Properties::MakeWith<Vec2>("Size", "Size",
+					[](const Entity& e) {
+						const Scene* s = e.GetScene();
+						if (!s) return Vec2{ 1.0f, 1.0f };
+						return e.GetComponent<PolygonCollider2DComponent>().GetLocalSize(*s);
+					},
+					[](Entity& e, const Vec2& localSize) {
+						Scene* s = e.GetScene();
+						if (!s) return;
+						const Vec2 clamped{ std::max(localSize.x, 0.001f), std::max(localSize.y, 0.001f) };
+						e.GetComponent<PolygonCollider2DComponent>().SetSize(clamped, *s);
+					},
+					[]() { PropertyMetadata m; m.HasClamp = true; m.ClampMin = 0.001; m.ClampMax = 1000.0; m.DragSpeed = 0.05f; return m; }()),
+				Properties::MakeWith<bool>("Sensor", "Sensor",
+					[](const Entity& e) { return e.GetComponent<PolygonCollider2DComponent>().IsSensor(); },
+					[](Entity& e, bool v) {
+						auto& col = e.GetComponent<PolygonCollider2DComponent>();
+						if (Scene* s = e.GetScene()) col.SetSensor(v, *s);
+					}),
+				Properties::MakeWith<bool>("ContactEvents", "Contact Events",
+					[](const Entity& e) { return e.GetComponent<PolygonCollider2DComponent>().CanRegisterContacts(); },
+					[](Entity& e, bool v) {
+						e.GetComponent<PolygonCollider2DComponent>().SetRegisterContacts(v);
+					}),
+				Properties::MakeWith<bool>("Enabled", "Collider Enabled",
+					[](const Entity& e) { return e.GetComponent<PolygonCollider2DComponent>().IsEnabled(); },
+					[](Entity& e, bool v) {
+						e.GetComponent<PolygonCollider2DComponent>().SetEnabled(v);
+					}),
+				Properties::MakeWith<float>("Friction", "Friction",
+					[](const Entity& e) { return e.GetComponent<PolygonCollider2DComponent>().GetFriction(); },
+					[](Entity& e, float v) {
+						e.GetComponent<PolygonCollider2DComponent>().SetFriction(v);
+					},
+					[]() { PropertyMetadata m; m.HasClamp = true; m.ClampMin = 0.0; m.ClampMax = 10.0; m.DragSpeed = 0.01f; return m; }()),
+				Properties::MakeWith<float>("Bounciness", "Bounciness",
+					[](const Entity& e) { return e.GetComponent<PolygonCollider2DComponent>().GetBounciness(); },
+					[](Entity& e, float v) {
+						e.GetComponent<PolygonCollider2DComponent>().SetBounciness(v);
+					},
+					[]() { PropertyMetadata m; m.HasClamp = true; m.ClampMin = 0.0; m.ClampMax = 1.0; m.DragSpeed = 0.01f; return m; }()),
+				Properties::MakeWith<uint64_t>("LayerMask", "Layer Mask",
+					[](const Entity& e) { return e.GetComponent<PolygonCollider2DComponent>().GetLayer(); },
+					[](Entity& e, uint64_t v) {
+						e.GetComponent<PolygonCollider2DComponent>().SetLayer(v);
+					}),
+			});
+
 		// ── Physics (Axiom-Physics, lightweight AABB) ──────────────
 
 		RegisterComponent<FastBody2DComponent>(sceneManager, "Fast Body 2D",
@@ -662,6 +798,18 @@ namespace Axiom {
 		DeclareConflict<Rigidbody2DComponent, FastBody2DComponent>(sceneManager);
 		DeclareConflict<BoxCollider2DComponent, FastBoxCollider2DComponent>(sceneManager);
 		DeclareConflict<BoxCollider2DComponent, FastCircleCollider2DComponent>(sceneManager);
+		DeclareConflict<CircleCollider2DComponent, FastBoxCollider2DComponent>(sceneManager);
+		DeclareConflict<CircleCollider2DComponent, FastCircleCollider2DComponent>(sceneManager);
+		DeclareConflict<PolygonCollider2DComponent, FastBoxCollider2DComponent>(sceneManager);
+		DeclareConflict<PolygonCollider2DComponent, FastCircleCollider2DComponent>(sceneManager);
+
+		// One Box2D shape per entity — the rigidbody adopts whichever collider
+		// is on the entity, and Scene::OnRigidBody2DComponentConstruct only
+		// reaches for one. Layering two would leak a body.
+		DeclareConflict<BoxCollider2DComponent, CircleCollider2DComponent>(sceneManager);
+		DeclareConflict<BoxCollider2DComponent, PolygonCollider2DComponent>(sceneManager);
+		DeclareConflict<CircleCollider2DComponent, PolygonCollider2DComponent>(sceneManager);
+
 		// Within Axiom-Physics, only one shape per body is supported.
 		DeclareConflict<FastBoxCollider2DComponent, FastCircleCollider2DComponent>(sceneManager);
 

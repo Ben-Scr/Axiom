@@ -79,7 +79,7 @@ namespace Axiom {
 	}
 
 	void GuiRenderer::BeginFrame(const SceneManager& sceneManager) {
-		if (!m_IsInitialized) {
+		if (!m_IsInitialized || m_SkipBeginFrameRender) {
 			return;
 		}
 
@@ -110,17 +110,29 @@ namespace Axiom {
 		// guarantee of "renderer always reads fresh layout" is worth it.
 		ComputeUILayout(const_cast<Scene&>(scene));
 
-		// UI is screen-space and must NOT scroll with the camera, so we
-		// resolve against the window's main viewport directly. This is
-		// the same viewport ComputeUILayout used so hit-tests and draws
-		// stay aligned.
-		Viewport* vp = Window::GetMainViewport();
-		if (!vp || vp->GetWidth() <= 0 || vp->GetHeight() <= 0) {
-			return;
+		// UI is screen-space and must NOT scroll with the camera. In
+		// editor mode the renderer paints into a sub-panel FBO whose
+		// pixel size differs from the OS window — the editor publishes
+		// that region via Window::SetUIRegion so we project against
+		// the same dimensions UILayoutSystem and UIEventSystem used.
+		// In standalone runtime builds the region stays unset and the
+		// main viewport (full OS window) wins.
+		const Window::UIRegion uiRegion = Window::GetUIRegion();
+		int w = 0;
+		int h = 0;
+		if (uiRegion.IsActive()) {
+			w = uiRegion.Width;
+			h = uiRegion.Height;
+		}
+		else {
+			Viewport* vp = Window::GetMainViewport();
+			if (!vp || vp->GetWidth() <= 0 || vp->GetHeight() <= 0) {
+				return;
+			}
+			w = vp->GetWidth();
+			h = vp->GetHeight();
 		}
 
-		const int w = vp->GetWidth();
-		const int h = vp->GetHeight();
 		const float halfW = 0.5f * w;
 		const float halfH = 0.5f * h;
 		const float zNear = -1.0f;
@@ -350,24 +362,53 @@ namespace Axiom {
 		m_SpriteShader.Bind();
 		m_SpriteShader.SetMVP(mvp);
 		m_QuadMesh.Bind();
+		glActiveTexture(GL_TEXTURE0);
 
-		for (const Instance44& instance : m_InstancesScratch) {
-			m_SpriteShader.SetSpritePosition(instance.Position);
-			m_SpriteShader.SetScale(instance.Scale);
-			m_SpriteShader.SetRotation(instance.Rotation);
-			m_SpriteShader.SetUV(glm::vec2(0.0f), glm::vec2(1.0f));
+		// QuadMesh's per-instance attributes (Position/Scale/Rotation/Color)
+		// live in an instanced VBO at locations 2-5 with divisor=1, so we
+		// MUST upload + DrawInstanced — a non-instanced Draw would read
+		// instance index 0 for every quad and collapse them all to the
+		// zero-initialized buffer (in particular Scale=(0,0) → invisible).
+		// Sort already preserved layer/order, so contiguous runs of the
+		// same texture can share an upload + draw call without disturbing
+		// the z-rule.
+		//
+		// Mirror Renderer2D's ResolveRenderableTextureHandle: a Handle
+		// can satisfy `IsValid()` (index != sentinel) yet still refer to
+		// a freed slot (mismatched generation) or an entry whose GPU
+		// upload hasn't completed. TextureManager::IsValid covers both,
+		// and lets a stale handle fall back to the engine default white
+		// square instead of binding texture 0 (which samples black on
+		// most drivers, making the UI quad invisible against a dark
+		// background).
+		const TextureHandle defaultTexture = TextureManager::GetDefaultTexture(DefaultTexture::Square);
+		auto resolveHandle = [&](TextureHandle h) {
+			return TextureManager::IsValid(h) ? h : defaultTexture;
+		};
 
-			glActiveTexture(GL_TEXTURE0);
-			TextureHandle handle = instance.TextureHandle;
-			if (!handle.IsValid()) {
-				handle = TextureManager::GetDefaultTexture(DefaultTexture::Square);
+		size_t runStart = 0;
+		while (runStart < m_InstancesScratch.size()) {
+			TextureHandle runHandle = resolveHandle(m_InstancesScratch[runStart].TextureHandle);
+
+			size_t runEnd = runStart + 1;
+			while (runEnd < m_InstancesScratch.size()) {
+				if (!(resolveHandle(m_InstancesScratch[runEnd].TextureHandle) == runHandle)) break;
+				++runEnd;
 			}
-			Texture2D* texture = TextureManager::GetTexture(handle);
-			if (texture && texture->IsValid())
-				texture->Submit(0);
 
-			m_SpriteShader.SetVertexColor(instance.Color);
-			m_QuadMesh.Draw();
+			Texture2D* texture = TextureManager::GetTexture(runHandle);
+			if (texture && texture->IsValid()) {
+				texture->Submit(0);
+			}
+			else {
+				glBindTexture(GL_TEXTURE_2D, 0);
+			}
+
+			m_QuadMesh.UploadInstances(std::span<const Instance44>(
+				m_InstancesScratch.data() + runStart, runEnd - runStart));
+			m_QuadMesh.DrawInstanced(runEnd - runStart);
+
+			runStart = runEnd;
 		}
 
 		m_QuadMesh.Unbind();

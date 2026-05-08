@@ -33,6 +33,11 @@ namespace Axiom {
         CollisionBodyRef ResolveShape(b2ShapeId shapeId) const;
         void UnregisterBodyBinding(b2BodyId bodyId);
 
+        // Destroy every body whose binding points at `scene`, then erase the
+        // bindings. Called on scene unload so subsequent contact dispatches and
+        // raycast resolves cannot return a Scene* that has just been freed.
+        void DestroyAllBodiesForScene(Scene* scene);
+
         CollisionDispatcher& GetDispatcher();
         b2WorldId GetWorldID() { return m_WorldId; }
         void Destroy();

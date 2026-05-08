@@ -34,7 +34,11 @@ namespace Axiom {
         static bool m_IsInitialized;
         static std::unique_ptr<Shader> m_GizmoShader;
         static std::vector<PosColorVertex> m_GizmoVertices;
-        static std::vector<uint16_t> m_GizmoIndices;
+        // 32-bit indices: Gizmo::s_MaxVertices is 100k, well above the uint16_t
+        // ceiling of 65535. The previous uint16_t buffer silently truncated
+        // indices 65536+ down to 0+, aliasing them onto early vertices and
+        // rendering garbage whenever a busy frame pushed past the limit.
+        static std::vector<uint32_t> m_GizmoIndices;
 
         static uint16_t m_GizmoViewId;
 

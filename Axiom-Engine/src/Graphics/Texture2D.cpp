@@ -199,8 +199,11 @@ namespace Axiom {
 	}
 
 	void Texture2D::Submit(uint8_t unit) const {
-		if (!IsValid()) return;
+		// Even on the !IsValid() path, explicitly unbind: the previous early-return
+		// silently left whatever texture was last bound active on `unit`. A sprite
+		// drawing with this Texture2D would then sample the leftover texture from
+		// the previous draw — silent visual corruption with no GL error.
 		glActiveTexture(GL_TEXTURE0 + unit);
-		glBindTexture(GL_TEXTURE_2D, m_Tex);
+		glBindTexture(GL_TEXTURE_2D, IsValid() ? m_Tex : 0);
 	}
 }

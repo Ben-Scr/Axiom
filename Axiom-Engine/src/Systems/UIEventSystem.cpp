@@ -48,15 +48,9 @@ namespace Axiom {
 			return btn.NormalColor;
 		}
 
-		void SetEntityEnabled(entt::registry& registry, EntityHandle entity, bool enabled) {
-			if (!registry.valid(entity)) return;
-			const bool currentlyDisabled = registry.all_of<DisabledTag>(entity);
-			if (enabled && currentlyDisabled) {
-				registry.remove<DisabledTag>(entity);
-			}
-			else if (!enabled && !currentlyDisabled) {
-				registry.emplace<DisabledTag>(entity);
-			}
+		void SetEntityEnabled(Scene& scene, EntityHandle entity, bool enabled) {
+			if (!scene.IsValid(entity)) return;
+			scene.GetEntity(entity).SetEnabled(enabled);
 		}
 
 		// Convert a typed UTF-8 string into a "where would the resulting
@@ -181,13 +175,29 @@ namespace Axiom {
 		if (!app) return;
 		Input& input = app->GetInput();
 
-		// We use the *window* viewport (independent of camera) so UI
-		// hit-tests align with what UIRenderer / UILayoutSystem use.
-		Viewport* viewport = Window::GetMainViewport();
-		if (!viewport || viewport->GetWidth() <= 0 || viewport->GetHeight() <= 0) return;
+		// Prefer the editor-published UI panel region when active so
+		// hit-tests resolve in the same coordinate space the panel was
+		// rendered in (panel-relative pixels). For standalone runtime
+		// builds the region stays unset and we fall back to the OS
+		// window viewport, which is also where mouse coords originate.
+		const Window::UIRegion uiRegion = Window::GetUIRegion();
+		Vec2 mouseRaw = input.GetMousePosition();
+		int vpW = 0;
+		int vpH = 0;
+		if (uiRegion.IsActive()) {
+			mouseRaw.x -= static_cast<float>(uiRegion.OffsetX);
+			mouseRaw.y -= static_cast<float>(uiRegion.OffsetY);
+			vpW = uiRegion.Width;
+			vpH = uiRegion.Height;
+		}
+		else {
+			Viewport* viewport = Window::GetMainViewport();
+			if (!viewport || viewport->GetWidth() <= 0 || viewport->GetHeight() <= 0) return;
+			vpW = viewport->GetWidth();
+			vpH = viewport->GetHeight();
+		}
 
-		const Vec2 mouseUi = ScreenPixelToUiSpace(
-			input.GetMousePosition(), viewport->GetWidth(), viewport->GetHeight());
+		const Vec2 mouseUi = ScreenPixelToUiSpace(mouseRaw, vpW, vpH);
 		const bool mouseDownThisFrame = input.GetMouseDown(MouseButton::Left);
 		const bool mouseUpThisFrame   = input.GetMouseUp(MouseButton::Left);
 		const bool mouseHeld          = input.GetMouse(MouseButton::Left);
@@ -428,10 +438,20 @@ namespace Axiom {
 				&& registry.all_of<RectTransform2DComponent>(slider.FillEntity))
 			{
 				auto& fillRect = registry.get<RectTransform2DComponent>(slider.FillEntity);
-				// Stretch fill from left edge to t along the track.
+				// Stretch fill from the parent's left edge to fraction t.
+				// Pivot must be (0.5, 0.5) so the rect fully fills the
+				// [AnchorMin, AnchorMax] span: the layout system positions
+				// the rect by `bottomLeft = pivotWorld - finalSize*Pivot`
+				// where `pivotWorld = anchorCenter + AnchoredPosition`. With
+				// Pivot=(0, 0.5) the fill's left edge ends up at the *anchor
+				// centre* of the [0, t] span (i.e. 0.5*t into the track) and
+				// the rect overshoots the right side, which is what produced
+				// the off-by-half slider fill. (0.5, 0.5) makes
+				// bottomLeft == anchorBL and topRight == anchorTR — fill
+				// occupies exactly [0, t] of the track.
 				fillRect.AnchorMin = Vec2{ 0.0f, 0.0f };
 				fillRect.AnchorMax = Vec2{ t, 1.0f };
-				fillRect.Pivot = Vec2{ 0.0f, 0.5f };
+				fillRect.Pivot = Vec2{ 0.5f, 0.5f };
 				fillRect.AnchoredPosition = Vec2{ 0.0f, 0.0f };
 				fillRect.SizeDelta = Vec2{ 0.0f, 0.0f };
 			}
@@ -452,7 +472,7 @@ namespace Axiom {
 			}
 		}
 		for (const auto& [checkmark, desiredEnabled] : deferredCheckmarkEnable) {
-			SetEntityEnabled(registry, checkmark, desiredEnabled);
+			SetEntityEnabled(scene, checkmark, desiredEnabled);
 		}
 
 		// ── 8. Input fields ──────────────────────────────────────────

@@ -15,6 +15,8 @@
 #include "Graphics/TextRendererComponent.hpp"
 
 #include "Physics/BoxCollider2DComponent.hpp"
+#include "Physics/CircleCollider2DComponent.hpp"
+#include "Physics/PolygonCollider2DComponent.hpp"
 #include "Physics/Rigidbody2DComponent.hpp"
 
 #include "Physics/FastBody2DComponent.hpp"

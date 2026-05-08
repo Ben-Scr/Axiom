@@ -29,6 +29,7 @@ namespace Axiom {
 	}
 
 	BodyType Rigidbody2DComponent::GetBodyType() const {
+		if (!IsValid()) return BodyType::Static;
 		switch (b2Body_GetType(m_BodyId)) {
 		case b2_staticBody:
 			return BodyType::Static;

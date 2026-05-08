@@ -23,6 +23,8 @@
 #include "Events/SceneEvents.hpp"
 #include "Graphics/TextureManager.hpp"
 #include "Audio/AudioManager.hpp"
+#include "Physics/PhysicsSystem2D.hpp"
+#include "Physics/Box2DWorld.hpp"
 #include "Serialization/Json.hpp"
 #include "Serialization/SceneSerializer.hpp"
 
@@ -402,6 +404,20 @@ namespace Axiom {
 		catch (...) {
 			AIM_CORE_ERROR_TAG("SceneManager", "Scene entity cleanup failed for '{}'", sceneName);
 		}
+
+		// Belt-and-suspenders: ClearEntities should fire every component destroy hook,
+		// which in turn destroys the matching Box2D bodies. But if an exception aborts
+		// that pass mid-way — or any future code path bypasses ClearEntities — the
+		// global Box2DWorld would still hold BodyBindings whose OwningScene pointer
+		// is about to dangle. Force-clear any bindings tied to this scene now.
+		if (PhysicsSystem2D::IsInitialized()) {
+			try {
+				PhysicsSystem2D::GetMainPhysicsWorld().DestroyAllBodiesForScene(&scene);
+			}
+			catch (...) {
+				AIM_CORE_ERROR_TAG("SceneManager", "Box2D body cleanup for unloaded scene '{}' failed", sceneName);
+			}
+		}
 		try {
 			ScenePostStopEvent e(sceneName);
 			ScriptEngine::RaiseSceneUnloaded(sceneName);
@@ -512,18 +528,31 @@ namespace Axiom {
 	}
 
 	void SceneManager::UpdateScenes() {
-		LoadedSceneList scenes = m_LoadedScenes;
-		for (auto& scene : scenes) if (scene && scene->IsLoaded()) scene->UpdateSystems();
+		// Index-based walk with re-checked size each step. Systems can call into
+		// LoadScene/UnloadScene mid-iteration; the previous full vector copy guarded
+		// against that but allocated O(loaded-scenes) per frame, three times per
+		// frame across UpdateScenes/OnPreRenderScenes/FixedUpdateScenes — direct
+		// contradiction of "no hidden allocations in hot paths". The shared_ptr
+		// holds the scene alive past any concurrent erase, so a stale index just
+		// returns a no-longer-loaded scene we skip.
+		for (size_t i = 0; i < m_LoadedScenes.size(); ++i) {
+			auto scene = m_LoadedScenes[i];
+			if (scene && scene->IsLoaded()) scene->UpdateSystems();
+		}
 	}
 
 	void SceneManager::OnPreRenderScenes() {
-		LoadedSceneList scenes = m_LoadedScenes;
-		for (auto& scene : scenes) if (scene && scene->IsLoaded()) scene->OnPreRenderSystems();
+		for (size_t i = 0; i < m_LoadedScenes.size(); ++i) {
+			auto scene = m_LoadedScenes[i];
+			if (scene && scene->IsLoaded()) scene->OnPreRenderSystems();
+		}
 	}
 
 	void SceneManager::FixedUpdateScenes() {
-		LoadedSceneList scenes = m_LoadedScenes;
-		for (auto& scene : scenes) if (scene && scene->IsLoaded()) scene->FixedUpdateSystems();
+		for (size_t i = 0; i < m_LoadedScenes.size(); ++i) {
+			auto scene = m_LoadedScenes[i];
+			if (scene && scene->IsLoaded()) scene->FixedUpdateSystems();
+		}
 	}
 
 	void SceneManager::InitializeStartupScenes() {

@@ -147,6 +147,29 @@ namespace Axiom {
 		void  (*BoxCollider2D_GetCenter)(uint64_t entityID, float* outX, float* outY);
 		void  (*BoxCollider2D_SetEnabled)(uint64_t entityID, int enabled);
 
+		// ── CircleCollider2D ─────────────────────────────────────────
+		float (*CircleCollider2D_GetRadius)(uint64_t entityID);
+		void  (*CircleCollider2D_SetRadius)(uint64_t entityID, float radius);
+		void  (*CircleCollider2D_GetCenter)(uint64_t entityID, float* outX, float* outY);
+		void  (*CircleCollider2D_SetCenter)(uint64_t entityID, float x, float y);
+		void  (*CircleCollider2D_SetEnabled)(uint64_t entityID, int enabled);
+
+		// ── PolygonCollider2D ────────────────────────────────────────
+		// Vertex count, world-space vertex copy-out, and a custom hull setter
+		// (mirrors Physics2D_OverlapPolygon's `points + count` interleaved-floats convention).
+		int   (*PolygonCollider2D_GetVertexCount)(uint64_t entityID);
+		// Copies up to maxOut interleaved floats (x,y pairs) of world-space
+		// vertices into outPoints; returns the number of vertices actually written.
+		int   (*PolygonCollider2D_GetWorldPoints)(uint64_t entityID, float* outPoints, int maxOut);
+		// `points` is interleaved x,y; pointCount must be in [3, B2_MAX_POLYGON_VERTICES (8)].
+		void  (*PolygonCollider2D_SetPoints)(uint64_t entityID, const float* points, int pointCount);
+		void  (*PolygonCollider2D_SetSides)(uint64_t entityID, int sides);
+		void  (*PolygonCollider2D_GetCenter)(uint64_t entityID, float* outX, float* outY);
+		void  (*PolygonCollider2D_SetCenter)(uint64_t entityID, float x, float y);
+		void  (*PolygonCollider2D_GetSize)(uint64_t entityID, float* outX, float* outY);
+		void  (*PolygonCollider2D_SetSize)(uint64_t entityID, float x, float y);
+		void  (*PolygonCollider2D_SetEnabled)(uint64_t entityID, int enabled);
+
 		// ── AudioSource ──────────────────────────────────────────────
 		void  (*AudioSource_Play)(uint64_t entityID);
 		void  (*AudioSource_Pause)(uint64_t entityID);

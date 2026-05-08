@@ -32,6 +32,7 @@ namespace Axiom {
 	}
 
 	void BoxCollider2DComponent::SetEnabled(bool enabled) {
+		if (!b2Body_IsValid(m_BodyId)) return;
 		if (enabled)
 			b2Body_Enable(m_BodyId);
 		else
@@ -74,6 +75,7 @@ namespace Axiom {
 	}
 
 	Vec2 BoxCollider2DComponent::GetScale() const {
+		if (!b2Shape_IsValid(m_ShapeId)) return Vec2{ 0.0f, 0.0f };
 		b2ShapeType shapeType = b2Shape_GetType(m_ShapeId);
 
 		AIM_ASSERT(shapeType == b2_polygonShape, AxiomErrorCode::Undefined, "This b2shape type isn't type of b2_polygonShape");
@@ -130,6 +132,7 @@ namespace Axiom {
 	}
 
 	Vec2 BoxCollider2DComponent::GetCenter() const {
+		if (!b2Shape_IsValid(m_ShapeId)) return Vec2{ 0.0f, 0.0f };
 		b2Polygon polygon = b2Shape_GetPolygon(m_ShapeId);
 		return Vec2(polygon.centroid.x, polygon.centroid.y);
 	}

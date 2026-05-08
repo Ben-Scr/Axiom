@@ -116,6 +116,8 @@ public class Entity : IEquatable<Entity>
         { typeof(Camera2D),              "Camera 2D" },
         { typeof(Rigidbody2D),           "Rigidbody 2D" },
         { typeof(BoxCollider2D),         "Box Collider 2D" },
+        { typeof(CircleCollider2D),      "Circle Collider 2D" },
+        { typeof(PolygonCollider2D),     "Polygon Collider 2D" },
         { typeof(AudioSource),           "Audio Source" },
         { typeof(FastBody2D),            "Fast Body 2D" },
         { typeof(FastBoxCollider2D),     "Fast Box Collider 2D" },

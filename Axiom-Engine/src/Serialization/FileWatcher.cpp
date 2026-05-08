@@ -129,12 +129,28 @@ namespace Axiom {
 		const int pollIntervalMs = std::max(50, static_cast<int>(pollIntervalSeconds * 1000.0f));
 		m_PollIntervalMs.store(pollIntervalMs);
 
-		if (!m_PendingChanges.exchange(false) || !m_Callback) {
+		if (!m_PendingChanges.exchange(false)) {
+			return;
+		}
+
+		// Snapshot the callback under the state lock before invoking it. Without
+		// the lock, the worker thread could mid-Poll mutate m_Callback (e.g. via
+		// Stop()), leaving us with a torn std::function — and the callback itself
+		// may run code that mutates other watcher state, which would race the
+		// worker without a quiesce point. We do NOT hold the lock across the
+		// invocation: callbacks frequently re-enter the file system / scene
+		// system and a held lock would invite deadlocks.
+		Callback callbackCopy;
+		{
+			std::scoped_lock<std::mutex> lock(m_StateMutex);
+			callbackCopy = m_Callback;
+		}
+		if (!callbackCopy) {
 			return;
 		}
 
 		AIM_CORE_INFO_TAG("FileWatcher", "Changes detected in {}", m_WatchDescription);
-		m_Callback();
+		callbackCopy();
 	}
 
 	void FileWatcher::WorkerMain() {
@@ -290,11 +306,34 @@ namespace Axiom {
 	FileWatcher::Snapshot FileWatcher::BuildSnapshot() const {
 		Snapshot snapshot;
 
-		auto recordFile = [&](const std::filesystem::directory_entry& entry, std::error_code& ec) {
+		auto recordFile = [&](const std::filesystem::directory_entry& entry,
+				const std::filesystem::path& watchRoot, std::error_code& ec) {
 			if (!entry.is_regular_file(ec) || ec || !MatchesFile(entry.path())) {
 				ec.clear();
 				return;
 			}
+
+			// Symlink-escape guard: a malicious or unintended symlink inside the
+			// watched tree could resolve to a file outside the asset root. Resolve
+			// the path canonically and reject if it sits outside `watchRoot`.
+			std::error_code resolveEc;
+			std::filesystem::path resolved = std::filesystem::weakly_canonical(entry.path(), resolveEc);
+			if (resolveEc) {
+				resolved = entry.path();
+				resolveEc.clear();
+			}
+			std::filesystem::path resolvedRoot = std::filesystem::weakly_canonical(watchRoot, resolveEc);
+			if (resolveEc) {
+				resolvedRoot = watchRoot;
+			}
+			const std::string resolvedStr = resolved.string();
+			const std::string rootStr = resolvedRoot.string();
+			if (!rootStr.empty() && (resolvedStr.size() < rootStr.size() ||
+				resolvedStr.compare(0, rootStr.size(), rootStr) != 0)) {
+				ec.clear();
+				return;
+			}
+
 			const std::string key = NormalizeKey(entry.path());
 			const std::filesystem::file_time_type writeTime = entry.last_write_time(ec);
 			if (ec) {
@@ -331,7 +370,7 @@ namespace Axiom {
 							continue;
 						}
 
-						recordFile(*it, ec);
+						recordFile(*it, target.Path, ec);
 					}
 				} else {
 					for (std::filesystem::directory_iterator it(target.Path, kDirectoryOptions, ec), end;
@@ -345,7 +384,7 @@ namespace Axiom {
 							ec.clear();
 							continue;
 						}
-						recordFile(*it, ec);
+						recordFile(*it, target.Path, ec);
 					}
 				}
 

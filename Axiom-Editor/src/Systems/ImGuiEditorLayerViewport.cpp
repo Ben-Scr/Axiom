@@ -13,6 +13,7 @@
 #include "Graphics/Gizmo.hpp"
 #include "Graphics/Renderer2D.hpp"
 #include "Graphics/TextureManager.hpp"
+#include "Gui/GuiRenderer.hpp"
 #include "Gui/EditorIcons.hpp"
 #include "Math/Trigonometry.hpp"
 #include "Math/VectorMath.hpp"
@@ -74,6 +75,22 @@ namespace Axiom {
 			GizmoRenderer2D::RenderWithVP(vp, layerMask);
 		}
 
+		// Screen-space UI must paint into this panel's FBO (not the OS
+		// window backbuffer that ImGui will cover). The auto BeginFrame
+		// path is skipped in editor mode, so we drive RenderScene here
+		// while the FBO is still bound. UI lays on top of sprites and
+		// gizmos by virtue of running last in this pass.
+		if (auto* gui = app->GetGuiRenderer()) {
+			if (onlyPassedScene) {
+				gui->RenderScene(scene);
+			}
+			else {
+				SceneManager::Get().ForeachLoadedScene([&](Scene& s) {
+					gui->RenderScene(s);
+					});
+			}
+		}
+
 		glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
 		auto* window = Application::GetWindow();
@@ -115,6 +132,37 @@ namespace Axiom {
 				Gizmo::SetColor(Color(0.20f, 1.0f, 0.35f, 1.0f));
 				Gizmo::SetLineWidth(2.0f);
 				Gizmo::DrawSquare(center, collider.GetScale(), rotationDegrees);
+			}
+		}
+
+		if (scene.HasComponent<CircleCollider2DComponent>(m_SelectedEntity)) {
+			auto& collider = scene.GetComponent<CircleCollider2DComponent>(m_SelectedEntity);
+			if (collider.IsValid()) {
+				const Vec2 center = transform.Position + Rotated(collider.GetCenter(), transform.Rotation);
+				Gizmo::SetColor(Color(0.20f, 1.0f, 0.35f, 1.0f));
+				Gizmo::SetLineWidth(2.0f);
+				Gizmo::DrawCircle(center, collider.GetRadius());
+			}
+		}
+
+		if (scene.HasComponent<PolygonCollider2DComponent>(m_SelectedEntity)) {
+			auto& collider = scene.GetComponent<PolygonCollider2DComponent>(m_SelectedEntity);
+			if (collider.IsValid()) {
+				// Outline by drawing line segments between consecutive world-space
+				// vertices — Box2D's GetPolygon already applies the offset, scale,
+				// and any custom hull, so we just need to project through the
+				// entity's rotation to get the on-screen position.
+				const std::vector<Vec2> worldPoints = collider.GetWorldPoints();
+				if (worldPoints.size() >= 3) {
+					Gizmo::SetColor(Color(0.20f, 1.0f, 0.35f, 1.0f));
+					Gizmo::SetLineWidth(2.0f);
+					const float rot = transform.Rotation;
+					for (size_t i = 0; i < worldPoints.size(); ++i) {
+						const Vec2 a = transform.Position + Rotated(worldPoints[i], rot);
+						const Vec2 b = transform.Position + Rotated(worldPoints[(i + 1) % worldPoints.size()], rot);
+						Gizmo::DrawLine(a, b);
+					}
+				}
 			}
 		}
 
@@ -483,6 +531,18 @@ namespace Axiom {
 					canvasMin.x + (viewportSize.x - renderSize.x) * 0.5f,
 					canvasMin.y + (viewportSize.y - renderSize.y) * 0.5f);
 				const ImVec2 imageMax(imageMin.x + renderSize.x, imageMin.y + renderSize.y);
+
+				// Publish the panel's pixel rect so engine UI systems
+				// (UILayoutSystem, UIEventSystem, GuiRenderer) resolve in
+				// panel-relative coordinates instead of full-OS-window
+				// coordinates. Without this, mouse hit-tests miss widgets
+				// because the rendered position (panel-centered) differs
+				// from the layout-resolved position (window-centered).
+				Window::SetUIRegion(
+					static_cast<int>(imageMin.x),
+					static_cast<int>(imageMin.y),
+					static_cast<int>(renderSize.x),
+					static_cast<int>(renderSize.y));
 
 				drawList->AddImage(
 					static_cast<ImTextureID>(static_cast<intptr_t>(m_GameViewFBO.ColorTextureId)),

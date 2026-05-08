@@ -29,6 +29,14 @@ namespace Axiom {
 			const Vec2& parentMin, const Vec2& parentMax,
 			float parentRotation)
 		{
+			// Inverted anchors silently produce negative widths/heights, which
+			// cascade into garbled or invisible UI elements with no error. Catch
+			// the authoring mistake in non-shipping builds; clamp at runtime so
+			// production doesn't crash on malformed scenes.
+			AIM_ASSERT(rect.AnchorMin.x <= rect.AnchorMax.x && rect.AnchorMin.y <= rect.AnchorMax.y,
+				AxiomErrorCode::InvalidValue,
+				"RectTransform2D AnchorMin must be <= AnchorMax (inverted anchors render as negative-size rects)");
+
 			const Vec2 parentSize{ parentMax.x - parentMin.x, parentMax.y - parentMin.y };
 
 			// Anchor span: the bottom-left and top-right of the anchor
@@ -122,14 +130,32 @@ namespace Axiom {
 		// the UI is screen-space and must not move when the camera moves.
 		// We always use the window's framebuffer-pixel size so DPI scaling
 		// works the same way as everything else in the engine.
-		Window* window = Application::GetWindow();
-		Viewport* vp = window ? Window::GetMainViewport() : nullptr;
-		if (!vp || vp->GetWidth() <= 0 || vp->GetHeight() <= 0) {
-			return;
+		//
+		// In editor mode the UI is rendered into a sub-panel of the OS
+		// window; the editor publishes that panel's pixel region via
+		// Window::SetUIRegion so layout resolves against the same size
+		// the renderer (and hit-tester) use. Without this, the layout
+		// would be sized to the full OS window while only a sub-rect is
+		// actually visible, putting widgets far outside the panel.
+		const Window::UIRegion uiRegion = Window::GetUIRegion();
+		int vpW = 0;
+		int vpH = 0;
+		if (uiRegion.IsActive()) {
+			vpW = uiRegion.Width;
+			vpH = uiRegion.Height;
+		}
+		else {
+			Window* window = Application::GetWindow();
+			Viewport* vp = window ? Window::GetMainViewport() : nullptr;
+			if (!vp || vp->GetWidth() <= 0 || vp->GetHeight() <= 0) {
+				return;
+			}
+			vpW = vp->GetWidth();
+			vpH = vp->GetHeight();
 		}
 
-		const float halfW = static_cast<float>(vp->GetWidth()) * 0.5f;
-		const float halfH = static_cast<float>(vp->GetHeight()) * 0.5f;
+		const float halfW = static_cast<float>(vpW) * 0.5f;
+		const float halfH = static_cast<float>(vpH) * 0.5f;
 		const Vec2 windowMin{ -halfW, -halfH };
 		const Vec2 windowMax{ +halfW, +halfH };
 

@@ -3,6 +3,8 @@
 #include <Components/Physics/Rigidbody2DComponent.hpp>
 #include <Components/Physics/FastBody2DComponent.hpp>
 #include <Components/Physics/BoxCollider2DComponent.hpp>
+#include <Components/Physics/CircleCollider2DComponent.hpp>
+#include <Components/Physics/PolygonCollider2DComponent.hpp>
 #include <Components/General/Transform2DComponent.hpp>
 #include <Components/Tags.hpp>
 
@@ -29,14 +31,28 @@ namespace Axiom {
 	}
 
 	void PhysicsSystem2D::SyncTransformsToPhysics() {
-		// Pre-step sync. BoxCollider polygon FIRST so its dirty-read
-		// happens before the body loops clear the dirty flag.
+		// Pre-step sync. Collider shape rebuild runs FIRST so the dirty-read
+		// happens before the body loops clear the dirty flag — otherwise a
+		// rigidbody's body-sync would race the polygon/circle rebuild and the
+		// collider would lag a frame behind the transform.
 		SceneManager::Get().ForeachLoadedScene([](Scene& scene) {
 			auto& registry = scene.GetRegistry();
 
 			for (auto [ent, box, tf] : registry.view<BoxCollider2DComponent, Transform2DComponent>(entt::exclude<DisabledTag>).each()) {
 				if (tf.IsDirty() && box.IsValid()) {
 					box.SyncWithTransform(scene);
+				}
+			}
+
+			for (auto [ent, circle, tf] : registry.view<CircleCollider2DComponent, Transform2DComponent>(entt::exclude<DisabledTag>).each()) {
+				if (tf.IsDirty() && circle.IsValid()) {
+					circle.SyncWithTransform(scene);
+				}
+			}
+
+			for (auto [ent, poly, tf] : registry.view<PolygonCollider2DComponent, Transform2DComponent>(entt::exclude<DisabledTag>).each()) {
+				if (tf.IsDirty() && poly.IsValid()) {
+					poly.SyncWithTransform(scene);
 				}
 			}
 
@@ -56,6 +72,16 @@ namespace Axiom {
 
 			// Clear dirty for collider-only entities (no body sync touched them).
 			for (auto [ent, box, tf] : registry.view<BoxCollider2DComponent, Transform2DComponent>(entt::exclude<DisabledTag, Rigidbody2DComponent, FastBody2DComponent>).each()) {
+				if (tf.IsDirty()) {
+					tf.ClearDirty();
+				}
+			}
+			for (auto [ent, circle, tf] : registry.view<CircleCollider2DComponent, Transform2DComponent>(entt::exclude<DisabledTag, Rigidbody2DComponent, FastBody2DComponent>).each()) {
+				if (tf.IsDirty()) {
+					tf.ClearDirty();
+				}
+			}
+			for (auto [ent, poly, tf] : registry.view<PolygonCollider2DComponent, Transform2DComponent>(entt::exclude<DisabledTag, Rigidbody2DComponent, FastBody2DComponent>).each()) {
 				if (tf.IsDirty()) {
 					tf.ClearDirty();
 				}

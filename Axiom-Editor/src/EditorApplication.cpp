@@ -39,7 +39,13 @@ public:
 		config.WindowSpecification = WindowSpecification(0, 0, title, true, true, true);
 		config.EnableAudio = true;
 		config.EnableGizmoRenderer = true;
-		config.EnableGuiRenderer = false;
+		// GuiRenderer is the screen-space UI pass for RectTransform2D
+		// entities (Image, TextRendererComponent in UI mode, dropdown
+		// popups). The editor needs it on so the loaded scene's UI
+		// shows up in Editor View / Game View — historical "false" here
+		// dates back to when this flag controlled engine-owned ImGui
+		// plumbing, which it no longer does.
+		config.EnableGuiRenderer = true;
 		config.EnablePhysics2D = true;
 		config.SetWindowIcon = true;
 		config.UseTargetFrameRateForMainLoop = false;

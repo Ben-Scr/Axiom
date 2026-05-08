@@ -14,6 +14,7 @@
 #include "Graphics/Renderer2D.hpp"
 #include "Graphics/GizmoRenderer.hpp"
 #include "Graphics/Gizmo.hpp"
+#include "Gui/GuiRenderer.hpp"
 #include "Scene/Scene.hpp"
 #include "Scene/SceneManager.hpp"
 #include "Scene/ComponentRegistry.hpp"
@@ -254,6 +255,13 @@ namespace Axiom {
 		if (app.GetRenderer2D()) {
 			app.GetRenderer2D()->SetSkipBeginFrameRender(true);
 		}
+		// UI must render *into* the per-panel FBO (Editor / Game View),
+		// not the OS window backbuffer that ImGui will paint over. Skip
+		// the auto BeginFrame render and drive RenderScene manually from
+		// RenderSceneIntoFBO while the panel's FBO is bound.
+		if (app.GetGuiRenderer()) {
+			app.GetGuiRenderer()->SetSkipBeginFrameRender(true);
+		}
 
 		if (m_LogSubscriptionId.value != 0) {
 			Log::OnLog.Remove(m_LogSubscriptionId);
@@ -317,6 +325,26 @@ namespace Axiom {
 		}
 
 		Scene& scene = *activeScene;
+
+		// Per-frame stale-handle sweep: the inspector / hierarchy hold raw entt
+		// handles across frames. EnTT's version field protects most reads (handle
+		// recycling bumps the version, IsValid catches it), but a leftover stale
+		// selection still confuses anything that doesn't IsValid-gate. Clear here
+		// rather than peppering every consumer with checks.
+		if (m_SelectedEntity != entt::null && !scene.IsValid(m_SelectedEntity)) {
+			m_SelectedEntity = entt::null;
+		}
+		if (m_PressedEntity != entt::null && !scene.IsValid(m_PressedEntity)) {
+			m_PressedEntity = entt::null;
+		}
+		if (!m_SelectedEntities.empty()) {
+			auto isStale = [&scene](EntityHandle h) {
+				return h == entt::null || !scene.IsValid(h);
+			};
+			m_SelectedEntities.erase(
+				std::remove_if(m_SelectedEntities.begin(), m_SelectedEntities.end(), isStale),
+				m_SelectedEntities.end());
+		}
 		const bool hasShortcutFocus = HasEntityShortcutFocus();
 		const bool hasEntitySelection = !GetSelectedEntities(scene).empty();
 
@@ -1138,9 +1166,15 @@ namespace Axiom {
 				finishCreated(created);
 			}
 			if (ImGui::MenuItem("Text")) {
-				Entity created = scene.CreateEntity("Text");
-				created.AddComponent<RectTransform2DComponent>();
-				created.AddComponent<TextRendererComponent>();
+				// Route through CreateWith (raw CreateEntityHandle) so the
+				// entity isn't seeded with a Transform2DComponent — UI text
+				// belongs on a RectTransform2D, and Transform2D conflicts
+				// with it (declared via DeclareConflict in BuiltInComponent
+				// Registration). Mirrors how the other UI presets are built.
+				Entity created = EntityHelper::CreateWith<RectTransform2DComponent, TextRendererComponent>(scene);
+				if (!created.HasComponent<NameComponent>()) {
+					created.AddComponent<NameComponent>(NameComponent("Text"));
+				}
 				finishCreated(created);
 			}
 			ImGui::Separator();
@@ -2128,8 +2162,7 @@ namespace Axiom {
 			if (!enabledSample.second) ImGui::PopItemFlag();
 			if (enabledChanged) {
 				for (Entity& e : selectedEntities) {
-					if (isEnabled && e.HasComponent<DisabledTag>()) e.RemoveComponent<DisabledTag>();
-					else if (!isEnabled && !e.HasComponent<DisabledTag>()) e.AddComponent<DisabledTag>();
+					e.SetEnabled(isEnabled);
 				}
 				scene.MarkDirty();
 			}

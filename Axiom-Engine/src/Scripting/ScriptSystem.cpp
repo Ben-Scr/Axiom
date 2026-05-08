@@ -625,6 +625,54 @@ namespace Axiom {
 			return entityID;
 		}
 
+		struct ManagedScriptTeardownState {
+			uint32_t Handle = 0;
+			bool WasEnabled = false;
+		};
+
+		struct NativeScriptTeardownState {
+			NativeScript* Instance = nullptr;
+		};
+
+		ManagedScriptTeardownState CaptureManagedTeardownState(const ScriptInstance& instance)
+		{
+			return {
+				instance.GetGCHandle(),
+				instance.HasEnabled()
+			};
+		}
+
+		NativeScriptTeardownState CaptureNativeTeardownState(const ScriptInstance& instance)
+		{
+			return { instance.GetNativePtr() };
+		}
+
+		void InvokeManagedScriptTeardown(Scene& scene, const ManagedScriptTeardownState& state)
+		{
+			if (state.Handle == 0 || !ScriptEngine::IsInitialized()) {
+				return;
+			}
+
+			ScriptSceneScope sceneScope(scene);
+			if (state.WasEnabled) {
+				ScriptEngine::InvokeOnDisable(state.Handle);
+			}
+			ScriptEngine::InvokeOnDestroy(state.Handle);
+			ScriptEngine::DestroyScriptInstance(state.Handle);
+		}
+
+		void InvokeNativeScriptTeardown(Scene& scene, const NativeScriptTeardownState& state, NativeScriptHost& nativeHost)
+		{
+			if (!state.Instance) {
+				return;
+			}
+
+			ScriptSceneScope sceneScope(scene);
+			if (nativeHost.IsLoaded()) {
+				nativeHost.DestroyInstance(state.Instance);
+			}
+		}
+
 		void TeardownManagedScriptInstance(Scene& scene, ScriptInstance& instance)
 		{
 			if (!instance.HasManagedInstance()) {
@@ -637,16 +685,9 @@ namespace Axiom {
 			// engine-side ScriptInstance from referencing a now-stale managed
 			// object on the next frame. Only the actual managed callbacks are
 			// gated on IsInitialized — the bookkeeping must not be.
-			if (ScriptEngine::IsInitialized()) {
-				ScriptSceneScope sceneScope(scene);
-				if (instance.HasEnabled()) {
-					ScriptEngine::InvokeOnDisable(instance.GetGCHandle());
-					instance.MarkDisabled();
-				}
-				ScriptEngine::InvokeOnDestroy(instance.GetGCHandle());
-				ScriptEngine::DestroyScriptInstance(instance.GetGCHandle());
-			}
+			const ManagedScriptTeardownState state = CaptureManagedTeardownState(instance);
 			instance.Unbind();
+			InvokeManagedScriptTeardown(scene, state);
 		}
 
 		void TeardownNativeScriptInstance(Scene& scene, ScriptInstance& instance, NativeScriptHost& nativeHost)
@@ -655,11 +696,9 @@ namespace Axiom {
 				return;
 			}
 
-			ScriptSceneScope sceneScope(scene);
-			if (nativeHost.IsLoaded()) {
-				nativeHost.DestroyInstance(instance.GetNativePtr());
-			}
+			const NativeScriptTeardownState state = CaptureNativeTeardownState(instance);
 			instance.Unbind();
+			InvokeNativeScriptTeardown(scene, state, nativeHost);
 		}
 
 		template<typename Fn>
@@ -834,6 +873,18 @@ namespace Axiom {
 					return;
 				}
 			}
+		}
+
+		ScriptInstance* FindManagedScriptInstance(Scene& scene, EntityHandle entity, uint32_t handle)
+		{
+			if (handle == 0 || !scene.IsValid(entity) || !scene.HasComponent<ScriptComponent>(entity)) {
+				return nullptr;
+			}
+
+			auto& scripts = scene.GetComponent<ScriptComponent>(entity).Scripts;
+			auto it = std::find_if(scripts.begin(), scripts.end(),
+				[handle](const ScriptInstance& instance) { return instance.GetGCHandle() == handle; });
+			return it != scripts.end() ? &(*it) : nullptr;
 		}
 	}
 
@@ -1221,8 +1272,6 @@ namespace Axiom {
 			return;
 		}
 
-		ScriptSceneScope sceneScope(scene);
-
 		// Snapshot the entity list BEFORE invoking any user OnDisable/OnDestroy. The
 		// rest of this engine carefully uses CollectScriptEntities + index-based
 		// re-fetch precisely because user callbacks can add/remove ScriptComponent,
@@ -1239,18 +1288,35 @@ namespace Axiom {
 		for (EntityHandle entity : entities) {
 			if (!scene.GetRegistry().valid(entity)) continue;
 			if (!scene.GetRegistry().all_of<ScriptComponent>(entity)) continue;
+
+			std::vector<ManagedScriptTeardownState> scripts;
 			auto& scriptComp = scene.GetRegistry().get<ScriptComponent>(entity);
-			// Index-based inner loop: a callback may push to or shrink Scripts.
-			for (size_t i = 0; i < scriptComp.Scripts.size(); ++i) {
-				TeardownManagedScriptInstance(scene, scriptComp.Scripts[i]);
+			scripts.reserve(scriptComp.Scripts.size());
+			for (const ScriptInstance& instance : scriptComp.Scripts) {
+				if (instance.HasManagedInstance()) {
+					scripts.push_back(CaptureManagedTeardownState(instance));
+				}
+			}
+
+			for (const ManagedScriptTeardownState& script : scripts) {
+				if (script.Handle == 0) continue;
+				if (!scene.GetRegistry().valid(entity)) continue;
+				if (scene.GetRegistry().all_of<ScriptComponent>(entity)) {
+					auto& currentScripts = scene.GetRegistry().get<ScriptComponent>(entity).Scripts;
+					if (auto it = std::find_if(currentScripts.begin(), currentScripts.end(),
+						[handle = script.Handle](const ScriptInstance& instance) { return instance.GetGCHandle() == handle; });
+						it != currentScripts.end()) {
+						TeardownManagedScriptInstance(scene, *it);
+						continue;
+					}
+				}
 			}
 		}
+
 	}
 
 	void ScriptSystem::TeardownNativeScripts(Scene& scene)
 	{
-		ScriptSceneScope sceneScope(scene);
-
 		// Same snapshot pattern as TeardownManagedScripts above. Native OnDestroy
 		// can re-enter and destroy sibling entities; iterating an entt::view live
 		// would corrupt iteration mid-call.
@@ -1264,18 +1330,37 @@ namespace Axiom {
 		for (EntityHandle entity : entities) {
 			if (!scene.GetRegistry().valid(entity)) continue;
 			if (!scene.GetRegistry().all_of<ScriptComponent>(entity)) continue;
+
+			std::vector<NativeScriptTeardownState> scripts;
 			auto& scriptComp = scene.GetRegistry().get<ScriptComponent>(entity);
-			for (size_t i = 0; i < scriptComp.Scripts.size(); ++i) {
-				auto& instance = scriptComp.Scripts[i];
-				if (!instance.HasNativeInstance()) continue;
-				TeardownNativeScriptInstance(scene, instance, m_NativeHost);
+			scripts.reserve(scriptComp.Scripts.size());
+			for (const ScriptInstance& instance : scriptComp.Scripts) {
+				if (instance.HasNativeInstance()) {
+					scripts.push_back(CaptureNativeTeardownState(instance));
+				}
+			}
+
+			for (const NativeScriptTeardownState& script : scripts) {
+				if (!script.Instance) continue;
+				if (!scene.GetRegistry().valid(entity)) continue;
+				if (scene.GetRegistry().all_of<ScriptComponent>(entity)) {
+					auto& currentScripts = scene.GetRegistry().get<ScriptComponent>(entity).Scripts;
+					if (auto it = std::find_if(currentScripts.begin(), currentScripts.end(),
+						[ptr = script.Instance](const ScriptInstance& instance) { return instance.GetNativePtr() == ptr; });
+						it != currentScripts.end()) {
+						TeardownNativeScriptInstance(scene, *it, m_NativeHost);
+						continue;
+					}
+				}
 			}
 		}
+
 	}
 
 	bool ScriptSystem::RemoveScript(Entity entity, size_t index)
 	{
-		if (entity.GetScene() == nullptr) {
+		Scene* scene = entity.GetScene();
+		if (scene == nullptr) {
 			return false;
 		}
 
@@ -1288,19 +1373,15 @@ namespace Axiom {
 			return false;
 		}
 
-		ScriptInstance& instance = scriptComp.Scripts[index];
+		const ScriptInstance& instance = scriptComp.Scripts[index];
 		const std::string removedClassName = instance.GetClassName();
-
-		if (Scene* scene = entity.GetScene()) {
-			TeardownManagedScriptInstance(*scene, instance);
-			TeardownNativeScriptInstance(*scene, instance, m_NativeHost);
-		}
-		else {
-			instance.Unbind();
-		}
+		const ManagedScriptTeardownState managedState = CaptureManagedTeardownState(instance);
+		const NativeScriptTeardownState nativeState = CaptureNativeTeardownState(instance);
 
 		scriptComp.Scripts.erase(scriptComp.Scripts.begin() + static_cast<ptrdiff_t>(index));
 		RemovePendingFieldValuesForClass(scriptComp, removedClassName);
+		InvokeManagedScriptTeardown(*scene, managedState);
+		InvokeNativeScriptTeardown(*scene, nativeState, m_NativeHost);
 		return true;
 	}
 
@@ -1326,22 +1407,24 @@ namespace Axiom {
 		}
 
 		ScriptSceneScope sceneScope(*scene);
-		auto& scriptComp = entity.GetComponent<ScriptComponent>();
-		for (auto& instance : scriptComp.Scripts)
-		{
+		const EntityHandle entityHandle = entity.GetHandle();
+		ForEachScriptOnEntitySafe(*scene, entityHandle,
+			[enabled](ScriptComponent&, ScriptInstance& instance, size_t) -> bool {
 			if (!instance.HasManagedInstance()) {
-				continue;
+				return true;
 			}
 
+			const uint32_t handle = instance.GetGCHandle();
 			if (enabled && !instance.HasEnabled()) {
-				ScriptEngine::InvokeOnEnable(instance.GetGCHandle());
 				instance.MarkEnabled();
+				ScriptEngine::InvokeOnEnable(handle);
 			}
 			else if (!enabled && instance.HasEnabled()) {
-				ScriptEngine::InvokeOnDisable(instance.GetGCHandle());
 				instance.MarkDisabled();
+				ScriptEngine::InvokeOnDisable(handle);
 			}
-		}
+			return true;
+		});
 	}
 
 	namespace {
@@ -1633,18 +1716,25 @@ namespace Axiom {
 							return true;
 						}
 
+						const uint32_t handle = instance.GetGCHandle();
 						if (!instance.HasEnabled())
 						{
-							ScriptEngine::InvokeOnEnable(instance.GetGCHandle());
 							instance.MarkEnabled();
+							ScriptEngine::InvokeOnEnable(handle);
+							if (!FindManagedScriptInstance(scene, entity, handle)) {
+								return true;
+							}
 						}
 
 						if (!instance.HasStarted())
 						{
 							instance.MarkStarted();
-							ScriptEngine::InvokeStart(instance.GetGCHandle());
+							ScriptEngine::InvokeStart(handle);
+							if (!FindManagedScriptInstance(scene, entity, handle)) {
+								return true;
+							}
 						}
-						ScriptEngine::InvokeUpdate(instance.GetGCHandle());
+						ScriptEngine::InvokeUpdate(handle);
 					}
 					else if (instance.GetType() == ScriptType::Native)
 					{

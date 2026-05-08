@@ -50,6 +50,7 @@ namespace Axiom {
 		: m_SceneManager(std::make_unique<SceneManager>())
 		, m_FixedUpdateAccumulator{ 0 }
 	{
+		m_MainThreadId = std::this_thread::get_id();
 		Application::s_Instance = this;
 	}
 
@@ -62,6 +63,8 @@ namespace Axiom {
 
 	void Application::Run()
 	{
+		m_MainThreadId = std::this_thread::get_id();
+
 		if (m_ForceSingleInstance) {
 			static SingleInstance instance(m_Name);
 			AIM_ASSERT(!instance.IsAlreadyRunning(), AxiomErrorCode::Undefined, "An Instance of this app is already running!");
@@ -160,8 +163,10 @@ namespace Axiom {
 						while (m_FixedUpdateAccumulator >= fixedDt) {
 							if (!IsEnginePaused() && !m_IsGameplayPaused) {
 								BeginFixedFrame();
-								// Snapshot layer order so OnFixedUpdate that pushes/pops
-								// can't shift the indices we're iterating.
+								// Dispatch guard defers any PopLayer/PopOverlay to the end of
+								// the snapshot so a popped sibling's memory stays alive while
+								// we're still iterating raw pointers into it.
+								LayerDispatchGuard dispatchGuard(m_LayerStack);
 								for (Layer* layer : SnapshotLayerOrder()) {
 									layer->OnFixedUpdate(*this, m_Time.GetUnscaledFixedDeltaTime());
 								}
@@ -407,9 +412,13 @@ namespace Axiom {
 
 			Update();
 
-			// Snapshot layer order so OnUpdate that pushes/pops can't shift indices.
-			for (Layer* layer : SnapshotLayerOrder()) {
-				layer->OnUpdate(*this, m_Time.GetDeltaTime());
+			{
+				// Dispatch guard defers PopLayer/PopOverlay to scope exit so popped
+				// siblings stay live for the rest of this iteration.
+				LayerDispatchGuard updateGuard(m_LayerStack);
+				for (Layer* layer : SnapshotLayerOrder()) {
+					layer->OnUpdate(*this, m_Time.GetDeltaTime());
+				}
 			}
 
 			if (gameplayActive && m_SceneManager) m_SceneManager->UpdateScenes();
@@ -418,8 +427,11 @@ namespace Axiom {
 			if (m_PhysicsSystem2D) m_PhysicsSystem2D->Update();
 
 			if (m_SceneManager) m_SceneManager->OnPreRenderScenes();
-			for (Layer* layer : SnapshotLayerOrder()) {
-				AXIOM_TRY_CATCH_LOG(layer->OnPreRender(*this));
+			{
+				LayerDispatchGuard preRenderGuard(m_LayerStack);
+				for (Layer* layer : SnapshotLayerOrder()) {
+					AXIOM_TRY_CATCH_LOG(layer->OnPreRender(*this));
+				}
 			}
 
 			if (m_Renderer2D)
@@ -464,8 +476,9 @@ namespace Axiom {
 			return false;
 			});
 
-		// Snapshot layer order in reverse so OnEvent that pushes/pops can't shift
-		// indices and silently skip a sibling layer (the bug fixed by this snapshot).
+		// Dispatch guard so OnEvent that pushes/pops a sibling can't shift indices
+		// or invalidate a sibling pointer mid-iteration.
+		LayerDispatchGuard eventGuard(m_LayerStack);
 		for (Layer* layer : SnapshotLayerOrderReversed()) {
 			if (event.Handled) {
 				break;
@@ -540,14 +553,21 @@ namespace Axiom {
 		if (m_Renderer2D)
 			AXIOM_TRY_CATCH_LOG(m_Renderer2D->EndFrame());
 
+		LayerDispatchGuard postRenderGuard(m_LayerStack);
 		for (Layer* layer : SnapshotLayerOrder()) {
 			AXIOM_TRY_CATCH_LOG(layer->OnPostRender(*this));
 		}
 
 		if (m_GuiRenderer)
 			AXIOM_TRY_CATCH_LOG(m_GuiRenderer->EndFrame());
-		if (m_GizmoRenderer2D)
+		if (m_GizmoRenderer2D) {
+			// Explicit gizmo pass — used to be a hidden draw inside EndFrame.
+			// Now declared as its own step in the render pipeline.
+			if (Gizmo::GetShowInRuntime()) {
+				AXIOM_TRY_CATCH_LOG(m_GizmoRenderer2D->Render(GizmoLayerMask::Shared));
+			}
 			AXIOM_TRY_CATCH_LOG(m_GizmoRenderer2D->EndFrame());
+		}
 
 		if (m_Window) m_Window->SwapBuffers();
 	}
@@ -573,6 +593,7 @@ namespace Axiom {
 		};
 
 		RefreshRenderGuard guard(*this);
+		LayerDispatchGuard refreshGuard(m_LayerStack);
 
 		if (m_SceneManager) AXIOM_TRY_CATCH_LOG(m_SceneManager->OnPreRenderScenes());
 		for (Layer* layer : SnapshotLayerOrder()) {
@@ -595,6 +616,9 @@ namespace Axiom {
 
 		if (m_GizmoRenderer2D) {
 			AXIOM_TRY_CATCH_LOG(m_GizmoRenderer2D->BeginFrame());
+			if (Gizmo::GetShowInRuntime()) {
+				AXIOM_TRY_CATCH_LOG(m_GizmoRenderer2D->Render(GizmoLayerMask::Shared));
+			}
 			AXIOM_TRY_CATCH_LOG(m_GizmoRenderer2D->EndFrame());
 		}
 
@@ -644,15 +668,23 @@ namespace Axiom {
 
 		// Snapshot raw pointers — layer OnDetach may pop other layers
 		// (legitimate during shutdown), and we need to detach each one
-		// exactly once regardless of mutations.
-		std::vector<Layer*> detachOrder;
-		detachOrder.reserve(m_LayerStack.Size());
-		for (size_t i = m_LayerStack.Size(); i > 0; --i) {
-			Layer* layer = m_LayerStack.At(i - 1);
-			if (layer) detachOrder.push_back(layer);
-		}
-		for (Layer* layer : detachOrder) {
-			layer->OnDetach(*this);
+		// exactly once regardless of mutations. The dispatch guard makes
+		// any pop deferred for the duration of the loop, so popped layer
+		// memory stays live until we're done iterating.
+		{
+			LayerDispatchGuard detachGuard(m_LayerStack);
+			std::vector<Layer*> detachOrder;
+			detachOrder.reserve(m_LayerStack.Size());
+			for (size_t i = m_LayerStack.Size(); i > 0; --i) {
+				Layer* layer = m_LayerStack.At(i - 1);
+				if (layer) detachOrder.push_back(layer);
+			}
+			for (Layer* layer : detachOrder) {
+				if (m_LayerStack.IsPendingPop(layer)) {
+					continue;
+				}
+				layer->OnDetach(*this);
+			}
 		}
 		m_EventBus.Clear();
 		m_LayerStack.Clear();

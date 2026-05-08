@@ -3,6 +3,7 @@
 #include "Components/ComponentUtils.hpp"
 #include "Components/General/EntityMetaDataComponent.hpp"
 #include "Core/Export.hpp"
+#include <span>
 
 namespace Axiom {
 	class Scene;
@@ -111,10 +112,13 @@ namespace Axiom {
 		// Returns Entity::Null when this is a root.
 		Entity GetParent() const;
 
-		// Direct children only. Modifying the returned vector through the
-		// hierarchy component is unsafe — use SetParent for structural
-		// edits so the parent's child list stays in sync.
-		const std::vector<EntityHandle>& GetChildren() const;
+		// Direct children only. Returns a non-mutable view into the underlying
+		// HierarchyComponent::Children — structural edits must go through
+		// SetParent so the parent's child list and each child's parent pointer
+		// stay in sync. The previous overload returned `const vector&` which
+		// only documented immutability; a const_cast away from that reference
+		// would silently corrupt hierarchy invariants.
+		std::span<const EntityHandle> GetChildren() const;
 
 		bool HasParent() const;
 		bool IsAncestorOf(Entity other) const;

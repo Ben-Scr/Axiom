@@ -28,6 +28,8 @@
 #include "Components/Graphics/ImageComponent.hpp"
 #include "Components/Physics/Rigidbody2DComponent.hpp"
 #include "Components/Physics/BoxCollider2DComponent.hpp"
+#include "Components/Physics/CircleCollider2DComponent.hpp"
+#include "Components/Physics/PolygonCollider2DComponent.hpp"
 #include "Components/Physics/FastBody2DComponent.hpp"
 #include "Components/Physics/FastBoxCollider2DComponent.hpp"
 #include "Components/Physics/FastCircleCollider2DComponent.hpp"
@@ -145,6 +147,17 @@ namespace Axiom {
 
 	// Legacy string callbacks use this per-thread scratch buffer. Managed callers use
 	// the Buffer variants below so returned strings are copied into caller-owned memory.
+	//
+	// HAZARD: the const char* returned by every "no-buffer" binding below points into
+	// this thread-local. Managed code that holds the pointer past the next binding
+	// call on the same thread reads stale or different content. The Buffer variants
+	// (those whose C# signature ends with `out byte[]` or `(IntPtr, int)`) copy the
+	// string into caller-owned memory and are safe; the no-Buffer variants are kept
+	// only for backwards compatibility with older C# entry points.
+	//
+	// Migration plan: every legacy entry point should be marked [Obsolete] on the C#
+	// side and routed through its Buffer variant. Once no callers remain, delete the
+	// legacy thunks. Do not add new legacy-style bindings.
 	thread_local std::string s_StringReturnBuffer;
 
 	// C++ exceptions MUST NOT propagate across the C++/C# boundary — managed code
@@ -202,10 +215,14 @@ namespace Axiom {
 
 	void PopulateNonComponentBindings(NativeBindings& b);
 
+	// IsValid re-check: ResolveEntityReference can succeed at lookup time, but a
+	// script callback firing between resolution and the registry access may have
+	// destroyed the entity. Without IsValid, GetComponent walks a stale handle.
 	#define GET_COMPONENT(Type, entityID, failReturn) \
 		Scene* scene = nullptr; \
 		EntityHandle handle = entt::null; \
 		if (!ResolveEntityReference(entityID, scene, handle)) return failReturn; \
+		if (!scene->IsValid(handle)) return failReturn; \
 		if (!scene->HasComponent<Type>(handle)) return failReturn; \
 		auto& comp = scene->GetComponent<Type>(handle)
 
@@ -346,12 +363,7 @@ namespace Axiom {
 		const bool currentlyEnabled = !scene->HasComponent<DisabledTag>(handle);
 		if (shouldBeEnabled == currentlyEnabled) return;
 
-		if (shouldBeEnabled) {
-			scene->RemoveComponent<DisabledTag>(handle);
-		}
-		else {
-			scene->AddComponent<DisabledTag>(handle);
-		}
+		scene->GetEntity(handle).SetEnabled(shouldBeEnabled);
 		scene->MarkDirty();
 	}
 
@@ -1449,6 +1461,115 @@ namespace Axiom {
 		comp.SetEnabled(enabled != 0);
 	}
 
+	// ── CircleCollider2D ────────────────────────────────────────────────
+
+	static float Axiom_CircleCollider2D_GetRadius(uint64_t entityID)
+	{
+		GET_COMPONENT(CircleCollider2DComponent, entityID, 0.0f);
+		return comp.GetLocalRadius(*scene);
+	}
+
+	static void Axiom_CircleCollider2D_SetRadius(uint64_t entityID, float radius)
+	{
+		GET_COMPONENT(CircleCollider2DComponent, entityID, );
+		comp.SetRadius(radius, *scene);
+	}
+
+	static void Axiom_CircleCollider2D_GetCenter(uint64_t entityID, float* outX, float* outY)
+	{
+		GET_COMPONENT(CircleCollider2DComponent, entityID, (void)(*outX = 0, *outY = 0));
+		Vec2 c = comp.GetCenter(); *outX = c.x; *outY = c.y;
+	}
+
+	static void Axiom_CircleCollider2D_SetCenter(uint64_t entityID, float x, float y)
+	{
+		GET_COMPONENT(CircleCollider2DComponent, entityID, );
+		comp.SetCenter(Vec2{ x, y }, *scene);
+	}
+
+	static void Axiom_CircleCollider2D_SetEnabled(uint64_t entityID, int enabled)
+	{
+		GET_COMPONENT(CircleCollider2DComponent, entityID, );
+		comp.SetEnabled(enabled != 0);
+	}
+
+	// ── PolygonCollider2D ───────────────────────────────────────────────
+
+	static int Axiom_PolygonCollider2D_GetVertexCount(uint64_t entityID)
+	{
+		GET_COMPONENT(PolygonCollider2DComponent, entityID, 0);
+		return comp.GetVertexCount();
+	}
+
+	static int Axiom_PolygonCollider2D_GetWorldPoints(uint64_t entityID, float* outPoints, int maxOut)
+	{
+		if (!outPoints || maxOut <= 0) return 0;
+		GET_COMPONENT(PolygonCollider2DComponent, entityID, 0);
+
+		std::vector<Vec2> world = comp.GetWorldPoints();
+		const int writable = std::min(static_cast<int>(world.size()) * 2, maxOut);
+		// Pair pack: index i -> (outPoints[2i], outPoints[2i+1]) so the C# side
+		// can read it as a Span<Vector2> without an extra reshape pass.
+		for (int i = 0; i < writable / 2; ++i) {
+			outPoints[i * 2 + 0] = world[i].x;
+			outPoints[i * 2 + 1] = world[i].y;
+		}
+		return writable / 2;
+	}
+
+	static void Axiom_PolygonCollider2D_SetPoints(uint64_t entityID, const float* points, int pointCount)
+	{
+		if (!points) return;
+		GET_COMPONENT(PolygonCollider2DComponent, entityID, );
+		if (pointCount < PolygonCollider2DComponent::k_MinVertices ||
+			pointCount > PolygonCollider2DComponent::k_MaxVertices) {
+			return;
+		}
+
+		std::vector<Vec2> localPoints;
+		localPoints.reserve(static_cast<size_t>(pointCount));
+		for (int i = 0; i < pointCount; ++i) {
+			localPoints.push_back(Vec2{ points[i * 2], points[i * 2 + 1] });
+		}
+		comp.SetPoints(localPoints, *scene);
+	}
+
+	static void Axiom_PolygonCollider2D_SetSides(uint64_t entityID, int sides)
+	{
+		GET_COMPONENT(PolygonCollider2DComponent, entityID, );
+		comp.SetSides(sides, *scene);
+	}
+
+	static void Axiom_PolygonCollider2D_GetCenter(uint64_t entityID, float* outX, float* outY)
+	{
+		GET_COMPONENT(PolygonCollider2DComponent, entityID, (void)(*outX = 0, *outY = 0));
+		Vec2 c = comp.GetCenter(); *outX = c.x; *outY = c.y;
+	}
+
+	static void Axiom_PolygonCollider2D_SetCenter(uint64_t entityID, float x, float y)
+	{
+		GET_COMPONENT(PolygonCollider2DComponent, entityID, );
+		comp.SetCenter(Vec2{ x, y }, *scene);
+	}
+
+	static void Axiom_PolygonCollider2D_GetSize(uint64_t entityID, float* outX, float* outY)
+	{
+		GET_COMPONENT(PolygonCollider2DComponent, entityID, (void)(*outX = 1, *outY = 1));
+		Vec2 s = comp.GetSize(); *outX = s.x; *outY = s.y;
+	}
+
+	static void Axiom_PolygonCollider2D_SetSize(uint64_t entityID, float x, float y)
+	{
+		GET_COMPONENT(PolygonCollider2DComponent, entityID, );
+		comp.SetSize(Vec2{ x, y }, *scene);
+	}
+
+	static void Axiom_PolygonCollider2D_SetEnabled(uint64_t entityID, int enabled)
+	{
+		GET_COMPONENT(PolygonCollider2DComponent, entityID, );
+		comp.SetEnabled(enabled != 0);
+	}
+
 	// ── AudioSource ─────────────────────────────────────────────────────
 
 	static void Axiom_AudioSource_Play(uint64_t entityID) { GET_COMPONENT(AudioSourceComponent, entityID, ); AudioManager::PlayAudioSource(comp); }
@@ -2105,6 +2226,22 @@ namespace Axiom {
 		b.BoxCollider2D_GetScale = &Axiom_BoxCollider2D_GetScale;
 		b.BoxCollider2D_GetCenter = &Axiom_BoxCollider2D_GetCenter;
 		b.BoxCollider2D_SetEnabled = &Axiom_BoxCollider2D_SetEnabled;
+
+		b.CircleCollider2D_GetRadius = &Axiom_CircleCollider2D_GetRadius;
+		b.CircleCollider2D_SetRadius = &Axiom_CircleCollider2D_SetRadius;
+		b.CircleCollider2D_GetCenter = &Axiom_CircleCollider2D_GetCenter;
+		b.CircleCollider2D_SetCenter = &Axiom_CircleCollider2D_SetCenter;
+		b.CircleCollider2D_SetEnabled = &Axiom_CircleCollider2D_SetEnabled;
+
+		b.PolygonCollider2D_GetVertexCount = &Axiom_PolygonCollider2D_GetVertexCount;
+		b.PolygonCollider2D_GetWorldPoints = &Axiom_PolygonCollider2D_GetWorldPoints;
+		b.PolygonCollider2D_SetPoints = &Axiom_PolygonCollider2D_SetPoints;
+		b.PolygonCollider2D_SetSides = &Axiom_PolygonCollider2D_SetSides;
+		b.PolygonCollider2D_GetCenter = &Axiom_PolygonCollider2D_GetCenter;
+		b.PolygonCollider2D_SetCenter = &Axiom_PolygonCollider2D_SetCenter;
+		b.PolygonCollider2D_GetSize = &Axiom_PolygonCollider2D_GetSize;
+		b.PolygonCollider2D_SetSize = &Axiom_PolygonCollider2D_SetSize;
+		b.PolygonCollider2D_SetEnabled = &Axiom_PolygonCollider2D_SetEnabled;
 
 		b.AudioSource_Play = &Axiom_AudioSource_Play;
 		b.AudioSource_Pause = &Axiom_AudioSource_Pause;

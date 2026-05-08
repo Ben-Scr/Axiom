@@ -17,10 +17,7 @@
 
 namespace Axiom {
 	void EntityHelper::SetEnabled(Entity entity, bool enabled) {
-		if (!enabled && !entity.HasComponent<DisabledTag>())
-			entity.AddComponent<DisabledTag>();
-		else if (enabled && entity.HasComponent<DisabledTag>())
-			entity.RemoveComponent<DisabledTag>();
+		entity.SetEnabled(enabled);
 	}
 	bool EntityHelper::IsEnabled(Entity entity) {
 		return !entity.HasComponent<DisabledTag>();

@@ -94,9 +94,27 @@ namespace Axiom {
 		}
 		else if (shapeType == ShapeType::Circle)
 		{
-			float r = 0.25f * (transform.Scale.x + transform.Scale.y);
+			float r = 0.5f * std::max(std::abs(transform.Scale.x), std::abs(transform.Scale.y));
 			b2Circle circle = { b2Vec2{0,0}, r };
 			shapeId = b2CreateCircleShape(bodyId, &shapeDef, &circle);
+		}
+		else if (shapeType == ShapeType::Polygon)
+		{
+			// Default to a regular pentagon scaled by the entity's transform.
+			// Box2D requires convex hulls; a regular n-gon is always convex.
+			constexpr int kSides = 5;
+			constexpr float kPi = 3.14159265358979323846f;
+			b2Vec2 points[kSides];
+			const float baseRadius = 0.5f;
+			for (int i = 0; i < kSides; ++i) {
+				const float angle = -static_cast<float>(i) * (2.0f * kPi) / static_cast<float>(kSides) + kPi * 0.5f;
+				points[i] = b2Vec2{
+					std::cos(angle) * baseRadius * transform.Scale.x,
+					std::sin(angle) * baseRadius * transform.Scale.y };
+			}
+			b2Hull hull = b2ComputeHull(points, kSides);
+			b2Polygon polygon = b2MakePolygon(&hull, 0.0f);
+			shapeId = b2CreatePolygonShape(bodyId, &shapeDef, &polygon);
 		}
 
 
@@ -127,6 +145,43 @@ namespace Axiom {
 		}
 
 		m_BodyBindings.erase(b2StoreBodyId(bodyId));
+	}
+
+	void Box2DWorld::DestroyAllBodiesForScene(Scene* scene) {
+		if (scene == nullptr) {
+			return;
+		}
+
+		// Two-pass: collect first because b2DestroyBody invalidates the b2BodyId,
+		// and erasing the map entry mid-range invalidates iterators.
+		std::vector<uint64_t> stored;
+		stored.reserve(m_BodyBindings.size());
+		for (const auto& [stored_id, binding] : m_BodyBindings) {
+			if (binding.OwningScene == scene) {
+				stored.push_back(stored_id);
+			}
+		}
+
+		for (uint64_t id : stored) {
+			b2BodyId bodyId = b2LoadBodyId(id);
+			if (b2Body_IsValid(bodyId)) {
+				// Unregister every shape from the dispatcher before destroying the
+				// body so lingering b2ShapeId entries can't fire on recycled ids.
+				constexpr int kInlineShapes = 8;
+				b2ShapeId stack[kInlineShapes];
+				const int count = b2Body_GetShapeCount(bodyId);
+				if (count <= kInlineShapes) {
+					b2Body_GetShapes(bodyId, stack, count);
+					for (int i = 0; i < count; ++i) m_Dispatcher.UnregisterShape(stack[i]);
+				} else {
+					std::vector<b2ShapeId> heap(static_cast<size_t>(count));
+					b2Body_GetShapes(bodyId, heap.data(), count);
+					for (int i = 0; i < count; ++i) m_Dispatcher.UnregisterShape(heap[i]);
+				}
+				b2DestroyBody(bodyId);
+			}
+			m_BodyBindings.erase(id);
+		}
 	}
 
 	CollisionDispatcher& Box2DWorld::GetDispatcher() { return m_Dispatcher; }

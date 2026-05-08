@@ -20,6 +20,7 @@ namespace Axiom {
 	Window* Window::s_ActiveWindow = nullptr;
 	bool Window::s_IsVsync = true;
 	std::unique_ptr<Viewport> Window::s_MainViewport = nullptr;
+	Window::UIRegion Window::s_UIRegion{};
 	bool Window::s_IsInitialized = false;
 	const GLFWvidmode* Window::k_Videomode = nullptr;
 

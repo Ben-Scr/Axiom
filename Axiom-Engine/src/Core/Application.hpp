@@ -13,6 +13,7 @@
 #include <chrono>
 #include <memory>
 #include <string>
+#include <thread>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -90,6 +91,7 @@ namespace Axiom {
 
 
 		Renderer2D* GetRenderer2D() { return m_Renderer2D.get(); }
+		GuiRenderer* GetGuiRenderer() { return m_GuiRenderer.get(); }
 		Input& GetInput() { return m_Input; }
 		Time& GetTime() { return m_Time; }
 		const Time& GetTime() const { return m_Time; }
@@ -104,6 +106,7 @@ namespace Axiom {
 		static void Reload() { if (s_Instance) { s_Instance->m_ShouldQuit = true; s_Instance->m_CanReload = true; } };
 		static bool IsPaused() { return s_Instance ? s_Instance->IsEnginePaused() : false; }
 		static bool IsShuttingDown() { return s_Instance ? s_Instance->m_IsShuttingDown : false; }
+		static bool IsMainThread() { return !s_Instance || s_Instance->m_MainThreadId == std::this_thread::get_id(); }
 
 		/// True for editor host, false for standalone runtime / launcher.
 		static bool IsEditor() { return s_Instance ? s_Instance->m_IsEditorHost : false; }
@@ -152,36 +155,57 @@ namespace Axiom {
 		}
 
 	private:
-		// Snapshot the current layer order into a local vector. The previous index-based
-		// iteration with re-`.Size()` checks was robust against iterator invalidation on
-		// container reallocation, but NOT against position shifts: PushLayer inserts at
-		// m_InsertIndex, which moves indices >= insertIndex by one, so the next iteration
-		// would land on the wrong slot (skip a sibling on insert, double-visit on pop).
-		// Snapshotting forward and reverse orders into local pointer vectors gives stable
-		// per-call iteration: layers added during the dispatch don't appear until next
-		// frame, layers popped during dispatch are still visited (their `OnX` runs), but
-		// no sibling is ever skipped or duplicated.
-		std::vector<Layer*> SnapshotLayerOrder() const {
-			std::vector<Layer*> out;
-			out.reserve(m_LayerStack.Size());
+		// Snapshot the current layer order into a *thread-local* reusable buffer.
+		// Two correctness properties matter here:
+		//   1. PushLayer inserts at m_InsertIndex, shifting indices, so the previous
+		//      index-based iteration would skip or double-visit siblings during a
+		//      mid-dispatch insert. Snapshotting raw pointers fixes that.
+		//   2. PopLayer used to destroy the layer's unique_ptr immediately, leaving
+		//      stale snapshot pointers dangling. The LayerStack now defers pops while
+		//      a dispatch is in flight (BeginDispatch/EndDispatch) — PendingPop layers
+		//      are skipped during iteration but their memory stays live.
+		// Returning a reference to a thread_local avoids per-frame heap allocations.
+		// Caller must consume the snapshot before requesting another on the same
+		// thread; nested dispatches are safe because each callback site copies the
+		// pointers it needs into its own loop.
+		using LayerSnapshot = std::vector<Layer*>;
+
+		const LayerSnapshot& SnapshotLayerOrder() const {
+			thread_local LayerSnapshot s_Snapshot;
+			s_Snapshot.clear();
+			s_Snapshot.reserve(m_LayerStack.Size());
 			for (size_t i = 0; i < m_LayerStack.Size(); ++i) {
-				if (Layer* layer = const_cast<LayerStack&>(m_LayerStack).At(i)) {
-					out.push_back(layer);
+				Layer* layer = const_cast<LayerStack&>(m_LayerStack).At(i);
+				if (layer && !m_LayerStack.IsPendingPop(layer)) {
+					s_Snapshot.push_back(layer);
 				}
 			}
-			return out;
+			return s_Snapshot;
 		}
 
-		std::vector<Layer*> SnapshotLayerOrderReversed() const {
-			std::vector<Layer*> out;
-			out.reserve(m_LayerStack.Size());
+		const LayerSnapshot& SnapshotLayerOrderReversed() const {
+			thread_local LayerSnapshot s_SnapshotReversed;
+			s_SnapshotReversed.clear();
+			s_SnapshotReversed.reserve(m_LayerStack.Size());
 			for (size_t i = m_LayerStack.Size(); i > 0; --i) {
-				if (Layer* layer = const_cast<LayerStack&>(m_LayerStack).At(i - 1)) {
-					out.push_back(layer);
+				Layer* layer = const_cast<LayerStack&>(m_LayerStack).At(i - 1);
+				if (layer && !m_LayerStack.IsPendingPop(layer)) {
+					s_SnapshotReversed.push_back(layer);
 				}
 			}
-			return out;
+			return s_SnapshotReversed;
 		}
+
+		// RAII helper around LayerStack::BeginDispatch/EndDispatch. Holding one of
+		// these makes PopLayer/PopOverlay defer the actual erase until the helper's
+		// destructor runs, so snapshot pointers stay valid for the whole scope.
+		struct LayerDispatchGuard {
+			explicit LayerDispatchGuard(LayerStack& stack) : Stack(stack) { Stack.BeginDispatch(); }
+			~LayerDispatchGuard() { Stack.EndDispatch(); }
+			LayerDispatchGuard(const LayerDispatchGuard&) = delete;
+			LayerDispatchGuard& operator=(const LayerDispatchGuard&) = delete;
+			LayerStack& Stack;
+		};
 
 	private:
 		std::unique_ptr<Window> m_Window;
@@ -232,6 +256,7 @@ namespace Axiom {
 		Clock::time_point m_LastFrameEndTime{};
 		LayerStack m_LayerStack;
 		EventBus m_EventBus;
+		std::thread::id m_MainThreadId;
 
 		void Initialize();
 		void Shutdown(bool invokeOnQuit = true);

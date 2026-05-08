@@ -395,6 +395,38 @@ internal static unsafe class InternalCalls
     internal static void BoxCollider2D_GetCenter(ulong id, out float x, out float y) { float ox, oy; NativeCallbacks.Bindings.BoxCollider2D_GetCenter(id, &ox, &oy); x = ox; y = oy; }
     internal static void BoxCollider2D_SetEnabled(ulong id, bool enabled) => NativeCallbacks.Bindings.BoxCollider2D_SetEnabled(id, enabled ? 1 : 0);
 
+    // ── CircleCollider2D ────────────────────────────────────────────
+
+    internal static float CircleCollider2D_GetRadius(ulong id) => NativeCallbacks.Bindings.CircleCollider2D_GetRadius(id);
+    internal static void CircleCollider2D_SetRadius(ulong id, float radius) => NativeCallbacks.Bindings.CircleCollider2D_SetRadius(id, radius);
+    internal static void CircleCollider2D_GetCenter(ulong id, out float x, out float y) { float ox, oy; NativeCallbacks.Bindings.CircleCollider2D_GetCenter(id, &ox, &oy); x = ox; y = oy; }
+    internal static void CircleCollider2D_SetCenter(ulong id, float x, float y) => NativeCallbacks.Bindings.CircleCollider2D_SetCenter(id, x, y);
+    internal static void CircleCollider2D_SetEnabled(ulong id, bool enabled) => NativeCallbacks.Bindings.CircleCollider2D_SetEnabled(id, enabled ? 1 : 0);
+
+    // ── PolygonCollider2D ───────────────────────────────────────────
+
+    internal static int PolygonCollider2D_GetVertexCount(ulong id) => NativeCallbacks.Bindings.PolygonCollider2D_GetVertexCount(id);
+    internal static int PolygonCollider2D_GetWorldPoints(ulong id, Span<float> outPoints)
+    {
+        fixed (float* p = outPoints)
+        {
+            return NativeCallbacks.Bindings.PolygonCollider2D_GetWorldPoints(id, p, outPoints.Length);
+        }
+    }
+    internal static void PolygonCollider2D_SetPoints(ulong id, ReadOnlySpan<float> points, int pointCount)
+    {
+        fixed (float* p = points)
+        {
+            NativeCallbacks.Bindings.PolygonCollider2D_SetPoints(id, p, pointCount);
+        }
+    }
+    internal static void PolygonCollider2D_SetSides(ulong id, int sides) => NativeCallbacks.Bindings.PolygonCollider2D_SetSides(id, sides);
+    internal static void PolygonCollider2D_GetCenter(ulong id, out float x, out float y) { float ox, oy; NativeCallbacks.Bindings.PolygonCollider2D_GetCenter(id, &ox, &oy); x = ox; y = oy; }
+    internal static void PolygonCollider2D_SetCenter(ulong id, float x, float y) => NativeCallbacks.Bindings.PolygonCollider2D_SetCenter(id, x, y);
+    internal static void PolygonCollider2D_GetSize(ulong id, out float x, out float y) { float ox, oy; NativeCallbacks.Bindings.PolygonCollider2D_GetSize(id, &ox, &oy); x = ox; y = oy; }
+    internal static void PolygonCollider2D_SetSize(ulong id, float x, float y) => NativeCallbacks.Bindings.PolygonCollider2D_SetSize(id, x, y);
+    internal static void PolygonCollider2D_SetEnabled(ulong id, bool enabled) => NativeCallbacks.Bindings.PolygonCollider2D_SetEnabled(id, enabled ? 1 : 0);
+
     // ── AudioSource ─────────────────────────────────────────────────
 
     internal static void AudioSource_Play(ulong id) => NativeCallbacks.Bindings.AudioSource_Play(id);

@@ -328,7 +328,13 @@ namespace Axiom {
 				command.push_back(version);
 			}
 
-			Process::Result addResult = Process::Run(command);
+			// Run the dotnet command from the .csproj's directory. Without an
+			// explicit working dir, dotnet resolves the project relative to whatever
+			// directory the editor was launched from — which fails with cryptic
+			// "no project found" errors when the editor runs from `bin/`. Mirrors
+			// the working-directory pattern used by the NuGet remove path.
+			std::filesystem::path projectDir = std::filesystem::path(csprojPath).parent_path();
+			Process::Result addResult = Process::Run(command, projectDir);
 			if (!addResult.Succeeded())
 				return { false, "dotnet add package failed (exit code " + std::to_string(addResult.ExitCode) + ")" };
 
@@ -356,6 +362,26 @@ namespace Axiom {
 			std::string packagesDir = Path::Combine(project->RootDirectory, "Packages", packageId, version);
 			std::string dllName = packageId + ".dll";
 			std::string localDll = Path::Combine(packagesDir, dllName);
+
+			// Belt-and-suspenders: even with IsSafePathComponent rejecting the
+			// obvious traversal characters, canonicalize the proposed path and
+			// confirm it stays under <project>/Packages. A future tweak to the
+			// validator that misses a clever encoding would otherwise let a
+			// remote index entry write outside the package tree.
+			{
+				std::error_code canonEc;
+				const std::filesystem::path packagesRoot = std::filesystem::weakly_canonical(
+					std::filesystem::path(project->RootDirectory) / "Packages", canonEc);
+				const std::filesystem::path resolvedDll = std::filesystem::weakly_canonical(
+					std::filesystem::path(localDll), canonEc);
+				const std::string rootStr = packagesRoot.string();
+				const std::string dllStr = resolvedDll.string();
+				if (canonEc || rootStr.empty() ||
+					dllStr.size() < rootStr.size() ||
+					dllStr.compare(0, rootStr.size(), rootStr) != 0) {
+					return { false, "Refusing to install package: path escapes Packages root" };
+				}
+			}
 
 			// Download
 			AIM_CORE_INFO_TAG("GitHubSource", "Downloading {} to {}", packageId, localDll);

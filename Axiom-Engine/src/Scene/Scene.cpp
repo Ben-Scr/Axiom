@@ -6,6 +6,8 @@
 
 #include "Components/Physics/Rigidbody2DComponent.hpp"
 #include "Components/Physics/BoxCollider2DComponent.hpp"
+#include "Components/Physics/CircleCollider2DComponent.hpp"
+#include "Components/Physics/PolygonCollider2DComponent.hpp"
 #include "Components/Physics/FastBody2DComponent.hpp"
 #include "Components/Physics/FastBoxCollider2DComponent.hpp"
 #include "Components/Physics/FastCircleCollider2DComponent.hpp"
@@ -802,12 +804,16 @@ namespace Axiom {
 
 		m_Registry.on_construct<Rigidbody2DComponent>().connect<&Scene::OnRigidBody2DComponentConstruct>(this);
 		m_Registry.on_construct<BoxCollider2DComponent>().connect<&Scene::OnBoxCollider2DComponentConstruct>(this);
+		m_Registry.on_construct<CircleCollider2DComponent>().connect<&Scene::OnCircleCollider2DComponentConstruct>(this);
+		m_Registry.on_construct<PolygonCollider2DComponent>().connect<&Scene::OnPolygonCollider2DComponentConstruct>(this);
 		m_Registry.on_construct<Camera2DComponent>().connect<&Scene::OnCamera2DComponentConstruct>(this);
 		m_Registry.on_construct<ParticleSystem2DComponent>().connect<&Scene::OnParticleSystem2DComponentConstruct>(this);
 		m_Registry.on_construct<DisabledTag>().connect<&Scene::OnDisabledTagConstruct>(this);
 
 		m_Registry.on_destroy<Rigidbody2DComponent>().connect<&Scene::OnRigidBody2DComponentDestroy>(this);
 		m_Registry.on_destroy<BoxCollider2DComponent>().connect<&Scene::OnBoxCollider2DComponentDestroy>(this);
+		m_Registry.on_destroy<CircleCollider2DComponent>().connect<&Scene::OnCircleCollider2DComponentDestroy>(this);
+		m_Registry.on_destroy<PolygonCollider2DComponent>().connect<&Scene::OnPolygonCollider2DComponentDestroy>(this);
 		m_Registry.on_destroy<AudioSourceComponent>().connect<&Scene::OnAudioSourceComponentDestroy>(this);
 		m_Registry.on_destroy<ScriptComponent>().connect<&Scene::OnScriptComponentDestroy>(this);
 		m_Registry.on_destroy<Camera2DComponent>().connect<&Scene::OnCamera2DComponentDestruct>(this);
@@ -840,8 +846,20 @@ namespace Axiom {
 		bool isEnabled = !registry.all_of<DisabledTag>(entity);
 		Rigidbody2DComponent& rb2D = registry.get<Rigidbody2DComponent>(entity);
 
+		// All three Box2D-backed colliders (Box / Circle / Polygon) own a b2Body
+		// when added before the rigidbody, so we adopt whichever one is already
+		// on the entity. The mutual-exclusion conflict declarations in
+		// BuiltInComponentRegistration ensure at most one is present.
 		if (HasAnyComponent<BoxCollider2DComponent>(entity)) {
 			rb2D.m_BodyId = GetComponent<BoxCollider2DComponent>(entity).m_BodyId;
+			rb2D.SetBodyType(BodyType::Dynamic);
+		}
+		else if (HasAnyComponent<CircleCollider2DComponent>(entity)) {
+			rb2D.m_BodyId = GetComponent<CircleCollider2DComponent>(entity).m_BodyId;
+			rb2D.SetBodyType(BodyType::Dynamic);
+		}
+		else if (HasAnyComponent<PolygonCollider2DComponent>(entity)) {
+			rb2D.m_BodyId = GetComponent<PolygonCollider2DComponent>(entity).m_BodyId;
 			rb2D.SetBodyType(BodyType::Dynamic);
 		}
 		else {
@@ -857,10 +875,33 @@ namespace Axiom {
 
 		if (!rb2D.IsValid()) return;
 
-		if (IsEntityBeingDestroyed(entity) && registry.all_of<BoxCollider2DComponent>(entity)) {
-			registry.get<BoxCollider2DComponent>(entity).Destroy();
+		// Match the BoxCollider2D path for circle/polygon: when the entity
+		// itself is being destroyed, route through the collider's Destroy so
+		// it tears down the shape AND the shared body in one step. Otherwise
+		// the rigidbody is being removed in isolation, so demote the body to
+		// static (the collider keeps using it) or fully destroy the body when
+		// no collider remains.
+		const bool hasAnyCollider =
+			registry.all_of<BoxCollider2DComponent>(entity) ||
+			registry.all_of<CircleCollider2DComponent>(entity) ||
+			registry.all_of<PolygonCollider2DComponent>(entity);
+
+		if (IsEntityBeingDestroyed(entity)) {
+			if (registry.all_of<BoxCollider2DComponent>(entity)) {
+				registry.get<BoxCollider2DComponent>(entity).Destroy();
+				return;
+			}
+			if (registry.all_of<CircleCollider2DComponent>(entity)) {
+				registry.get<CircleCollider2DComponent>(entity).Destroy();
+				return;
+			}
+			if (registry.all_of<PolygonCollider2DComponent>(entity)) {
+				registry.get<PolygonCollider2DComponent>(entity).Destroy();
+				return;
+			}
 		}
-		else if (registry.all_of<BoxCollider2DComponent>(entity)) {
+
+		if (hasAnyCollider) {
 			rb2D.SetBodyType(BodyType::Static);
 		}
 		else {
@@ -895,11 +936,92 @@ namespace Axiom {
 	void Scene::OnBoxCollider2DComponentDestroy(entt::registry& registry, EntityHandle entity) {
 		if (m_IsDetached) return;
 		auto& boxCollider2D = GetComponent<BoxCollider2DComponent>(entity);
-		if (IsEntityBeingDestroyed(entity) || !registry.all_of<Rigidbody2DComponent>(entity)) {
-			boxCollider2D.Destroy();
+		// Body ownership invariant: if a Rigidbody2D is present, IT owns the body's
+		// lifetime — the collider's Destroy must NOT call b2DestroyBody. Otherwise
+		// both hooks fire b2DestroyBody on the same b2BodyId during entity teardown.
+		// b2Body_IsValid catches the second call most of the time via generation
+		// bumps, but if Box2D recycles the slot (long-running session, generation
+		// wrap, or MaxBodyId churn), the second destroy hits an unrelated body —
+		// silent corruption with no log.
+		if (registry.all_of<Rigidbody2DComponent>(entity)) {
+			boxCollider2D.DestroyShape(false);
 		}
 		else {
-			boxCollider2D.DestroyShape(false);
+			boxCollider2D.Destroy();
+		}
+	}
+
+	void Scene::OnCircleCollider2DComponentConstruct(entt::registry& registry, EntityHandle entity) {
+		if (m_IsDetached) return;
+		if (!registry.all_of<Transform2DComponent>(entity)) {
+			AIM_CORE_WARN_TAG("Scene", "Adding missing Transform2DComponent before creating CircleCollider2D for entity {}", static_cast<uint32_t>(entity));
+			registry.emplace<Transform2DComponent>(entity);
+		}
+
+		bool isEnabled = !registry.all_of<DisabledTag>(entity);
+		CircleCollider2DComponent& circleCollider = GetComponent<CircleCollider2DComponent>(entity);
+		circleCollider.m_EntityHandle = entity;
+
+		// Reuse existing rigidbody body if present, else spawn a static body —
+		// mirrors BoxCollider2D's body-sharing rules.
+		if (HasComponent<Rigidbody2DComponent>(entity)) {
+			auto& rb = GetComponent<Rigidbody2DComponent>(entity);
+			circleCollider.m_BodyId = rb.GetBodyHandle();
+		}
+		else {
+			circleCollider.m_BodyId = PhysicsSystem2D::GetMainPhysicsWorld().CreateBody(entity, *this, BodyType::Static);
+		}
+
+		circleCollider.m_ShapeId = PhysicsSystem2D::GetMainPhysicsWorld().CreateShape(entity, *this, circleCollider.m_BodyId, ShapeType::Circle);
+		circleCollider.SetEnabled(isEnabled);
+	}
+
+	void Scene::OnCircleCollider2DComponentDestroy(entt::registry& registry, EntityHandle entity) {
+		if (m_IsDetached) return;
+		auto& circleCollider = GetComponent<CircleCollider2DComponent>(entity);
+		// See OnBoxCollider2DComponentDestroy: collider does NOT own the body when
+		// a Rigidbody2D is present.
+		if (registry.all_of<Rigidbody2DComponent>(entity)) {
+			circleCollider.DestroyShape(false);
+		}
+		else {
+			circleCollider.Destroy();
+		}
+	}
+
+	void Scene::OnPolygonCollider2DComponentConstruct(entt::registry& registry, EntityHandle entity) {
+		if (m_IsDetached) return;
+		if (!registry.all_of<Transform2DComponent>(entity)) {
+			AIM_CORE_WARN_TAG("Scene", "Adding missing Transform2DComponent before creating PolygonCollider2D for entity {}", static_cast<uint32_t>(entity));
+			registry.emplace<Transform2DComponent>(entity);
+		}
+
+		bool isEnabled = !registry.all_of<DisabledTag>(entity);
+		PolygonCollider2DComponent& polygonCollider = GetComponent<PolygonCollider2DComponent>(entity);
+		polygonCollider.m_EntityHandle = entity;
+
+		if (HasComponent<Rigidbody2DComponent>(entity)) {
+			auto& rb = GetComponent<Rigidbody2DComponent>(entity);
+			polygonCollider.m_BodyId = rb.GetBodyHandle();
+		}
+		else {
+			polygonCollider.m_BodyId = PhysicsSystem2D::GetMainPhysicsWorld().CreateBody(entity, *this, BodyType::Static);
+		}
+
+		polygonCollider.m_ShapeId = PhysicsSystem2D::GetMainPhysicsWorld().CreateShape(entity, *this, polygonCollider.m_BodyId, ShapeType::Polygon);
+		polygonCollider.SetEnabled(isEnabled);
+	}
+
+	void Scene::OnPolygonCollider2DComponentDestroy(entt::registry& registry, EntityHandle entity) {
+		if (m_IsDetached) return;
+		auto& polygonCollider = GetComponent<PolygonCollider2DComponent>(entity);
+		// See OnBoxCollider2DComponentDestroy: collider does NOT own the body when
+		// a Rigidbody2D is present.
+		if (registry.all_of<Rigidbody2DComponent>(entity)) {
+			polygonCollider.DestroyShape(false);
+		}
+		else {
+			polygonCollider.Destroy();
 		}
 	}
 
@@ -963,14 +1085,13 @@ namespace Axiom {
 		// recurses further into the subtree, so we only emplace one level deep
 		// here. Snapshot the children list before iterating because emplace
 		// may reorder pool storage internally.
-		// Note: this is destructive (a previously user-disabled child re-emerges
-		// enabled when the parent is later re-enabled). The simpler model wins
-		// over a separate InheritedDisabled tag because every system already
-		// filters on DisabledTag and would otherwise need a coordinated update.
+		// InheritedDisabledTag lets the re-enable cascade remove only the
+		// DisabledTag values that this parent cascade created.
 		if (registry.all_of<HierarchyComponent>(entity)) {
 			std::vector<EntityHandle> children = registry.get<HierarchyComponent>(entity).Children;
 			for (EntityHandle child : children) {
 				if (registry.valid(child) && !registry.all_of<DisabledTag>(child)) {
+					registry.emplace<InheritedDisabledTag>(child);
 					registry.emplace<DisabledTag>(child);
 				}
 			}
@@ -983,6 +1104,10 @@ namespace Axiom {
 			return;
 		}
 
+		if (registry.all_of<InheritedDisabledTag>(entity)) {
+			registry.remove<InheritedDisabledTag>(entity);
+		}
+
 		ApplyEntityEnabledState(registry, entity, true);
 
 		// Mirror the construct-time cascade: each child's own on_destroy hook
@@ -990,7 +1115,10 @@ namespace Axiom {
 		if (registry.all_of<HierarchyComponent>(entity)) {
 			std::vector<EntityHandle> children = registry.get<HierarchyComponent>(entity).Children;
 			for (EntityHandle child : children) {
-				if (registry.valid(child) && registry.all_of<DisabledTag>(child)) {
+				if (registry.valid(child)
+					&& registry.all_of<DisabledTag>(child)
+					&& registry.all_of<InheritedDisabledTag>(child)) {
+					registry.remove<InheritedDisabledTag>(child);
 					registry.remove<DisabledTag>(child);
 				}
 			}
@@ -1081,6 +1209,14 @@ namespace Axiom {
 		}
 
 		if (auto* collider = registry.try_get<BoxCollider2DComponent>(entity); collider && collider->IsValid()) {
+			collider->SetEnabled(enabled);
+		}
+
+		if (auto* collider = registry.try_get<CircleCollider2DComponent>(entity); collider && collider->IsValid()) {
+			collider->SetEnabled(enabled);
+		}
+
+		if (auto* collider = registry.try_get<PolygonCollider2DComponent>(entity); collider && collider->IsValid()) {
 			collider->SetEnabled(enabled);
 		}
 

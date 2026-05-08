@@ -36,7 +36,7 @@ namespace Axiom {
 	bool GizmoRenderer2D::m_IsInitialized = false;
 	std::unique_ptr<Shader> GizmoRenderer2D::m_GizmoShader;
 	std::vector<PosColorVertex> GizmoRenderer2D::m_GizmoVertices;
-	std::vector<uint16_t> GizmoRenderer2D::m_GizmoIndices;
+	std::vector<uint32_t> GizmoRenderer2D::m_GizmoIndices;
 	uint16_t GizmoRenderer2D::m_GizmoViewId = 1;
 	unsigned int GizmoRenderer2D::m_VAO = 0;
 	unsigned int GizmoRenderer2D::m_VBO = 0;
@@ -156,7 +156,7 @@ namespace Axiom {
 			}
 
 			uint32_t color = square.Color.ABGR32();
-			uint16_t baseIndex = static_cast<uint16_t>(m_GizmoVertices.size());
+			uint32_t baseIndex = static_cast<uint32_t>(m_GizmoVertices.size());
 
 			Vec2 corners[4] = {
 					Vec2(-square.HalfExtents.x, -square.HalfExtents.y),
@@ -187,7 +187,7 @@ namespace Axiom {
 			}
 
 			uint32_t color = line.Color.ABGR32();
-			uint16_t baseIndex = static_cast<uint16_t>(m_GizmoVertices.size());
+			uint32_t baseIndex = static_cast<uint32_t>(m_GizmoVertices.size());
 
 			m_GizmoVertices.push_back({ line.Start.x, line.Start.y, 0.0f, color });
 			m_GizmoVertices.push_back({ line.End.x, line.End.y, 0.0f, color });
@@ -202,7 +202,7 @@ namespace Axiom {
 			}
 
 			uint32_t color = circle.Color.ABGR32();
-			uint16_t baseIndex = static_cast<uint16_t>(m_GizmoVertices.size());
+			uint32_t baseIndex = static_cast<uint32_t>(m_GizmoVertices.size());
 
 			float angleStep = TwoPi<float>() / static_cast<float>(circle.Segments);
 			for (int i = 0; i < circle.Segments; ++i) {
@@ -213,8 +213,8 @@ namespace Axiom {
 			}
 
 			for (int i = 0; i < circle.Segments; ++i) {
-				m_GizmoIndices.push_back(baseIndex + i);
-				m_GizmoIndices.push_back(baseIndex + static_cast<uint16_t>((i + 1) % circle.Segments));
+				m_GizmoIndices.push_back(baseIndex + static_cast<uint32_t>(i));
+				m_GizmoIndices.push_back(baseIndex + static_cast<uint32_t>((i + 1) % circle.Segments));
 			}
 		}
 	}
@@ -244,7 +244,7 @@ namespace Axiom {
 		ConvertVertices(m_GizmoVertices, s_UploadBuffer);
 
 		const std::size_t vboBytes = s_UploadBuffer.size() * sizeof(UploadVertex);
-		const std::size_t eboBytes = m_GizmoIndices.size() * sizeof(uint16_t);
+		const std::size_t eboBytes = m_GizmoIndices.size() * sizeof(uint32_t);
 
 		glBindVertexArray(m_VAO);
 
@@ -275,17 +275,20 @@ namespace Axiom {
 		}
 
 		glLineWidth(Gizmo::s_LineWidth);
-		glDrawElements(GL_LINES, static_cast<GLsizei>(m_GizmoIndices.size()), GL_UNSIGNED_SHORT, nullptr);
+		glDrawElements(GL_LINES, static_cast<GLsizei>(m_GizmoIndices.size()), GL_UNSIGNED_INT, nullptr);
 
 		glBindVertexArray(0);
 		glUseProgram(0);
 	}
 
 	void GizmoRenderer2D::EndFrame() {
-		if (Gizmo::GetShowInRuntime()) {
-			Render(GizmoLayerMask::Shared);
-		}
-
+		// Explicit-pass invariant: GizmoRenderer2D::EndFrame is cleanup only.
+		// Drawing is done by an explicit caller via Render() / RenderWithVP() —
+		// per Axiom's render-graph design, every draw must be declared in a named
+		// pass, not slipped in from a lifecycle hook. The runtime "always-show
+		// shared gizmos" behavior moves to Application::RenderPipelineOnly which
+		// owns the pass list. Apps that want runtime gizmos call Render() there;
+		// EndFrame just clears the per-frame buffers.
 		Gizmo::Clear();
 	}
 }

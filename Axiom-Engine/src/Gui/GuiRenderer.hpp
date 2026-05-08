@@ -1,4 +1,5 @@
 #pragma once
+#include "Core/Export.hpp"
 #include "Graphics/SpriteShaderProgram.hpp"
 #include "Graphics/QuadMesh.hpp"
 #include "Graphics/Instance44.hpp"
@@ -20,7 +21,7 @@ namespace Axiom {
 	// Coordinate system: centered, +Y up, units = framebuffer pixels.
 	// The window viewport (NOT the camera viewport) drives layout, so
 	// UI doesn't move when the camera scrolls.
-	class GuiRenderer {
+	class AXIOM_API GuiRenderer {
 	public:
 		GuiRenderer() = default;
 		void Initialize();
@@ -30,6 +31,13 @@ namespace Axiom {
 		void EndFrame();
 
 		void RenderScene(const Scene& scene);
+
+		// When true, BeginFrame becomes a no-op so an external driver
+		// (e.g. the editor's per-FBO render path) can call RenderScene
+		// itself with a target framebuffer already bound. Mirrors
+		// Renderer2D::SetSkipBeginFrameRender so editor & runtime share
+		// the same opt-out mechanism.
+		void SetSkipBeginFrameRender(bool skip) { m_SkipBeginFrameRender = skip; }
 
 	private:
 		void CollectAndDraw(const Scene& scene, const glm::mat4& mvp,
@@ -47,5 +55,6 @@ namespace Axiom {
 		std::vector<TextDrawCmd> m_TextScratch;
 
 		bool m_IsInitialized = false;
+		bool m_SkipBeginFrameRender = false;
 	};
 }

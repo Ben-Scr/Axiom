@@ -13,6 +13,8 @@
 #include "Components/Graphics/Camera2DComponent.hpp"
 #include "Components/Physics/Rigidbody2DComponent.hpp"
 #include "Components/Physics/BoxCollider2DComponent.hpp"
+#include "Components/Physics/CircleCollider2DComponent.hpp"
+#include "Components/Physics/PolygonCollider2DComponent.hpp"
 #include "Components/Audio/AudioSourceComponent.hpp"
 #include "Components/General/RectTransform2DComponent.hpp"
 #include "Components/General/HierarchyComponent.hpp"
@@ -448,6 +450,10 @@ namespace Axiom {
 					sourceId = static_cast<uint64_t>(std::stoull(sourceIdText));
 				}
 				catch (...) {
+					// Swallowed silently before — a corrupt prefab would lose its
+					// override for that entity with no log line. Surface it so the
+					// user knows something didn't apply.
+					AIM_CORE_WARN_TAG("SceneSerializer", "Skipping entity override with invalid source-id key: '{}'", sourceIdText);
 					continue;
 				}
 
@@ -619,9 +625,26 @@ namespace Axiom {
 			return true;
 		}
 
-		bool LoadPrefabDefinition(uint64_t prefabGuid, PrefabDefinition& outDefinition) {
+		bool LoadPrefabDefinitionRecursive(uint64_t prefabGuid, PrefabDefinition& outDefinition,
+			std::unordered_set<uint64_t>& inProgress) {
+			// Cycle guard: a prefab chain A→B→C→...→A would otherwise recurse
+			// until stack overflow. Inserting before recursing and erasing after
+			// gives us a per-call-stack visit set; concurrent loads on different
+			// stacks each get their own.
+			if (!inProgress.insert(prefabGuid).second) {
+				AIM_CORE_WARN_TAG("SceneSerializer", "Circular prefab reference detected at GUID {}", prefabGuid);
+				return false;
+			}
+			constexpr std::size_t k_MaxPrefabChainDepth = 32;
+			if (inProgress.size() > k_MaxPrefabChainDepth) {
+				AIM_CORE_WARN_TAG("SceneSerializer", "Prefab inheritance chain exceeds max depth {}", k_MaxPrefabChainDepth);
+				inProgress.erase(prefabGuid);
+				return false;
+			}
+
 			const std::string prefabPath = AssetRegistry::ResolvePath(prefabGuid);
 			if (prefabPath.empty() || !File::Exists(prefabPath)) {
+				inProgress.erase(prefabGuid);
 				return false;
 			}
 
@@ -629,10 +652,12 @@ namespace Axiom {
 			std::string parseError;
 			if (!Json::TryParse(File::ReadAllText(prefabPath), root, &parseError) || !root.IsObject()) {
 				AIM_CORE_WARN_TAG("SceneSerializer", "Failed to parse prefab {}: {}", prefabPath, parseError);
+				inProgress.erase(prefabGuid);
 				return false;
 			}
 
 			if (ReadPrefabDefinitionFromRoot(root, outDefinition)) {
+				inProgress.erase(prefabGuid);
 				return true;
 			}
 
@@ -651,13 +676,20 @@ namespace Axiom {
 					basePrefabGuid = prefabRefValue->AsUInt64Or(0);
 				}
 
-				if (basePrefabGuid != 0 && LoadPrefabDefinition(basePrefabGuid, outDefinition)) {
+				if (basePrefabGuid != 0 && LoadPrefabDefinitionRecursive(basePrefabGuid, outDefinition, inProgress)) {
 					ApplyEntityOverrides(outDefinition, root);
+					inProgress.erase(prefabGuid);
 					return true;
 				}
 			}
 
+			inProgress.erase(prefabGuid);
 			return false;
+		}
+
+		bool LoadPrefabDefinition(uint64_t prefabGuid, PrefabDefinition& outDefinition) {
+			std::unordered_set<uint64_t> inProgress;
+			return LoadPrefabDefinitionRecursive(prefabGuid, outDefinition, inProgress);
 		}
 
 		uint64_t ResolvePrefabGuid(const Value& entityValue) {
@@ -861,6 +893,17 @@ namespace Axiom {
 		const std::string name = GetStringMember(entityValue, "name", "Entity");
 		const EntityHandle entity = scene.CreateEntity(name).GetHandle();
 
+		// Scene::CreateEntity unconditionally seeds Transform2D for the
+		// usual world-space case, but UI entities (RectTransform2D-only)
+		// and other Transform-less authored entities must round-trip
+		// without sprouting a Transform2D on every play→edit cycle.
+		// If the snapshot omits a Transform2D block, drop the auto-seeded
+		// component so the persisted shape wins. We don't touch any other
+		// component CreateEntity may have added (none today).
+		if (!entityValue.FindMember("Transform2D")) {
+			scene.GetRegistry().remove<Transform2DComponent>(entity);
+		}
+
 		uint64_t savedSceneGuid = GetUInt64Member(entityValue, "SceneGUID", 0);
 		if (savedSceneGuid == 0) {
 			savedSceneGuid = GetUInt64Member(entityValue, "uuid", 0);
@@ -987,6 +1030,66 @@ namespace Axiom {
 			boxCollider.SetBounciness(GetFloatMember(*colliderValue, "bounciness", boxCollider.GetBounciness()));
 			boxCollider.SetLayer(GetUInt64Member(*colliderValue, "layer", boxCollider.GetLayer()));
 			boxCollider.SetRegisterContacts(GetBoolMember(*colliderValue, "registerContacts", boxCollider.CanRegisterContacts()));
+		}
+
+		if (const Value* colliderValue = GetObjectMember(entityValue, "CircleCollider2D")) {
+			auto& circleCollider = scene.AddComponent<CircleCollider2DComponent>(entity);
+			const Vec2 savedCenter{
+				GetFloatMember(*colliderValue, "centerX", 0.0f),
+				GetFloatMember(*colliderValue, "centerY", 0.0f)
+			};
+			circleCollider.SetCenter(savedCenter, scene);
+			circleCollider.SetRadius(GetFloatMember(*colliderValue, "radius", 0.5f), scene);
+			circleCollider.SetSensor(GetBoolMember(*colliderValue, "sensor", false), scene);
+			circleCollider.SetFriction(GetFloatMember(*colliderValue, "friction", circleCollider.GetFriction()));
+			circleCollider.SetBounciness(GetFloatMember(*colliderValue, "bounciness", circleCollider.GetBounciness()));
+			circleCollider.SetLayer(GetUInt64Member(*colliderValue, "layer", circleCollider.GetLayer()));
+			circleCollider.SetRegisterContacts(GetBoolMember(*colliderValue, "registerContacts", circleCollider.CanRegisterContacts()));
+		}
+
+		if (const Value* colliderValue = GetObjectMember(entityValue, "PolygonCollider2D")) {
+			auto& polygonCollider = scene.AddComponent<PolygonCollider2DComponent>(entity);
+
+			// Restore custom point list if present, otherwise the default
+			// regular pentagon installed by the constructor stays in place.
+			if (const Value* pointsArr = colliderValue->FindMember("points"); pointsArr && pointsArr->IsArray()) {
+				const auto& arr = pointsArr->GetArray();
+				// Box2D rejects polygons over B2_MAX_POLYGON_VERTICES (8). Cap the
+				// reserve too — without this, a hostile/corrupt prefab with a
+				// 100M-element points array allocates ~1.6 GB before the first
+				// element is read.
+				constexpr std::size_t k_MaxPolygonVertices = 8;
+				if (arr.size() > k_MaxPolygonVertices) {
+					AIM_CORE_WARN_TAG("Serialization", "Polygon collider point count {} exceeds max {}; truncating", arr.size(), k_MaxPolygonVertices);
+				}
+				const std::size_t take = arr.size() < k_MaxPolygonVertices ? arr.size() : k_MaxPolygonVertices;
+				std::vector<Vec2> points;
+				points.reserve(take);
+				for (std::size_t i = 0; i < take; ++i) {
+					const Value& pt = arr[i];
+					points.push_back(Vec2{
+						GetFloatMember(pt, "x", 0.0f),
+						GetFloatMember(pt, "y", 0.0f)
+					});
+				}
+				if (!points.empty()) {
+					polygonCollider.SetPoints(points, scene);
+				}
+			}
+
+			polygonCollider.SetSize(Vec2{
+				GetFloatMember(*colliderValue, "sizeX", 1.0f),
+				GetFloatMember(*colliderValue, "sizeY", 1.0f)
+			}, scene);
+			polygonCollider.SetCenter(Vec2{
+				GetFloatMember(*colliderValue, "centerX", 0.0f),
+				GetFloatMember(*colliderValue, "centerY", 0.0f)
+			}, scene);
+			polygonCollider.SetSensor(GetBoolMember(*colliderValue, "sensor", false), scene);
+			polygonCollider.SetFriction(GetFloatMember(*colliderValue, "friction", polygonCollider.GetFriction()));
+			polygonCollider.SetBounciness(GetFloatMember(*colliderValue, "bounciness", polygonCollider.GetBounciness()));
+			polygonCollider.SetLayer(GetUInt64Member(*colliderValue, "layer", polygonCollider.GetLayer()));
+			polygonCollider.SetRegisterContacts(GetBoolMember(*colliderValue, "registerContacts", polygonCollider.CanRegisterContacts()));
 		}
 
 		if (const Value* audioValue = GetObjectMember(entityValue, "AudioSource")) {
@@ -1248,13 +1351,16 @@ namespace Axiom {
 						}
 						info.deserialize(entityWrapper, *compValue);
 					} catch (const std::exception& e) {
+						// Include the entity handle so the editor's log clicker can
+						// jump to the offending entity even when many components fail
+						// in a corrupt scene load.
 						AIM_CORE_ERROR_TAG("SceneSerializer",
-							"Package component '{}' deserialize threw: {}",
-							info.serializedName, e.what());
+							"Package component '{}' deserialize threw on entity {}: {}",
+							info.serializedName, static_cast<uint32_t>(entity), e.what());
 					} catch (...) {
 						AIM_CORE_ERROR_TAG("SceneSerializer",
-							"Package component '{}' deserialize threw an unknown exception",
-							info.serializedName);
+							"Package component '{}' deserialize threw an unknown exception on entity {}",
+							info.serializedName, static_cast<uint32_t>(entity));
 					}
 				});
 		}
@@ -1459,6 +1565,59 @@ namespace Axiom {
 			boxCollider.SetBounciness(GetFloatMember(componentValue, "bounciness", boxCollider.GetBounciness()));
 			boxCollider.SetLayer(GetUInt64Member(componentValue, "layer", boxCollider.GetLayer()));
 			boxCollider.SetRegisterContacts(GetBoolMember(componentValue, "registerContacts", boxCollider.CanRegisterContacts()));
+			return true;
+		}
+
+		if (component == "CircleCollider2D") {
+			auto& circleCollider = scene.HasComponent<CircleCollider2DComponent>(entity)
+				? scene.GetComponent<CircleCollider2DComponent>(entity)
+				: scene.AddComponent<CircleCollider2DComponent>(entity);
+			circleCollider.SetCenter(Vec2{
+				GetFloatMember(componentValue, "centerX", 0.0f),
+				GetFloatMember(componentValue, "centerY", 0.0f)
+			}, scene);
+			circleCollider.SetRadius(GetFloatMember(componentValue, "radius", 0.5f), scene);
+			circleCollider.SetSensor(GetBoolMember(componentValue, "sensor", false), scene);
+			circleCollider.SetFriction(GetFloatMember(componentValue, "friction", circleCollider.GetFriction()));
+			circleCollider.SetBounciness(GetFloatMember(componentValue, "bounciness", circleCollider.GetBounciness()));
+			circleCollider.SetLayer(GetUInt64Member(componentValue, "layer", circleCollider.GetLayer()));
+			circleCollider.SetRegisterContacts(GetBoolMember(componentValue, "registerContacts", circleCollider.CanRegisterContacts()));
+			return true;
+		}
+
+		if (component == "PolygonCollider2D") {
+			auto& polygonCollider = scene.HasComponent<PolygonCollider2DComponent>(entity)
+				? scene.GetComponent<PolygonCollider2DComponent>(entity)
+				: scene.AddComponent<PolygonCollider2DComponent>(entity);
+
+			if (const Value* pointsArr = componentValue.FindMember("points"); pointsArr && pointsArr->IsArray()) {
+				std::vector<Vec2> points;
+				const auto& arr = pointsArr->GetArray();
+				points.reserve(arr.size());
+				for (const Value& pt : arr) {
+					points.push_back(Vec2{
+						GetFloatMember(pt, "x", 0.0f),
+						GetFloatMember(pt, "y", 0.0f)
+					});
+				}
+				if (!points.empty()) {
+					polygonCollider.SetPoints(points, scene);
+				}
+			}
+
+			polygonCollider.SetSize(Vec2{
+				GetFloatMember(componentValue, "sizeX", 1.0f),
+				GetFloatMember(componentValue, "sizeY", 1.0f)
+			}, scene);
+			polygonCollider.SetCenter(Vec2{
+				GetFloatMember(componentValue, "centerX", 0.0f),
+				GetFloatMember(componentValue, "centerY", 0.0f)
+			}, scene);
+			polygonCollider.SetSensor(GetBoolMember(componentValue, "sensor", false), scene);
+			polygonCollider.SetFriction(GetFloatMember(componentValue, "friction", polygonCollider.GetFriction()));
+			polygonCollider.SetBounciness(GetFloatMember(componentValue, "bounciness", polygonCollider.GetBounciness()));
+			polygonCollider.SetLayer(GetUInt64Member(componentValue, "layer", polygonCollider.GetLayer()));
+			polygonCollider.SetRegisterContacts(GetBoolMember(componentValue, "registerContacts", polygonCollider.CanRegisterContacts()));
 			return true;
 		}
 

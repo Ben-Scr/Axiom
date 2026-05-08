@@ -33,6 +33,14 @@ namespace Axiom {
 			m_Layers.push_back(std::move(overlay));
 		}
 
+		// Pop semantics: if a dispatch is currently iterating a snapshot of the
+		// stack (BeginDispatch/EndDispatch around it), the layer is *flagged* for
+		// removal and the actual erase + destructor runs in EndDispatch. Without
+		// a dispatch in flight, removal is immediate.
+		//
+		// Why: snapshots hand out raw `Layer*`. If a callback's pop destroyed a
+		// sibling unique_ptr, later iterations would dispatch to freed memory.
+		// Deferred-pop keeps the layer object alive until iteration finishes.
 		bool PopLayer(Layer* layer) {
 			auto begin = m_Layers.begin();
 			auto end = begin + static_cast<std::ptrdiff_t>(m_InsertIndex);
@@ -41,6 +49,11 @@ namespace Axiom {
 			});
 			if (it == end) {
 				return false;
+			}
+
+			if (m_DispatchDepth > 0) {
+				m_PendingPop.push_back(layer);
+				return true;
 			}
 
 			m_Layers.erase(it);
@@ -57,17 +70,74 @@ namespace Axiom {
 				return false;
 			}
 
+			if (m_DispatchDepth > 0) {
+				m_PendingPop.push_back(layer);
+				return true;
+			}
+
 			m_Layers.erase(it);
 			return true;
 		}
 
 		void Clear() {
 			m_Layers.clear();
+			m_PendingPop.clear();
 			m_InsertIndex = 0;
 		}
 
 		bool Empty() const { return m_Layers.empty(); }
 		std::size_t Size() const { return m_Layers.size(); }
+
+		// Open a dispatch window. PopLayer/PopOverlay calls inside the window
+		// defer their erase until the matching EndDispatch. Re-entrant: nested
+		// dispatches share the same pending-pop list and only the outermost
+		// EndDispatch flushes.
+		void BeginDispatch() {
+			++m_DispatchDepth;
+		}
+
+		void EndDispatch() {
+			if (m_DispatchDepth == 0) {
+				return;
+			}
+			--m_DispatchDepth;
+			if (m_DispatchDepth > 0 || m_PendingPop.empty()) {
+				return;
+			}
+
+			for (Layer* layer : m_PendingPop) {
+				auto begin = m_Layers.begin();
+				auto insertEnd = begin + static_cast<std::ptrdiff_t>(m_InsertIndex);
+				auto it = std::find_if(begin, insertEnd, [layer](const std::unique_ptr<Layer>& entry) {
+					return entry.get() == layer;
+				});
+				if (it != insertEnd) {
+					m_Layers.erase(it);
+					--m_InsertIndex;
+					continue;
+				}
+
+				auto overlayBegin = m_Layers.begin() + static_cast<std::ptrdiff_t>(m_InsertIndex);
+				auto overlayIt = std::find_if(overlayBegin, m_Layers.end(), [layer](const std::unique_ptr<Layer>& entry) {
+					return entry.get() == layer;
+				});
+				if (overlayIt != m_Layers.end()) {
+					m_Layers.erase(overlayIt);
+				}
+			}
+			m_PendingPop.clear();
+		}
+
+		// True iff `layer` is staged for removal. Snapshot iteration uses this
+		// to skip layers a sibling has already popped during the current
+		// dispatch — visiting them would still be safe (they exist) but is
+		// surprising and burns work.
+		bool IsPendingPop(Layer* layer) const {
+			if (m_PendingPop.empty()) {
+				return false;
+			}
+			return std::find(m_PendingPop.begin(), m_PendingPop.end(), layer) != m_PendingPop.end();
+		}
 
 		// Index-based access. Returns nullptr on out-of-range. Callers that
 		// dispatch into Layer callbacks should iterate with a fresh
@@ -98,6 +168,8 @@ namespace Axiom {
 	private:
 		Storage m_Layers;
 		std::size_t m_InsertIndex = 0;
+		std::size_t m_DispatchDepth = 0;
+		std::vector<Layer*> m_PendingPop;
 	};
 
 } // namespace Axiom

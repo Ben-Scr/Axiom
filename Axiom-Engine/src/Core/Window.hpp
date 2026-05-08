@@ -93,6 +93,31 @@ namespace Axiom {
 		static Window* GetActiveWindow() { return s_ActiveWindow; }
 		static Viewport* GetMainViewport() { return s_MainViewport.get(); }
 
+		// UI panel region: when running inside an editor that hosts the
+		// engine inside a sub-window (e.g. the Game View ImGui panel),
+		// the engine still receives mouse events in OS-window pixel
+		// coordinates and Window::GetMainViewport() still reports the OS
+		// window size. UI hit-tests and layout would otherwise resolve
+		// against the wrong coordinate space and miss the visually-
+		// rendered widgets. The editor publishes the panel's pixel rect
+		// (top-left origin, OS-window space) here every frame; engine UI
+		// systems prefer this region when active and fall back to the
+		// main viewport for standalone runtime builds (where the region
+		// stays unset).
+		struct UIRegion {
+			int OffsetX = 0;
+			int OffsetY = 0;
+			int Width = 0;
+			int Height = 0;
+			bool IsActive() const { return Width > 0 && Height > 0; }
+		};
+
+		static UIRegion GetUIRegion() { return s_UIRegion; }
+		static void SetUIRegion(int x, int y, int w, int h) {
+			s_UIRegion = UIRegion{ x, y, w, h };
+		}
+		static void ClearUIRegion() { s_UIRegion = UIRegion{}; }
+
 	private:
 		void Create(const WindowSpecification& props);
 		void SyncViewportFromFramebuffer();
@@ -125,6 +150,7 @@ namespace Axiom {
 		static const GLFWvidmode* k_Videomode;
 
 		static std::unique_ptr<Viewport> s_MainViewport;
+		static UIRegion s_UIRegion;
 		static bool s_IsVsync;
 		static bool s_IsInitialized;
 

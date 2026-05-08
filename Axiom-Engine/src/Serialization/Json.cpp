@@ -397,7 +397,18 @@ namespace Axiom::Json {
 					return true;
 				}
 
+				// Hard cap on JSON array length. Protects against malformed or hostile
+				// input that would otherwise allocate gigabytes by appending elements
+				// until OOM. 16M is well above any reasonable scene/prefab data size
+				// (a 1k-entity scene serializes to ~10k JSON elements top-level).
+				constexpr std::size_t k_MaxArrayElements = 16u * 1024u * 1024u;
+
 				while (!IsAtEnd()) {
+					if (arrayValue.GetArray().size() >= k_MaxArrayElements) {
+						SetError(outError, "JSON array exceeds maximum element count");
+						return false;
+					}
+
 					Value childValue;
 					if (!ParseAny(childValue, outError, depth + 1)) {
 						return false;

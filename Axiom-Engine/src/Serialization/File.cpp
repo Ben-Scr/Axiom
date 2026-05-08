@@ -1,6 +1,11 @@
 #include "pch.hpp"
 #include "File.hpp"
 
+#ifdef AIM_PLATFORM_WINDOWS
+#define WIN32_LEAN_AND_MEAN
+#  include <Windows.h>
+#endif
+
 namespace Axiom {
 	bool File::Exists(const std::string& path) {
 		return std::filesystem::exists(path);
@@ -10,7 +15,7 @@ namespace Axiom {
 		// Stage to a sibling .tmp first, then rename. A crash mid-stream then loses only
 		// the staging file, leaving the original intact. The previous in-place truncate-
 		// then-write produced corrupted scenes / project files on power loss or process
-		// kill. The rename is atomic on NTFS within a volume and on POSIX always.
+		// kill.
 		const std::filesystem::path target(path);
 		std::filesystem::path tmp = target;
 		tmp += ".tmp";
@@ -39,22 +44,33 @@ namespace Axiom {
 			}
 		}
 
+#ifdef AIM_PLATFORM_WINDOWS
+		// MoveFileExW with REPLACE_EXISTING + WRITE_THROUGH gives us a single atomic
+		// swap: no remove-then-rename window where another process could recreate
+		// `target` and have its content silently overwritten. WRITE_THROUGH flushes
+		// the metadata before returning so a power-loss after success leaves a
+		// committed file rather than a directory entry pointing at unflushed data.
+		const std::wstring tmpW = tmp.wstring();
+		const std::wstring targetW = target.wstring();
+		if (!MoveFileExW(tmpW.c_str(), targetW.c_str(),
+				MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+			const DWORD err = GetLastError();
+			AIM_CORE_ERROR("MoveFileEx failed: {} -> {} (Win32 error {})", tmp.string(), target.string(), static_cast<unsigned long>(err));
+			std::error_code cleanup;
+			std::filesystem::remove(tmp, cleanup);
+			return false;
+		}
+#else
+		// POSIX rename is atomic and replaces the target unconditionally.
 		std::error_code ec;
 		std::filesystem::rename(tmp, target, ec);
 		if (ec) {
-			// On Windows, rename fails if the target exists with certain attributes; fall
-			// back to remove+rename. POSIX rename is unconditional, so this branch only
-			// triggers on Windows-specific failures.
-			std::filesystem::remove(target, ec);
-			ec.clear();
-			std::filesystem::rename(tmp, target, ec);
-			if (ec) {
-				AIM_CORE_ERROR("Rename failed: {} -> {} ({})", tmp.string(), target.string(), ec.message());
-				std::error_code cleanup;
-				std::filesystem::remove(tmp, cleanup);
-				return false;
-			}
+			AIM_CORE_ERROR("Rename failed: {} -> {} ({})", tmp.string(), target.string(), ec.message());
+			std::error_code cleanup;
+			std::filesystem::remove(tmp, cleanup);
+			return false;
 		}
+#endif
 
 		return true;
 	}
