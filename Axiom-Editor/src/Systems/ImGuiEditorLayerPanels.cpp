@@ -7,7 +7,6 @@
 #include "Core/Application.hpp"
 #include "Core/Window.hpp"
 #include "Graphics/ImageData.hpp"
-#include "Graphics/RenderApi.hpp"
 #include "Graphics/Texture2D.hpp"
 #include "Graphics/TextureManager.hpp"
 #include "Gui/EditorIcons.hpp"
@@ -2136,115 +2135,14 @@ namespace Axiom {
 			ImGui::Unindent(8);
 		}
 
-		// Graphics — rendering backend selector. The backend is a build-time
-		// premake choice (--rhi=opengl|bgfx), so swapping it requires
-		// regenerating the engine solution, rebuilding, and re-launching the
-		// editor. The combo persists the user's intent to axiom-project.json
-		// immediately; a separate "Apply & Restart" button performs the
-		// regen/rebuild/restart sequence (or surfaces an error message).
+		// Graphics — runtime rendering API selector. bgfx is the only
+		// supported render backend, so the only choice exposed here is
+		// which native API bgfx routes through at startup
+		// (Auto/Vulkan/D3D11/D3D12/OpenGL). The selection is applied at
+		// bgfx::init, so it takes effect on the next editor / game launch.
 		if (ImGui::CollapsingHeader("Graphics", ImGuiTreeNodeFlags_DefaultOpen)) {
 			ImGui::Indent(8);
 
-			// "Running backend" is whatever this editor binary was compiled
-			// against — RenderApi::BackendName() returns "OpenGL" or "bgfx"
-			// (see Backend/OpenGLApi.cpp / Backend/BgfxApi.cpp).
-			const std::string_view runningBackend = RenderApi::BackendName();
-			ImGui::Text("Running backend: %.*s",
-				static_cast<int>(runningBackend.size()), runningBackend.data());
-			if (ImGui::IsItemHovered()) {
-				ImGui::SetTooltip(
-					"The render backend the currently-running editor binary\n"
-					"was compiled against (premake5 --rhi=<backend>). Read-only;\n"
-					"changing it requires rebuilding and re-launching the editor.");
-			}
-
-			// Persisted choice. Combo writes straight into the project struct
-			// so `changed` triggers Save() at the bottom of the panel.
-			const char* const renderingApiLabels[] = { "OpenGL", "bgfx" };
-			int currentIndex = static_cast<int>(project->ActiveRenderingApi);
-			ImGui::SetNextItemWidth(160.0f);
-			if (ImGui::Combo("Project rendering API", &currentIndex,
-					renderingApiLabels, IM_ARRAYSIZE(renderingApiLabels))) {
-				project->ActiveRenderingApi =
-					static_cast<AxiomProject::RenderingApi>(currentIndex);
-				changed = true;
-			}
-			if (ImGui::IsItemHovered()) {
-				ImGui::SetTooltip(
-					"Build-time render backend for this project. OpenGL is the\n"
-					"historical default and always available. bgfx routes through\n"
-					"the External/bgfx submodule and the BgfxApi backend; on\n"
-					"Apply, premake regenerates with --rhi=bgfx, MSBuild rebuilds\n"
-					"the engine, and the editor re-launches itself.");
-			}
-
-			// Translate enum -> "OpenGL"/"bgfx" so the divergence check
-			// matches the running backend's identifier.
-			const char* persistedBackendName =
-				project->ActiveRenderingApi == AxiomProject::RenderingApi::Bgfx
-					? "bgfx" : "OpenGL";
-			const bool divergent = (runningBackend != persistedBackendName);
-
-			if (divergent) {
-				ImGui::Spacing();
-				ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.78f, 0.20f, 1.0f));
-				ImGui::TextWrapped(
-					"Restart required: the project asks for '%s' but this editor "
-					"is running '%.*s'. The new backend won't take effect until "
-					"the engine has been regenerated and rebuilt.",
-					persistedBackendName,
-					static_cast<int>(runningBackend.size()), runningBackend.data());
-				ImGui::PopStyleColor();
-
-				ImGui::Spacing();
-				if (ImGui::Button("Apply & Restart Editor")) {
-					// Save first so the regen worker observes the new value
-					// (also flushes pending changes from earlier in the panel).
-					project->Save();
-					changed = false; // already saved
-					RequestRenderingApiRestart();
-				}
-				if (ImGui::IsItemHovered()) {
-					ImGui::SetTooltip(
-						"1. Saves axiom-project.json with the new selection.\n"
-						"2. Spawns a helper script that:\n"
-						"   • waits for this editor process to exit,\n"
-						"   • runs premake5 vs2022 --rhi=%s,\n"
-						"   • rebuilds Axiom.sln (Debug|x64),\n"
-						"   • re-launches the editor.\n"
-						"3. Quits this editor immediately so MSBuild can\n"
-						"   replace Axiom-Engine.dll while it's not loaded.",
-						AxiomProject::RenderingApiToPremakeFlag(project->ActiveRenderingApi));
-				}
-
-				if (!m_RenderingApiRestartError.empty()) {
-					ImGui::Spacing();
-					ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.40f, 0.40f, 1.0f));
-					ImGui::TextWrapped("%s", m_RenderingApiRestartError.c_str());
-					ImGui::PopStyleColor();
-				}
-			}
-			else {
-				ImGui::TextDisabled(
-					"Project setting matches the running backend; no rebuild needed.");
-			}
-
-			// ── bgfx runtime backend ─────────────────────────────────
-			// When the project is on the Bgfx rendering API, the user
-			// can pick which backend bgfx itself uses at startup
-			// (D3D11/D3D12/Vulkan/GL/Auto). Picking "Auto" lets bgfx
-			// select the most capable one for the host platform — the
-			// natural default. Selecting an unsupported backend (e.g.
-			// D3D11 on Linux) makes the next launch fail with a clear
-			// log line and an early bgfx::init failure. Greyed out when
-			// the project is on the legacy direct-OpenGL path because
-			// that path doesn't link bgfx at all.
-			const bool projectIsBgfx =
-				project->ActiveRenderingApi == AxiomProject::RenderingApi::Bgfx;
-			ImGui::Spacing();
-			ImGui::Separator();
-			ImGui::Spacing();
-			if (!projectIsBgfx) ImGui::BeginDisabled();
 			const char* const bgfxBackendLabels[] = {
 				"Auto (platform best)",
 				"Vulkan",
@@ -2254,7 +2152,7 @@ namespace Axiom {
 			};
 			int bgfxBackendIndex = static_cast<int>(project->ActiveBgfxBackend);
 			ImGui::SetNextItemWidth(220.0f);
-			if (ImGui::Combo("bgfx backend", &bgfxBackendIndex,
+			if (ImGui::Combo("Rendering API", &bgfxBackendIndex,
 					bgfxBackendLabels, IM_ARRAYSIZE(bgfxBackendLabels))) {
 				project->ActiveBgfxBackend =
 					static_cast<AxiomProject::BgfxBackend>(bgfxBackendIndex);
@@ -2275,11 +2173,6 @@ namespace Axiom {
 					"    startup; the log line says exactly which backend\n"
 					"    was requested.");
 			}
-			if (!projectIsBgfx) {
-				ImGui::EndDisabled();
-				ImGui::TextDisabled(
-					"Set 'Project rendering API' to bgfx to enable this option.");
-			}
 
 			ImGui::Unindent(8);
 		}
@@ -2289,176 +2182,6 @@ namespace Axiom {
 		}
 
 		ImGui::End();
-	}
-
-	// Apply-and-restart for the rendering-API combo.
-	//
-	// The editor process keeps Axiom-Engine.dll mapped while it's running, so
-	// MSBuild can't relink it from inside the editor (LNK1104). Instead we
-	// stage a one-shot batch script (Windows) into %TEMP%, bake every required
-	// path into it, launch it detached, then immediately call
-	// `Application::Quit()` so the editor exits cleanly. The script:
-	//
-	//   1. busy-waits on the editor PID until tasklist no longer reports it,
-	//   2. runs `<premake5> vs2022 --rhi=<flag>` from the engine root,
-	//   3. runs `<msbuild> Axiom.sln -p:Configuration=Debug -p:Platform=x64`,
-	//   4. re-launches the same editor exe via `start` so the user gets a
-	//      fresh editor on the new backend.
-	//
-	// Failure modes (no premake found, no MSBuild found, batch write error)
-	// short-circuit early and surface a message in `m_RenderingApiRestartError`
-	// so the panel can render it. The editor stays running on those paths.
-	void ImGuiEditorLayer::RequestRenderingApiRestart() {
-		m_RenderingApiRestartError.clear();
-
-		AxiomProject* project = ProjectManager::GetCurrentProject();
-		if (!project) {
-			m_RenderingApiRestartError = "No project loaded; cannot restart.";
-			return;
-		}
-
-#ifndef AIM_PLATFORM_WINDOWS
-		// The script we generate is a Windows .bat. Linux/macOS can still
-		// flip the persisted setting (so the next manual rebuild picks it
-		// up) but they don't get the auto-rebuild path yet.
-		m_RenderingApiRestartError =
-			"Auto-rebuild is implemented for Windows only. Setting saved — "
-			"re-run premake5 vs2022 --rhi=" +
-			std::string(AxiomProject::RenderingApiToPremakeFlag(project->ActiveRenderingApi)) +
-			" and rebuild manually to pick up the change.";
-		return;
-#else
-		const std::string engineRoot = AxiomProject::GetEngineRootDir();
-		if (engineRoot.empty()) {
-			m_RenderingApiRestartError =
-				"Could not locate engine root directory.";
-			return;
-		}
-
-		const std::string premakePath = AxiomProject::GetPremakePath();
-		if (premakePath.empty()) {
-			m_RenderingApiRestartError =
-				"premake5 binary not found under <engine-root>/vendor/bin/. "
-				"Cannot regenerate the solution automatically.";
-			return;
-		}
-
-		const std::string msbuildPath = AxiomProject::GetMSBuildPath();
-		if (msbuildPath.empty()) {
-			m_RenderingApiRestartError =
-				"MSBuild.exe not found. Install Visual Studio 2022 (any "
-				"edition with C++ workload) and try again.";
-			return;
-		}
-
-		// Resolve current editor exe path. Path::ExecutableDir() only gives
-		// the directory; we need the full filename to re-launch the same
-		// binary with `start`. GetModuleFileNameW returns it directly.
-		std::wstring exePathW(MAX_PATH, L'\0');
-		for (;;) {
-			DWORD copied = GetModuleFileNameW(nullptr, exePathW.data(),
-				static_cast<DWORD>(exePathW.size()));
-			if (copied == 0) {
-				m_RenderingApiRestartError =
-					"GetModuleFileNameW failed; cannot resolve editor exe path.";
-				return;
-			}
-			if (copied < exePathW.size()) {
-				exePathW.resize(copied);
-				break;
-			}
-			exePathW.resize(exePathW.size() * 2);
-			if (exePathW.size() > 65536) {
-				m_RenderingApiRestartError =
-					"Editor exe path > 64KB; refusing.";
-				return;
-			}
-		}
-		const std::string exePath = std::filesystem::path(exePathW).string();
-		const DWORD pid = GetCurrentProcessId();
-
-		const std::string rhiFlag =
-			AxiomProject::RenderingApiToPremakeFlag(project->ActiveRenderingApi);
-
-		// Stage the batch file in %TEMP%. Filename is timestamped per-PID so
-		// two concurrent attempts don't clobber each other (defensive — the
-		// UI button can't be re-clicked once the editor exits, but a future
-		// retry path could).
-		std::filesystem::path tempDir = std::filesystem::temp_directory_path();
-		const std::string scriptName =
-			"axiom_restart_rhi_" + std::to_string(pid) + ".bat";
-		const std::filesystem::path scriptPath = tempDir / scriptName;
-
-		// Build the script. Every path/value gets baked literally so we
-		// don't have to wrestle with cmd.exe quoting on argv. Paths that
-		// contain spaces are wrapped in double quotes inside the script.
-		// `pause` on the failure branches keeps a console window open so
-		// the user can read the error before it disappears.
-		std::ostringstream script;
-		script <<
-			"@echo off\r\n"
-			"setlocal\r\n"
-			"title Axiom \xe2\x80\x94 switching render backend to " << rhiFlag << "\r\n"
-			"echo === Waiting for editor (PID " << pid << ") to exit ===\r\n"
-			":wait\r\n"
-			"tasklist /FI \"PID eq " << pid << "\" 2>NUL | find /I \"" << pid << "\" >NUL\r\n"
-			"if \"%ERRORLEVEL%\"==\"0\" (\r\n"
-			"    timeout /t 1 /nobreak >NUL\r\n"
-			"    goto wait\r\n"
-			")\r\n"
-			"echo === Regenerating solution with --rhi=" << rhiFlag << " ===\r\n"
-			"pushd \"" << engineRoot << "\"\r\n"
-			"\"" << premakePath << "\" vs2022 --rhi=" << rhiFlag << "\r\n"
-			"if errorlevel 1 (\r\n"
-			"    echo [ERROR] premake regeneration failed.\r\n"
-			"    popd\r\n"
-			"    pause\r\n"
-			"    exit /b 1\r\n"
-			")\r\n"
-			"echo === Building Axiom.sln ^(Debug^|x64^) ===\r\n"
-			"\"" << msbuildPath << "\" Axiom.sln -p:Configuration=Debug -p:Platform=x64 -verbosity:minimal\r\n"
-			"if errorlevel 1 (\r\n"
-			"    echo [ERROR] MSBuild failed.\r\n"
-			"    popd\r\n"
-			"    pause\r\n"
-			"    exit /b 1\r\n"
-			")\r\n"
-			"popd\r\n"
-			"echo === Re-launching editor ===\r\n"
-			"start \"\" \"" << exePath << "\"\r\n"
-			"endlocal\r\n"
-			"exit /b 0\r\n";
-
-		const std::string scriptText = script.str();
-		if (!File::WriteAllText(scriptPath.string(), scriptText)) {
-			m_RenderingApiRestartError =
-				"Failed to write helper script to " + scriptPath.string();
-			return;
-		}
-
-		AIM_INFO_TAG("ProjectSettings",
-			"Spawning rendering-API restart helper: {} (--rhi={}, editor PID {})",
-			scriptPath.string(), rhiFlag, pid);
-
-		// Launch the script via cmd.exe so the .bat file is interpreted
-		// (LaunchDetached invokes CreateProcess directly which won't pick
-		// up the .bat extension on its own). `/c` runs the script then
-		// exits cmd; the script itself does not need a separate console
-		// for the success path because its own commands print enough.
-		const bool launched = Process::LaunchDetached({
-			"cmd.exe", "/c", scriptPath.string()
-		});
-		if (!launched) {
-			m_RenderingApiRestartError =
-				"Failed to launch helper script: " + scriptPath.string();
-			return;
-		}
-
-		AIM_INFO_TAG("ProjectSettings",
-			"Rendering-API restart helper launched; quitting editor so MSBuild "
-			"can relink Axiom-Engine.dll.");
-		Application::Quit();
-#endif
 	}
 
 	// Splash preview — replays the runtime's splash timeline as a

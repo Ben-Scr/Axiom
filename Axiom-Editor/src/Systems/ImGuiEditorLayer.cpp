@@ -38,6 +38,7 @@
 #include "Gui/AddComponentPopup.hpp"
 #include "Gui/EditorIcons.hpp"
 #include "Gui/EditorTheme.hpp"
+#include "Gui/ImGuiContextLayer.hpp"
 #include "Gui/HierarchyDragData.hpp"
 #include "Assets/AssetRegistry.hpp"
 #include "Scripting/ScriptEngine.hpp"
@@ -589,6 +590,9 @@ namespace Axiom {
 		if (ImGui::BeginMenu("Application")) {
 			if (ImGui::MenuItem("Reload App")) {
 				Application::Reload();
+			}
+			if (ImGui::MenuItem("Reset Layout")) {
+				ImGuiContextLayer::ResetLayoutToBundledDefault();
 			}
 			if (ImGui::MenuItem("Quit")) {
 				Application::RequestQuit();

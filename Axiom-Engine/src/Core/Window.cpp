@@ -229,6 +229,16 @@ namespace Axiom {
 	}
 
 	void Window::SwapBuffers() const {
+		// View 0 is the default swap-chain view set up at bgfx::init
+		// with the engine's background clear color. bgfx only executes
+		// a view's setViewClear when something is submitted/touched on
+		// that view, so without this nudge the runtime build never
+		// clears the swap chain — each frame's UI draws stack on top
+		// of the previous frame and the backbuffer accumulates
+		// indefinitely. Editor builds happen to clear via their per-
+		// FBO views, but the swap chain itself would still benefit.
+		bgfx::touch(0);
+
 		// Presenting the rendered frame is `bgfx::frame()` — it advances
 		// bgfx's internal frame index, flushes the render-thread command
 		// buffer (or executes inline when single-threaded), and presents

@@ -527,11 +527,18 @@ namespace Axiom {
 				RenderSceneIntoFBO(m_EditorViewFBO, *renderScene, vp, viewAABB, true, false, clearColor, IsInPrefabEditMode(), true, m_EditorViewDrawMode);
 				Gizmo::ClearViewportAABBOverride();
 
+				// FBO color textures under bgfx D3D11 use the renderer's
+				// native top-left origin (texel row 0 = top of the rendered
+				// image). Sample with default UV(0,0)-(1,1) so what the
+				// engine drew at world +y appears at the top of the panel.
+				// (The previous UV(0,1)-(1,0) flip dated from the OpenGL
+				// path where FBO textures were stored bottom-up; bgfx-port
+				// FBOs aren't, and the flip combined with GuiRenderer's
+				// Y-flipped ortho to make the editor look right while
+				// silently breaking the standalone runtime.)
 				ImGui::Image(
 					static_cast<ImTextureID>(static_cast<intptr_t>(m_EditorViewFBO.GetColorTextureBackendId())),
-					viewportSize,
-					ImVec2(0.0f, 1.0f),
-					ImVec2(1.0f, 0.0f));
+					viewportSize);
 
 				ImVec2 imageTopLeft = ImGui::GetItemRectMin();
 
@@ -948,12 +955,12 @@ namespace Axiom {
 				ImDrawList* drawList = ImGui::GetWindowDrawList();
 				drawList->AddRectFilled(canvasMin, canvasMax, IM_COL32(0, 0, 0, 255));
 
+				// FBO sampling uses default UVs — see RenderEditorView for
+				// the rationale. Game View shares the same convention.
 				drawList->AddImage(
 					static_cast<ImTextureID>(static_cast<intptr_t>(m_GameViewFBO.GetColorTextureBackendId())),
 					imageMin,
-					imageMax,
-					ImVec2(0.0f, 1.0f),
-					ImVec2(1.0f, 0.0f));
+					imageMax);
 				drawList->AddRect(imageMin, imageMax, IM_COL32(255, 255, 255, 40));
 
 				// Stats overlay — engine-level helper. The cached snapshot

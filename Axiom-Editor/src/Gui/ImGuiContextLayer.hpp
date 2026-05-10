@@ -22,6 +22,14 @@ namespace Axiom {
 		void OnPreRender(Application& app) override;
 		void OnPostRender(Application& app) override;
 
+		// Re-loads the bundled (checked-in) imgui.ini default into the
+		// active context and persists the result to the user's
+		// %LOCALAPPDATA% file, so the next launch starts from the same
+		// reset state rather than re-saving the pre-reset layout. Called
+		// from the editor's Application → Reset Layout menu item; safe to
+		// call from any frame inside the editor's render scope.
+		static void ResetLayoutToBundledDefault();
+
 	private:
 		static void ApplyAxiomTheme();
 		// Belt-and-suspenders save. ImGui auto-saves internally on its

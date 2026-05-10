@@ -217,9 +217,9 @@ namespace Axiom {
 
 	static int Axiom_Engine_GetGraphicsApiBuffer(char* outBuffer, int capacity)
 	{
-		const std::string& version = OpenGL::GetVersionString();
-		std::string label = version.empty() ? std::string("OpenGL") : "OpenGL " + version;
-		return CopyToManagedBuffer(label, outBuffer, capacity);
+		// Returns the version string set by the active backend (e.g. "bgfx Vulkan").
+		// Empty until the renderer initializes.
+		return CopyToManagedBuffer(OpenGL::GetVersionString(), outBuffer, capacity);
 	}
 
 	static int Axiom_Engine_GetGpuVendorBuffer(char* outBuffer, int capacity)

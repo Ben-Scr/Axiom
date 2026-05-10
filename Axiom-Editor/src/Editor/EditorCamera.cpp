@@ -51,7 +51,14 @@ namespace Axiom {
 		float aspect = static_cast<float>(m_ViewportWidth) / static_cast<float>(m_ViewportHeight);
 		float halfH = OrthographicSize * Zoom;
 		float halfW = halfH * aspect;
-		m_ProjMat = glm::ortho(-halfW, halfW, -halfH, halfH, 0.0f, 100.0f);
+		// 2D rendering submits at world z=0. The OpenGL-convention zNear/zFar
+		// of (0, 100) maps z=0 to NDC z=-1, which Vulkan/D3D12 clip-space
+		// (valid range [0, 1]) considers behind the near plane and culls.
+		// A symmetric (-1, 1) range maps z=0 to NDC z=0 — inside [0, 1] for
+		// Vulkan AND inside [-1, 1] for OpenGL, so the matrix is portable
+		// across every backend bgfx supports without needing to branch on
+		// caps->homogeneousDepth here.
+		m_ProjMat = glm::ortho(-halfW, halfW, -halfH, halfH, -1.0f, 1.0f);
 	}
 
 	void EditorCamera::UpdateView() {

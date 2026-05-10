@@ -135,8 +135,13 @@ namespace Axiom {
 		const float halfH = m_OrthographicSize * m_Zoom;
 		const float halfW = halfH * aspect;
 
-		const float zNear = 0.0f;
-		const float zFar = 100.0f;
+		// 2D rendering submits at world z=0. An OpenGL-convention range
+		// like (0, 100) maps z=0 to NDC z=-1, which Vulkan/D3D12 clip-space
+		// (valid range [0, 1]) culls. A symmetric (-1, 1) range maps z=0
+		// to NDC z=0 — visible under every backend bgfx supports without
+		// having to branch on caps->homogeneousDepth in the renderer.
+		const float zNear = -1.0f;
+		const float zFar  =  1.0f;
 
 		m_ProjMat = glm::ortho(-halfW, +halfW, -halfH, +halfH, zNear, zFar);
 		if (TryGetTransform()) {

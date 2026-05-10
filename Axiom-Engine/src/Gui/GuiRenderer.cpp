@@ -357,16 +357,17 @@ namespace Axiom {
 		const float zNear = -1.0f;
 		const float zFar  = 1.0f;
 
-		// Y-flipped ortho: bgfx's D3D11/D3D12/Vulkan/Metal backends store
-		// framebuffers with origin at TOP-LEFT (pixel row 0 = top). The
-		// OpenGL-convention `glm::ortho(L, R, B, T, ...)` assumes origin
-		// at BOTTOM-LEFT, so under D3D11 our +Y-up authored UI lands
-		// upside-down inside the FBO and looks flipped when ImGui
-		// displays the texture. Swapping `bottom`/`top` in the ortho
-		// call inverts the projection's Y axis so a UI rect authored at
-		// (+halfH) renders to FBO pixel row 0 (top), matching the editor's
-		// expectation when it composites the FBO via ImGui::Image.
-		const glm::mat4 mvp = glm::ortho(-halfW, +halfW, +halfH, -halfH, zNear, zFar);
+		// Standard +Y-up ortho — matches the camera VP convention used
+		// for sprite rendering, so screen-space UI and world-space
+		// sprites share an orientation. Editor FBO display + standalone
+		// runtime both consume the result without an extra Y flip
+		// (ImGui::Image uses default UV(0,0)–(1,1), runtime draws
+		// straight to the swap chain). An earlier port of this path
+		// Y-flipped the ortho to compensate for an ImGui::Image UV flip
+		// that has since been removed; flipping both broke the runtime
+		// (no FBO to undo the flip) and left UI mirrored vs sprites
+		// inside the editor's Editor View.
+		const glm::mat4 mvp = glm::ortho(-halfW, +halfW, -halfH, +halfH, zNear, zFar);
 		CollectAndDraw(scene, mvp, halfW, halfH);
 	}
 

@@ -91,16 +91,6 @@ namespace Axiom {
 		void RenderBuildPanel();
 		void RenderPlayerSettingsPanel();
 		void RenderProjectSettingsPanel();
-		// Triggered by the Graphics tab's "Apply & Restart Editor" button.
-		// Writes a one-shot helper script next to the editor exe that waits
-		// for the editor process to exit, regenerates premake with the new
-		// `--rhi=<flag>` value, MSBuild-rebuilds Axiom.sln, and re-launches
-		// the editor. Spawns the script detached, then calls
-		// `Application::Quit()` so MSBuild can replace Axiom-Engine.dll
-		// (which the editor process holds locked while running). On failure
-		// (no premake, no MSBuild, write error) populates
-		// `m_RenderingApiRestartError` and leaves the editor running.
-		void RequestRenderingApiRestart();
 		// Splash preview overlay. Drawn on top of the dockspace with an
 		// ImGui foreground draw list so the editor stays interactive
 		// underneath; the preview self-completes after FadeIn +
@@ -379,11 +369,6 @@ namespace Axiom {
 		std::vector<std::string> m_BuildSceneList;
 		int m_DraggedSceneIndex = -1;
 		bool m_ShowProjectSettings = false;
-		// Last failure message from RequestRenderingApiRestart() (e.g.
-		// premake binary not found, helper script failed to write).
-		// Empty when the last attempt succeeded or no attempt has run.
-		// Surfaced in the Graphics tab below the Apply & Restart button.
-		std::string m_RenderingApiRestartError;
 		bool m_PackageManagerInitialized = false;
 		// Splash preview state. Set by the Show Preview button in the
 		// Player Settings panel; consumed by the editor's chrome update

@@ -8,6 +8,7 @@
 #include "Serialization/Path.hpp"
 
 #include <imgui.h>
+#include <imgui_internal.h>
 #include <backends/imgui_impl_glfw.h>
 #if defined(AIM_RHI_BGFX)
 #include "Gui/ImGuiImplBgfx.hpp"
@@ -330,7 +331,13 @@ namespace Axiom {
 		// recent layout work without this. Triggered via the event
 		// system (registered as a Layer::OnEvent) so we don't have to
 		// poll glfwGetWindowAttrib(GLFW_FOCUSED) every frame.
-		if (event.GetEventType() == EventType::WindowLostFocus) {
+		// Also save on the X-button close: the WindowCloseEvent runs
+		// before the layer stack tears down, but a layout mutation
+		// made within the past tick (lazy-save still ticking) would
+		// otherwise wait for OnDetach. Saving here closes that gap if
+		// any subsequent shutdown step throws or aborts.
+		const EventType type = event.GetEventType();
+		if (type == EventType::WindowLostFocus || type == EventType::WindowClose) {
 			ImGuiIO& io = ImGui::GetIO();
 			if (io.IniFilename != nullptr && *io.IniFilename != '\0') {
 				ImGui::SaveIniSettingsToDisk(io.IniFilename);
@@ -338,6 +345,42 @@ namespace Axiom {
 				m_LastSaveTime = std::chrono::steady_clock::now();
 			}
 		}
+	}
+
+	void ImGuiContextLayer::ResetLayoutToBundledDefault() {
+		ImGuiIO& io = ImGui::GetIO();
+		if (io.IniFilename == nullptr || *io.IniFilename == '\0') {
+			AIM_CORE_WARN_TAG("ImGui",
+				"Reset Layout requested but no IniFilename is set; ignoring.");
+			return;
+		}
+
+		std::filesystem::path defaultIniFile = FindDefaultEditorIniFile();
+		if (defaultIniFile.empty()) {
+			AIM_CORE_WARN_TAG("ImGui",
+				"Reset Layout: bundled default imgui.ini not found in any "
+				"candidate path. Layout left unchanged.");
+			return;
+		}
+
+		// ClearIniSettings drops the in-memory settings tree (windows, dock
+		// nodes, tables) so LoadIniSettingsFromDisk below replaces rather
+		// than merges. Without the clear, stale dock-tree fragments from the
+		// previous layout survive and produce a half-applied reset.
+		ImGui::ClearIniSettings();
+		ImGui::LoadIniSettingsFromDisk(defaultIniFile.string().c_str());
+
+		// Persist to user path so the reset survives the next launch
+		// (otherwise the next periodic flush would re-save the
+		// previous layout, since the in-memory state hasn't been
+		// re-marked dirty by user input).
+		ImGui::SaveIniSettingsToDisk(io.IniFilename);
+		io.WantSaveIniSettings = false;
+
+		AIM_CORE_INFO_TAG("ImGui",
+			"Reset editor layout from bundled default '{}' → '{}'",
+			defaultIniFile.string(),
+			io.IniFilename);
 	}
 
 	void ImGuiContextLayer::ApplyAxiomTheme() {
