@@ -215,7 +215,27 @@ namespace Axiom {
 		m_RenamePath = path;
 		m_PressedPath.clear();
 		m_RenameFrameCounter = 0;
-		std::snprintf(m_RenameBuffer, sizeof(m_RenameBuffer), "%s", currentName.c_str());
+
+		// Pre-fill with the stem only when ShowFileExtensions is off:
+		// authoring "MyScene" instead of "MyScene.scene" matches the way
+		// the asset browser displays the entry, and the user doesn't
+		// have to delete a redundant ".scene" before typing. CommitRename
+		// re-appends the original extension on commit. Folders never
+		// have an extension to strip — fall back to currentName for them.
+		AxiomProject* project = ProjectManager::GetCurrentProject();
+		const bool showExt = project ? project->ShowFileExtensions : false;
+		std::string display = currentName;
+		if (!showExt) {
+			std::filesystem::path p(currentName);
+			std::string stem = p.stem().string();
+			std::string ext = p.extension().string();
+			// stem.empty() catches dotfiles like ".env" — leave them
+			// alone so we don't render an empty rename buffer.
+			if (!ext.empty() && !stem.empty()) {
+				display = stem;
+			}
+		}
+		std::snprintf(m_RenameBuffer, sizeof(m_RenameBuffer), "%s", display.c_str());
 	}
 
 	void AssetBrowser::CommitRename() {
@@ -427,6 +447,20 @@ namespace Axiom {
 			m_NeedsRefresh = true;
 			CancelRename();
 			return;
+		}
+
+		// Re-append the original extension when the user renamed without
+		// typing one — necessary because BeginRename stripped it for the
+		// "ShowFileExtensions=false" UX. Skip when the entry IS a folder
+		// (no extension to preserve) or when the user typed an explicit
+		// extension already (don't double-stack ".scene.scene"). Done in
+		// the regular-rename branch only; the script/prefab pending
+		// branch above already builds its own filename from scratch.
+		if (!newName.empty() && newName.find('.') == std::string::npos) {
+			std::string oldExt = std::filesystem::path(m_RenamePath).extension().string();
+			if (!oldExt.empty()) {
+				newName += oldExt;
+			}
 		}
 
 		if (!newName.empty() && newName != oldName) {

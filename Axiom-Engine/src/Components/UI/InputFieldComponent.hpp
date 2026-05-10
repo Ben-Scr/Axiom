@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Collections/Color.hpp"
+#include "Components/UI/InspectorEventBinding.hpp"
 #include "Components/UI/UITransitionMode.hpp"
 #include "Core/UUID.hpp"
 #include "Scene/EntityHandle.hpp"
@@ -148,6 +149,22 @@ namespace Axiom {
 		UUID PressedSprite { 0 };
 		UUID DisabledSprite{ 0 };
 		UUID FocusedSprite { 0 };
+
+		// Inspector-bound event lists. OnValueChanged fires every frame
+		// the Text mutates (per-keystroke) — methods that take a
+		// `string` parameter receive the new text as the static
+		// argument. OnSubmitted fires once when the user presses Enter
+		// while the field is focused.
+		InspectorEventList OnValueChanged;
+		InspectorEventList OnSubmitted;
+
+		// Mirror of `Text` from the previous tick — UIEventSystem
+		// compares against this each frame to detect content edits and
+		// fan them out to OnValueChanged. Initialised on the first
+		// observation so a freshly-deserialised non-empty Text doesn't
+		// fire a spurious "changed" event. Transient — not serialized.
+		std::string LastObservedText;
+		bool ValueObserved = false;
 	};
 
 }

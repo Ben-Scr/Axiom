@@ -16,9 +16,12 @@
 #include "Packages/PackageManager.hpp"
 #include "Editor/EditorCamera.hpp"
 #include "Graphics/Texture2D.hpp"
+#include "Graphics/TextureHandle.hpp"
 
 
+#include <atomic>
 #include <filesystem>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -91,8 +94,24 @@ namespace Axiom {
 		void RenderProjectPanel();
 		void RenderBuildPanel();
 		void RenderPlayerSettingsPanel();
+		void RenderProjectSettingsPanel();
+		// Splash preview overlay. Drawn on top of the dockspace with an
+		// ImGui foreground draw list so the editor stays interactive
+		// underneath; the preview self-completes after FadeIn +
+		// Duration + FadeOut seconds.
+		void TickSplashPreview();
 		void RenderSceneSystemsInspector(Scene& scene);
 		void ExecuteBuild();
+		// Async wrapper. Captures the project + output dir on the UI
+		// thread (file access is fine here), then dispatches the bulk
+		// of the build (process spawn, file copies, icon embedding) to
+		// a worker. The returned future completes when the worker has
+		// finished — RenderBuildPanel polls it once per frame.
+		void ExecuteBuildAsync();
+		// Public-to-private helper: post a stage / progress update
+		// from the build worker. Thread-safe; the UI reads the values
+		// each frame.
+		void ReportBuildProgress(float progress, std::string_view stage);
 		void RenderPackageManagerPanel();
 		void RenderAssetInspector();
 		void BeginPlayModeRequest(Scene& scene);
@@ -108,6 +127,7 @@ namespace Axiom {
 		void ToggleEntitySelection(EntityHandle entity, int index);
 		void SelectEntityRange(int index);
 		void DrainPendingLogEntries();
+		void RunAutoSaveTick(Application& app, float dt);
 		void AppendLogEntry(LogEntry entry);
 		void ClearLogEntries();
 		void FocusSelectedEntity(Scene& scene);
@@ -333,6 +353,13 @@ namespace Axiom {
 		bool m_PlayModeRecompilePending = false;
 		int m_StepFrames = 0;
 
+		// Auto-save: accumulates real time since the last successful save
+		// of a dirty active scene. Reset on save (manual or auto), or when
+		// the active scene swaps. Driven by Project.AutoSaveScenes /
+		// AutoSaveIntervalSeconds — see RunAutoSaveTick.
+		float m_AutoSaveAccumulator = 0.0f;
+		std::string m_AutoSaveLastScenePath;
+
 		bool m_ShowQuitSaveDialog = false;
 		bool m_ShowBuildPanel = false;
 		bool m_ShowPlayerSettings = false;
@@ -345,14 +372,43 @@ namespace Axiom {
 		// drag-drop reordering is preserved across syncs.
 		std::vector<std::string> m_BuildSceneList;
 		int m_DraggedSceneIndex = -1;
+		bool m_ShowProjectSettings = false;
 		bool m_PackageManagerInitialized = false;
+		// Splash preview state. Set by the Show Preview button in the
+		// Player Settings panel; consumed by the editor's chrome update
+		// each frame to advance + render the preview overlay. Mirrors
+		// the runtime's RuntimeSplashLayer timeline (fade in → hold →
+		// fade out) but draws on top of the editor's main viewport
+		// instead of locking the application.
+		bool m_SplashPreviewRequest = false;
+		bool m_SplashPreviewActive = false;
+		float m_SplashPreviewElapsed = 0.0f;
+		TextureHandle m_SplashPreviewLogo;
+		TextureHandle m_SplashPreviewBackground;
+		std::uint32_t m_SplashPreviewTexRefToken = 0;
 		PackageManager m_PackageManager;
 		PackageManagerPanel m_PackageManagerPanel;
 		std::string m_BuildOutputDir;
 		char m_BuildOutputDirBuffer[512]{};
 		char m_CustomDefineEntryBuffer[128]{}; // Build panel custom-define text input
-		int m_BuildState = 0; // 0=idle, 1=pending (render overlay), 2=execute
+		// Build state machine:
+		//   0 = idle
+		//   1 = pending (render overlay one frame so the user sees it)
+		//   2 = launch worker (transition only — kicks off m_BuildFuture, becomes 3)
+		//   3 = running (worker thread alive, polled by RenderBuildPanel)
+		int m_BuildState = 0;
 		bool m_BuildAndPlay = false;
+		// Cross-thread build progress. ExecuteBuildAsync runs on
+		// m_BuildThread / m_BuildFuture and writes to these atomics +
+		// the message string under m_BuildProgressMutex; the UI thread
+		// reads them every frame to drive the progress bar / status
+		// label, then polls m_BuildFuture::wait_for(0) to detect
+		// completion. Atomics keep the per-frame UI read lock-free.
+		std::future<void> m_BuildFuture;
+		std::atomic<float> m_BuildProgress{ 0.0f };
+		std::atomic<bool>  m_BuildSucceeded{ true };
+		std::mutex m_BuildProgressMutex;
+		std::string m_BuildStage;     // protected by m_BuildProgressMutex
 		std::vector<entt::entity> m_EditorPausedAudioEntities; // AudioSources paused by editor, not by gameplay
 		std::chrono::steady_clock::time_point m_BuildStartTime;
 	};

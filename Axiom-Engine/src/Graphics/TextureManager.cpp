@@ -419,6 +419,17 @@ namespace Axiom {
 			return nullptr;
 		}
 
+		// Default-constructed handles and explicit TextureHandle::Invalid()
+		// returns both carry index = k_InvalidIndex. That is the documented
+		// "no texture" sentinel — callers (splash screen, Image components
+		// without an asset, etc.) routinely poll a default-init handle each
+		// frame, so logging "out of range" here would spam the log every
+		// frame. Treat it as a silent miss; peer accessors (`IsValid`,
+		// `GetTextureName`) already do the same.
+		if (handle.index == TextureHandle::k_InvalidIndex) {
+			return nullptr;
+		}
+
 		if (handle.index >= s_Textures.size()) {
 			AIM_CORE_ERROR("[{}] TextureHandle index {} out of range", ErrorCodeToString(AxiomErrorCode::OutOfRange), handle.index);
 			return nullptr;

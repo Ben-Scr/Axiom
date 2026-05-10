@@ -117,6 +117,49 @@ namespace Axiom {
 			sceneManager.RegisterComponentType<T>(info);
 		}
 
+		// Save/load an InspectorEventList alongside its host component.
+		// Used by every UI widget that owns one or more event lists
+		// (Button.OnClick, Slider.OnValueChanged, ...). Each row stores
+		// the typed argument as a (kind, value) pair; older scene files
+		// without those fields default to Void/empty so the binding
+		// behaves identically to the original parameterless flow.
+		Json::Value UIEventListToJson(const InspectorEventList& list) {
+			Json::Value array = Json::Value::MakeArray();
+			for (const InspectorEventBinding& b : list.Bindings) {
+				Json::Value row = Json::Value::MakeObject();
+				row.AddMember("entity",  UIUuidToJson(UUID(b.TargetEntityUUID)));
+				row.AddMember("class",   Json::Value(b.ScriptClassName));
+				row.AddMember("method",  Json::Value(b.MethodName));
+				row.AddMember("enabled", Json::Value(b.Enabled));
+				row.AddMember("argKind", Json::Value(static_cast<int>(b.ArgumentKind)));
+				row.AddMember("argValue", Json::Value(b.ArgumentValue));
+				array.Append(std::move(row));
+			}
+			return array;
+		}
+		void UIEventListFromJson(const Json::Value& v, InspectorEventList& outList) {
+			outList.Bindings.clear();
+			if (!v.IsArray()) return;
+			for (const Json::Value& row : v.GetArray()) {
+				if (!row.IsObject()) continue;
+				InspectorEventBinding b;
+				if (const Json::Value* x = row.FindMember("entity"))
+					b.TargetEntityUUID = static_cast<uint64_t>(UIUuidFromJson(*x, UUID(0)));
+				if (const Json::Value* x = row.FindMember("class"))    b.ScriptClassName = x->AsStringOr("");
+				if (const Json::Value* x = row.FindMember("method"))   b.MethodName      = x->AsStringOr("");
+				if (const Json::Value* x = row.FindMember("enabled"))  b.Enabled         = x->AsBoolOr(true);
+				if (const Json::Value* x = row.FindMember("argKind")) {
+					int k = x->AsIntOr(0);
+					if (k < 0 || k > static_cast<int>(InspectorEventArgKind::EntityRef)) k = 0;
+					b.ArgumentKind = static_cast<InspectorEventArgKind>(k);
+				}
+				if (const Json::Value* x = row.FindMember("argValue")) b.ArgumentValue   = x->AsStringOr("");
+				if (!b.ScriptClassName.empty() || !b.MethodName.empty()) {
+					outList.Bindings.push_back(std::move(b));
+				}
+			}
+		}
+
 		template<typename A, typename B>
 		void DeclareConflict(SceneManager& sceneManager) {
 			const std::type_index aId(typeid(A));
@@ -347,6 +390,18 @@ namespace Axiom {
 					[](ImageComponent& i, TextureHandle h, UUID assetId) {
 						i.TextureHandle = h;
 						i.TextureAssetId = assetId;
+						if (auto* tex = TextureManager::GetTexture(h); tex) {
+							tex->SetFilter(i.FilterMode);
+						}
+					}),
+				Properties::MakeWith<Filter>("FilterMode", "Filter Mode",
+					[](const Entity& e) { return e.GetComponent<ImageComponent>().FilterMode; },
+					[](Entity& e, Filter v) {
+						auto& image = e.GetComponent<ImageComponent>();
+						image.FilterMode = v;
+						if (auto* tex = TextureManager::GetTexture(image.TextureHandle); tex) {
+							tex->SetFilter(v);
+						}
 					}),
 			});
 
@@ -547,12 +602,19 @@ namespace Axiom {
 					[](Entity& e, TextWrapMode v) {
 						e.GetComponent<TextRendererComponent>().WrapMode = v;
 					}),
-				Properties::MakeWith<float>("WrapWidth", "Wrap Width",
-					[](const Entity& e) { return e.GetComponent<TextRendererComponent>().WrapWidth; },
-					[](Entity& e, float v) {
-						e.GetComponent<TextRendererComponent>().WrapWidth = v;
-					},
-					Properties::Meta::Clamp(0.0, 8192.0, 1.0f)),
+				// WrapWidth was removed — wrap area now comes entirely
+				// from the host rect's width minus Margin (.x + .z). The
+				// inspector field is no longer needed because Margin's
+				// inner-rect gizmo already shows / drags the same number.
+				// (Left, Top, Right, Bottom) inset in pixels. Drives the
+				// editor-view margin gizmo; reduces wrap width in
+				// GuiRenderer/TextRenderer so wrapped lines respect the
+				// authored insets.
+				Properties::MakeWith<Vec4>("Margin", "Margin",
+					[](const Entity& e) { return e.GetComponent<TextRendererComponent>().Margin; },
+					[](Entity& e, const Vec4& v) {
+						e.GetComponent<TextRendererComponent>().Margin = v;
+					}),
 				Properties::MakeWith<int16_t>("SortingOrder", "Sorting Order",
 					[](const Entity& e) { return e.GetComponent<TextRendererComponent>().SortingOrder; },
 					[](Entity& e, int16_t v) {
@@ -973,6 +1035,10 @@ namespace Axiom {
 			v.AddMember("pressedSprite",  UIUuidToJson(c.PressedSprite));
 			v.AddMember("disabledSprite", UIUuidToJson(c.DisabledSprite));
 			v.AddMember("focusedSprite",  UIUuidToJson(c.FocusedSprite));
+
+			// OnClick event list. UUID 0 == "self", same convention as
+			// UIEntityHandleToJson at file scope.
+			v.AddMember("onClick", UIEventListToJson(c.OnClick));
 			return v;
 		};
 		buttonInfo.deserialize = [](Entity e, const Json::Value& v) {
@@ -989,6 +1055,10 @@ namespace Axiom {
 			if (const Json::Value* m = v.FindMember("pressedSprite"))  c.PressedSprite  = UIUuidFromJson(*m, c.PressedSprite);
 			if (const Json::Value* m = v.FindMember("disabledSprite")) c.DisabledSprite = UIUuidFromJson(*m, c.DisabledSprite);
 			if (const Json::Value* m = v.FindMember("focusedSprite"))  c.FocusedSprite  = UIUuidFromJson(*m, c.FocusedSprite);
+
+			if (const Json::Value* m = v.FindMember("onClick")) {
+				UIEventListFromJson(*m, c.OnClick);
+			}
 		};
 		buttonInfo.onAdd = &InheritImageColorIntoNormal<ButtonComponent>;
 		sceneManager.RegisterComponentType<ButtonComponent>(buttonInfo);
@@ -1053,6 +1123,7 @@ namespace Axiom {
 			v.AddMember("pressedSprite",  UIUuidToJson(c.PressedSprite));
 			v.AddMember("disabledSprite", UIUuidToJson(c.DisabledSprite));
 			v.AddMember("focusedSprite",  UIUuidToJson(c.FocusedSprite));
+			v.AddMember("onValueChanged", UIEventListToJson(c.OnValueChanged));
 			return v;
 		};
 		sliderInfo.deserialize = [](Entity e, const Json::Value& v) {
@@ -1078,6 +1149,7 @@ namespace Axiom {
 			if (const Json::Value* m = v.FindMember("pressedSprite"))  c.PressedSprite  = UIUuidFromJson(*m, c.PressedSprite);
 			if (const Json::Value* m = v.FindMember("disabledSprite")) c.DisabledSprite = UIUuidFromJson(*m, c.DisabledSprite);
 			if (const Json::Value* m = v.FindMember("focusedSprite"))  c.FocusedSprite  = UIUuidFromJson(*m, c.FocusedSprite);
+			if (const Json::Value* m = v.FindMember("onValueChanged")) UIEventListFromJson(*m, c.OnValueChanged);
 		};
 		sliderInfo.onAdd = &InheritImageColorIntoNormal<SliderComponent>;
 		sceneManager.RegisterComponentType<SliderComponent>(sliderInfo);
@@ -1147,6 +1219,8 @@ namespace Axiom {
 			v.AddMember("pressedSprite",  UIUuidToJson(c.PressedSprite));
 			v.AddMember("disabledSprite", UIUuidToJson(c.DisabledSprite));
 			v.AddMember("focusedSprite",  UIUuidToJson(c.FocusedSprite));
+			v.AddMember("onValueChanged", UIEventListToJson(c.OnValueChanged));
+			v.AddMember("onSubmitted",    UIEventListToJson(c.OnSubmitted));
 			return v;
 		};
 		inputFieldInfo.deserialize = [](Entity e, const Json::Value& v) {
@@ -1175,6 +1249,8 @@ namespace Axiom {
 			if (const Json::Value* m = v.FindMember("pressedSprite"))  c.PressedSprite  = UIUuidFromJson(*m, c.PressedSprite);
 			if (const Json::Value* m = v.FindMember("disabledSprite")) c.DisabledSprite = UIUuidFromJson(*m, c.DisabledSprite);
 			if (const Json::Value* m = v.FindMember("focusedSprite"))  c.FocusedSprite  = UIUuidFromJson(*m, c.FocusedSprite);
+			if (const Json::Value* m = v.FindMember("onValueChanged")) UIEventListFromJson(*m, c.OnValueChanged);
+			if (const Json::Value* m = v.FindMember("onSubmitted"))    UIEventListFromJson(*m, c.OnSubmitted);
 		};
 		inputFieldInfo.onAdd = &InheritImageColorIntoNormal<InputFieldComponent>;
 		sceneManager.RegisterComponentType<InputFieldComponent>(inputFieldInfo);
@@ -1264,6 +1340,7 @@ namespace Axiom {
 				optionsArr.Append(Json::Value(opt));
 			}
 			v.AddMember("options", std::move(optionsArr));
+			v.AddMember("onValueChanged", UIEventListToJson(c.OnValueChanged));
 			return v;
 		};
 		dropdownInfo.deserialize = [](Entity e, const Json::Value& v) {
@@ -1295,6 +1372,7 @@ namespace Axiom {
 					c.Options.push_back(item.AsStringOr(""));
 				}
 			}
+			if (const Json::Value* m = v.FindMember("onValueChanged")) UIEventListFromJson(*m, c.OnValueChanged);
 		};
 		dropdownInfo.onAdd = &InheritImageColorIntoNormal<DropdownComponent>;
 		sceneManager.RegisterComponentType<DropdownComponent>(dropdownInfo);
@@ -1342,6 +1420,7 @@ namespace Axiom {
 			v.AddMember("pressedSprite",  UIUuidToJson(c.PressedSprite));
 			v.AddMember("disabledSprite", UIUuidToJson(c.DisabledSprite));
 			v.AddMember("focusedSprite",  UIUuidToJson(c.FocusedSprite));
+			v.AddMember("onValueChanged", UIEventListToJson(c.OnValueChanged));
 			return v;
 		};
 		toggleInfo.deserialize = [](Entity e, const Json::Value& v) {
@@ -1360,6 +1439,7 @@ namespace Axiom {
 			if (const Json::Value* m = v.FindMember("pressedSprite"))  c.PressedSprite  = UIUuidFromJson(*m, c.PressedSprite);
 			if (const Json::Value* m = v.FindMember("disabledSprite")) c.DisabledSprite = UIUuidFromJson(*m, c.DisabledSprite);
 			if (const Json::Value* m = v.FindMember("focusedSprite"))  c.FocusedSprite  = UIUuidFromJson(*m, c.FocusedSprite);
+			if (const Json::Value* m = v.FindMember("onValueChanged")) UIEventListFromJson(*m, c.OnValueChanged);
 		};
 		toggleInfo.onAdd = &InheritImageColorIntoNormal<ToggleComponent>;
 		sceneManager.RegisterComponentType<ToggleComponent>(toggleInfo);
@@ -1868,6 +1948,7 @@ namespace Axiom {
 					PropertyMetadata{}.WithEnabledIf([](const Entity& e) {
 						return e.GetComponent<GridLayoutGroupComponent>().Constraint != GridLayoutConstraint::Flexible;
 					})),
+				Properties::Make("Reverse", "Reverse", &GridLayoutGroupComponent::Reverse),
 			};
 			info.serialize = [](Entity e) -> Json::Value {
 				const auto& c = e.GetComponent<GridLayoutGroupComponent>();
@@ -1889,6 +1970,7 @@ namespace Axiom {
 				v.AddMember("childAlignment",  Json::Value(static_cast<int>(c.ChildAlignment)));
 				v.AddMember("constraint",      Json::Value(static_cast<int>(c.Constraint)));
 				v.AddMember("constraintCount", Json::Value(c.ConstraintCount));
+				v.AddMember("reverse",         Json::Value(c.Reverse));
 				return v;
 			};
 			info.deserialize = [](Entity e, const Json::Value& v) {
@@ -1910,6 +1992,7 @@ namespace Axiom {
 				if (const Json::Value* m = v.FindMember("childAlignment"))  c.ChildAlignment  = static_cast<UIAlignment>(m->AsIntOr(static_cast<int>(c.ChildAlignment)));
 				if (const Json::Value* m = v.FindMember("constraint"))      c.Constraint      = static_cast<GridLayoutConstraint>(m->AsIntOr(static_cast<int>(c.Constraint)));
 				if (const Json::Value* m = v.FindMember("constraintCount")) c.ConstraintCount = m->AsIntOr(c.ConstraintCount);
+				if (const Json::Value* m = v.FindMember("reverse"))         c.Reverse         = m->AsBoolOr(c.Reverse);
 			};
 			sceneManager.RegisterComponentType<GridLayoutGroupComponent>(info);
 		};

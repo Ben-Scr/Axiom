@@ -530,6 +530,9 @@ endforeach()
 			if (!project.SplashScreen.ImagePath.empty()) {
 				splash.AddMember("imagePath", project.SplashScreen.ImagePath);
 			}
+			if (!project.SplashScreen.BackgroundImagePath.empty()) {
+				splash.AddMember("backgroundImagePath", project.SplashScreen.BackgroundImagePath);
+			}
 			if (!project.SplashScreen.CustomText.empty()) {
 				splash.AddMember("customText", project.SplashScreen.CustomText);
 			}
@@ -598,6 +601,29 @@ endforeach()
 		}
 		if (!project.ShowRuntimeLogs) {
 			root.AddMember("showRuntimeLogs", false);
+		}
+
+		if (project.AutoSaveScenes) {
+			root.AddMember("autoSaveScenes", true);
+		}
+		// Persist the interval only when it differs from the default — the
+		// hand-rolled JSON tries to keep noise down for projects that haven't
+		// touched these settings.
+		if (project.AutoSaveIntervalSeconds != 120.0f) {
+			root.AddMember("autoSaveIntervalSeconds",
+				Json::Value(project.AutoSaveIntervalSeconds));
+		}
+
+		if (project.ShowFileExtensions) {
+			root.AddMember("showFileExtensions", true);
+		}
+
+		if (!project.CursorImagePath.empty()) {
+			root.AddMember("cursorImagePath", project.CursorImagePath);
+		}
+		if (!project.UIInteractableCursorImagePath.empty()) {
+			root.AddMember("uiInteractableCursorImagePath",
+				project.UIInteractableCursorImagePath);
 		}
 
 		if (project.ActiveBuildProfile != AxiomProject::BuildProfile::Development) {
@@ -1003,6 +1029,9 @@ endforeach()
 					if (const Json::Value* v = splashValue->FindMember("imagePath")) {
 						project.SplashScreen.ImagePath = v->AsStringOr();
 					}
+					if (const Json::Value* v = splashValue->FindMember("backgroundImagePath")) {
+						project.SplashScreen.BackgroundImagePath = v->AsStringOr();
+					}
 					if (const Json::Value* v = splashValue->FindMember("customText")) {
 						project.SplashScreen.CustomText = v->AsStringOr();
 					}
@@ -1091,6 +1120,16 @@ endforeach()
 					project.ShowRuntimeStats = v->AsBoolOr(true);
 				if (const Json::Value* v = root.FindMember("showRuntimeLogs"))
 					project.ShowRuntimeLogs = v->AsBoolOr(true);
+				if (const Json::Value* v = root.FindMember("autoSaveScenes"))
+					project.AutoSaveScenes = v->AsBoolOr(false);
+				if (const Json::Value* v = root.FindMember("autoSaveIntervalSeconds"))
+					project.AutoSaveIntervalSeconds = static_cast<float>(v->AsDoubleOr(120.0));
+				if (const Json::Value* v = root.FindMember("showFileExtensions"))
+					project.ShowFileExtensions = v->AsBoolOr(false);
+				if (const Json::Value* v = root.FindMember("cursorImagePath"))
+					project.CursorImagePath = v->AsStringOr();
+				if (const Json::Value* v = root.FindMember("uiInteractableCursorImagePath"))
+					project.UIInteractableCursorImagePath = v->AsStringOr();
 				if (const Json::Value* v = root.FindMember("buildProfile"))
 					project.ActiveBuildProfile = AxiomProject::BuildProfileFromString(v->AsStringOr("Development"));
 				if (const Json::Value* v = root.FindMember("customDefines"); v && v->IsArray()) {

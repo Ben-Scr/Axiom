@@ -97,15 +97,47 @@ namespace Axiom {
 		}
 		Scene& scene = *activeScene;
 
-		// Deferred build execution: state 1 -> 2 lets the overlay render one frame first
+		// Build state machine. The 1 → 2 → 3 transition gives the
+		// overlay one frame to render before we kick off the worker
+		// (state 2 launches m_BuildFuture, state 3 polls it). Without
+		// the 1-frame delay the user wouldn't see the overlay before
+		// dotnet build's first stage hands the UI back to render.
 		if (m_BuildState == 1) {
 			m_BuildState = 2;
 		} else if (m_BuildState == 2) {
-			ExecuteBuild();
+			ExecuteBuildAsync();
+			m_BuildState = 3;
+		} else if (m_BuildState == 3 && m_BuildFuture.valid()
+			&& m_BuildFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+		{
+			// Worker finished. Drain it (rethrows any exception that
+			// escaped onto the worker; we log + recover instead of
+			// taking down the editor).
+			try {
+				m_BuildFuture.get();
+			} catch (const std::exception& e) {
+				AIM_ERROR_TAG("Build", "Build worker crashed: {}", e.what());
+				m_BuildSucceeded.store(false, std::memory_order_relaxed);
+			} catch (...) {
+				AIM_ERROR_TAG("Build", "Build worker crashed: unknown exception");
+				m_BuildSucceeded.store(false, std::memory_order_relaxed);
+			}
 			m_BuildState = 0;
 
+			// Open Explorer at the finished build directory on the UI
+			// thread. ShellExecuteA can pop modal dialogs / interact
+			// with the shell on its calling thread, so doing it here
+			// instead of inside the worker avoids any UI surprises and
+			// matches the pre-async behaviour.
+#ifdef AIM_PLATFORM_WINDOWS
+			if (m_BuildSucceeded.load(std::memory_order_relaxed) && !m_BuildOutputDir.empty()) {
+				ShellExecuteA(nullptr, "open", m_BuildOutputDir.c_str(),
+					nullptr, nullptr, SW_SHOWNORMAL);
+			}
+#endif
+
 			// Launch the built game if "Build and Play" was clicked
-			if (m_BuildAndPlay) {
+			if (m_BuildAndPlay && m_BuildSucceeded.load(std::memory_order_relaxed)) {
 				m_BuildAndPlay = false;
 				AxiomProject* project = ProjectManager::GetCurrentProject();
 				if (project) {
@@ -113,7 +145,15 @@ namespace Axiom {
 					if (outputDir.empty())
 						outputDir = Path::Combine(project->RootDirectory, "Builds");
 #ifdef AIM_PLATFORM_WINDOWS
-					auto exePath = std::filesystem::path(outputDir) / (project->Name + ".exe");
+					// Honour the project's ExecutableName override so a
+					// project shipped under a marketing name ("Acme Quest"
+					// instead of project ID "515") still launches via
+					// Build+Play. ExecuteBuild names the produced .exe by
+					// the same rule, so reading both off the project keeps
+					// the two paths in lockstep.
+					const std::string exeStem = project->ExecutableName.empty()
+						? project->Name : project->ExecutableName;
+					auto exePath = std::filesystem::path(outputDir) / (exeStem + ".exe");
 					if (std::filesystem::exists(exePath)) {
 						std::string cmd = "\"" + std::filesystem::canonical(exePath).string() + "\"";
 						// Proper UTF-8 → wide conversion. The previous byte-wise iterator
@@ -152,6 +192,10 @@ namespace Axiom {
 #endif
 				}
 			}
+			// Reset m_BuildAndPlay even on failure so a subsequent
+			// "Build" click doesn't unexpectedly auto-launch a stale
+			// state from the failed run.
+			m_BuildAndPlay = false;
 		}
 
 		// Process OS file drops — forward to AssetBrowser
@@ -467,7 +511,15 @@ namespace Axiom {
 		RenderLogPanel();
 		RenderBuildPanel();
 		RenderPlayerSettingsPanel();
+		RenderProjectSettingsPanel();
 		RenderPackageManagerPanel();
+
+		// Splash preview — replays the runtime's splash timeline as
+		// a foreground overlay over the editor when the user clicks
+		// "Show Preview" in the Splash Screen settings. Self-completes
+		// after FadeIn + Duration + FadeOut seconds; no-op when
+		// inactive.
+		TickSplashPreview();
 
 		// Profiler panel — Ctrl+F6 toggle. Panel manages its own visibility-gating internally.
 		if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_F6)) {
@@ -477,14 +529,19 @@ namespace Axiom {
 			m_ProfilerPanel.Render(&m_ShowProfiler);
 		}
 
-		// Build progress overlay (same pattern as ScriptSystem compilation overlay)
+		// Build progress overlay. While the worker is running we read
+		// the atomic progress + the locked stage label and feed both
+		// into a real progress bar. Pre-async this used a fake
+		// fmod(elapsed)-driven indeterminate animation that always
+		// hovered around 0–1% from the user's perspective; the worker
+		// now reports actual stage completion.
 		if (m_BuildState > 0) {
 			ImGuiViewport* viewport = ImGui::GetMainViewport();
 			ImVec2 center(viewport->Pos.x + viewport->Size.x * 0.5f,
 				viewport->Pos.y + viewport->Size.y * 0.5f);
 
 			ImGui::SetNextWindowPos(center, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-			ImGui::SetNextWindowSize(ImVec2(320, 80));
+			ImGui::SetNextWindowSize(ImVec2(360, 110));
 			ImGui::SetNextWindowBgAlpha(0.92f);
 
 			ImGuiWindowFlags overlayFlags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize
@@ -494,9 +551,15 @@ namespace Axiom {
 			ImGui::Begin("##BuildOverlay", nullptr, overlayFlags);
 			ImGui::TextUnformatted("Building Project...");
 			ImGui::Spacing();
-			float elapsed = std::chrono::duration<float>(
-				std::chrono::steady_clock::now() - m_BuildStartTime).count();
-			ImGui::ProgressBar(fmodf(elapsed * 0.4f, 1.0f), ImVec2(-1, 0), "");
+
+			std::string stage;
+			{
+				std::lock_guard<std::mutex> lk(m_BuildProgressMutex);
+				stage = m_BuildStage;
+			}
+			const float progress = m_BuildProgress.load(std::memory_order_relaxed);
+			ImGui::ProgressBar(progress, ImVec2(-1, 0), "");
+			ImGui::TextDisabled("%s", stage.empty() ? "Working..." : stage.c_str());
 			ImGui::End();
 		}
 

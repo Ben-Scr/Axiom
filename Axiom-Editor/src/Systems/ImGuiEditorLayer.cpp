@@ -348,8 +348,23 @@ namespace Axiom {
 	}
 
 	void ImGuiEditorLayer::OnUpdate(Application& app, float dt) {
-		(void)dt;
 		DrainPendingLogEntries();
+		RunAutoSaveTick(app, dt);
+
+		// Drain a script-driven Application.Quit() that fired this frame.
+		// In editor it's wired to set m_EditorStopPlayRequested instead
+		// of actually quitting; consume the flag and route through the
+		// same audio-cleanup + RestoreEditorSceneAfterPlaymode path the
+		// Stop button uses, so script and click produce identical state.
+		if (Application::GetIsPlaying() && ApplicationEditorAccess::ConsumeQuitStopPlayRequest()) {
+			Scene* act = SceneManager::Get().GetActiveScene();
+			if (act) {
+				for (auto [ent, audio] : act->GetRegistry().view<AudioSourceComponent>().each()) {
+					if (audio.IsPlaying() || audio.IsPaused()) audio.Stop();
+				}
+			}
+			RestoreEditorSceneAfterPlaymode();
+		}
 
 		Input& input = app.GetInput();
 		Scene* activeScene = app.GetSceneManager() ? app.GetSceneManager()->GetActiveScene() : nullptr;
@@ -471,6 +486,62 @@ namespace Axiom {
 		}
 	}
 
+	void ImGuiEditorLayer::RunAutoSaveTick(Application& app, float dt) {
+		AxiomProject* project = ProjectManager::GetCurrentProject();
+		if (!project || !project->AutoSaveScenes) {
+			m_AutoSaveAccumulator = 0.0f;
+			return;
+		}
+
+		// Skip Play mode entirely — entering Play already saves the scene
+		// to disk, and Play-mode mutations are deliberately discarded on
+		// Stop. Auto-saving over the pre-Play snapshot would persist
+		// transient state and surprise the user on Stop.
+		if (Application::GetIsPlaying()) {
+			m_AutoSaveAccumulator = 0.0f;
+			return;
+		}
+
+		// Reset the timer when the active scene changes — the new scene
+		// hasn't been edited yet, and counting against its lifetime
+		// from the moment it loaded would auto-save it the instant the
+		// user makes any change instead of after the configured interval.
+		Scene* active = app.GetSceneManager() ? app.GetSceneManager()->GetActiveScene() : nullptr;
+		if (!active) {
+			m_AutoSaveAccumulator = 0.0f;
+			m_AutoSaveLastScenePath.clear();
+			return;
+		}
+		const std::string scenePath = project->GetSceneFilePath(active->GetName());
+		if (scenePath != m_AutoSaveLastScenePath) {
+			m_AutoSaveAccumulator = 0.0f;
+			m_AutoSaveLastScenePath = scenePath;
+		}
+
+		if (!active->IsDirty()) {
+			// Nothing to save; let the accumulator drain back to zero so
+			// the next dirty edit gets the full interval before its first
+			// auto-save fires.
+			m_AutoSaveAccumulator = 0.0f;
+			return;
+		}
+
+		m_AutoSaveAccumulator += dt;
+		const float interval = std::max(5.0f, project->AutoSaveIntervalSeconds);
+		if (m_AutoSaveAccumulator < interval) {
+			return;
+		}
+		m_AutoSaveAccumulator = 0.0f;
+
+		if (scenePath.empty()) {
+			return;
+		}
+		if (SceneSerializer::SaveToFile(*active, scenePath)) {
+			active->ClearDirty();
+			AIM_INFO_TAG("Editor", "Auto-saved scene '{}'.", active->GetName());
+		}
+	}
+
 	void ImGuiEditorLayer::ClearLogEntries() {
 		m_LogEntries.clear();
 		if (m_LogDispatchState) {
@@ -548,7 +619,16 @@ namespace Axiom {
 					}
 				}
 			}
+			// Project Settings ⇒ editor-side preferences (Asset Browser
+			// pane, Auto-Save cadence, etc.) that govern how the editor
+			// behaves in this project, NOT what gets shipped in the
+			// build. Runtime / shipped-game settings (resolution, splash,
+			// icon, cursors, …) live under Player Settings just below
+			// so the two intents don't cross-contaminate one panel.
 			if (ImGui::MenuItem("Project Settings", nullptr, false, hasProject)) {
+				m_ShowProjectSettings = true;
+			}
+			if (ImGui::MenuItem("Player Settings", nullptr, false, hasProject)) {
 				m_ShowPlayerSettings = true;
 			}
 			ImGui::Separator();
@@ -953,6 +1033,12 @@ namespace Axiom {
 		Transform2DComponent* transform = nullptr;
 		if (scene.TryGetComponent<Transform2DComponent>(m_SelectedEntity, transform) && transform) {
 			m_EditorCamera.SetPosition(transform->Position);
+			return;
+		}
+
+		RectTransform2DComponent* rectTransform = nullptr;
+		if (scene.TryGetComponent<RectTransform2DComponent>(m_SelectedEntity, rectTransform) && rectTransform) {
+			m_EditorCamera.SetPosition(rectTransform->GetCenter());
 		}
 	}
 
@@ -1090,11 +1176,25 @@ namespace Axiom {
 			return;
 		}
 
-		const EntityHandle pasteParent = (!m_IsSceneNodeSelected
+		EntityHandle pasteParent = (!m_IsSceneNodeSelected
 			&& m_SelectedEntity != entt::null
 			&& scene.IsValid(m_SelectedEntity))
 			? m_SelectedEntity
 			: entt::null;
+		// Prefab edit mode: a paste with no selection target would
+		// otherwise create a sibling-to-root entity that the prefab
+		// serializer drops on save (it walks the root's subtree only).
+		// Force-route the paste under the prefab root to keep the
+		// pasted entities visible in the saved .prefab.
+		if (pasteParent == entt::null
+			&& IsInPrefabEditMode()
+			&& m_PrefabEditScene
+			&& m_PrefabEditRootEntity != entt::null
+			&& m_PrefabEditScene->IsValid(m_PrefabEditRootEntity)
+			&& &scene == m_PrefabEditScene.get())
+		{
+			pasteParent = m_PrefabEditRootEntity;
+		}
 
 		std::vector<EntityHandle> createdEntities;
 		for (const Json::Value& entityValue : entitiesValue->GetArray()) {
@@ -1122,14 +1222,35 @@ namespace Axiom {
 
 	EntityHandle ImGuiEditorLayer::RenderCreateEntityMenu(Scene& scene, Entity parent) {
 		EntityHandle createdHandle = entt::null;
+
+		// Prefab edit mode constraint: every entity created inside a
+		// prefab edit must live UNDER the prefab root (the prefab is a
+		// single-rooted asset — siblings to the root would silently get
+		// dropped on Save because SceneSerializer::SaveEntityToFile only
+		// walks the root's subtree). Force-parent here so a "Create
+		// Entity" via the right-click menu without a context entity
+		// still ends up nested correctly. Auto-uses the root only for
+		// "no explicit parent" calls; an explicit parent (e.g. via
+		// "Create Child" on a deeper entity) wins.
+		Entity effectiveParent = parent;
+		if (!effectiveParent.IsValid()
+			&& IsInPrefabEditMode()
+			&& m_PrefabEditScene
+			&& m_PrefabEditRootEntity != entt::null
+			&& m_PrefabEditScene->IsValid(m_PrefabEditRootEntity)
+			&& &scene == m_PrefabEditScene.get())
+		{
+			effectiveParent = m_PrefabEditScene->GetEntity(m_PrefabEditRootEntity);
+		}
+
 		auto finishCreated = [&](Entity created) {
 			if (!created.IsValid()) {
 				return;
 			}
 
-			if (parent.IsValid()) {
-				created.SetParent(parent);
-				m_CollapsedHierarchyEntities.erase(static_cast<uint32_t>(parent.GetHandle()));
+			if (effectiveParent.IsValid()) {
+				created.SetParent(effectiveParent);
+				m_CollapsedHierarchyEntities.erase(static_cast<uint32_t>(effectiveParent.GetHandle()));
 			}
 
 			createdHandle = created.GetHandle();
@@ -1221,6 +1342,41 @@ namespace Axiom {
 					finishCreated(created);
 				}
 				ImGui::EndMenu();
+			}
+
+			// Tilemap 2D — surfaced only when the project has the
+			// Axiom.Tilemap2D package enabled. The package owns the
+			// Tilemap2DComponent definition (it isn't linked into the
+			// editor binary), so we add the component via the
+			// ComponentRegistry's display-name lookup → info.add() path
+			// rather than referencing the type directly. Without the
+			// package toggle, the component isn't registered and the
+			// menu item is hidden so the user doesn't see a click-then-
+			// nothing-happens UX.
+			{
+				AxiomProject* project = ProjectManager::GetCurrentProject();
+				const bool tilemapPackageEnabled = project &&
+					std::find(project->Packages.begin(), project->Packages.end(),
+						std::string("Axiom.Tilemap2D")) != project->Packages.end();
+				if (tilemapPackageEnabled) {
+					const ComponentInfo* tilemapInfo = nullptr;
+					SceneManager::Get().GetComponentRegistry().ForEachComponentInfo(
+						[&](const std::type_index&, const ComponentInfo& info) {
+							if (!tilemapInfo
+								&& info.category == ComponentCategory::Component
+								&& info.displayName == "Tilemap 2D"
+								&& info.add)
+							{
+								tilemapInfo = &info;
+							}
+						});
+					if (tilemapInfo && ImGui::MenuItem("Tilemap 2D")) {
+						Entity created = scene.CreateEntity(
+							"Tilemap 2D " + std::to_string(EntityHelper::EntitiesCount()));
+						tilemapInfo->add(created);
+						finishCreated(created);
+					}
+				}
 			}
 
 			ImGui::EndMenu();

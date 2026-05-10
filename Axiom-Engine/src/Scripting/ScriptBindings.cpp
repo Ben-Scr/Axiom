@@ -805,6 +805,29 @@ namespace Axiom {
 		return texture ? static_cast<int>(texture->GetHeight()) : 0;
 	}
 
+	// Surface engine-shipped default textures (Square, Circle, Capsule, etc.)
+	// to managed scripts. The C++ side has these accessible by enum via
+	// `TextureManager::GetDefaultTexture`, but C# only had handle-by-UUID
+	// lookup — meaning a script that wanted "the default white square" had
+	// to either know the path-hash GUID by heart or load its own copy of
+	// the engine asset. We resolve the asset GUID through the AssetRegistry
+	// here so the C# Texture wrapper round-trips through the same
+	// `FromAssetUUID` path as any user-loaded texture.
+	static uint64_t Axiom_Texture_GetDefaultAssetUUID(uint8_t which)
+	{
+		// Cap is exclusive of any future enum entries — `Invisible` is the
+		// last documented value. Anything beyond gets a zero GUID so the
+		// C# layer surfaces the missing-asset as null.
+		if (which > static_cast<uint8_t>(DefaultTexture::Invisible)) {
+			return 0;
+		}
+		TextureHandle handle = TextureManager::GetDefaultTexture(static_cast<DefaultTexture>(which));
+		if (!handle.IsValid()) {
+			return 0;
+		}
+		return TextureManager::GetTextureAssetUUID(handle);
+	}
+
 	static int Axiom_Audio_LoadAsset(uint64_t assetId)
 	{
 		return AudioManager::LoadAudioByUUID(assetId).IsValid() ? 1 : 0;
@@ -1273,17 +1296,9 @@ namespace Axiom {
 		comp.WrapMode = static_cast<TextWrapMode>(mode);
 	}
 
-	static float Axiom_TextRenderer_GetWrapWidth(uint64_t entityID)
-	{
-		GET_COMPONENT(TextRendererComponent, entityID, 0.0f);
-		return comp.WrapWidth;
-	}
-
-	static void Axiom_TextRenderer_SetWrapWidth(uint64_t entityID, float width)
-	{
-		GET_COMPONENT(TextRendererComponent, entityID, );
-		comp.WrapWidth = width;
-	}
+	// WrapWidth get/set thunks removed alongside the field. The C#
+	// TextRenderer.WrapWidth property is gone too; use Margin to
+	// inset wrapped text.
 
 	static int Axiom_TextRenderer_GetSortingOrder(uint64_t entityID)
 	{
@@ -2455,8 +2470,8 @@ namespace Axiom {
 		b.TextRenderer_SetHAlign = &Axiom_TextRenderer_SetHAlign;
 		b.TextRenderer_GetWrapMode = &Axiom_TextRenderer_GetWrapMode;
 		b.TextRenderer_SetWrapMode = &Axiom_TextRenderer_SetWrapMode;
-		b.TextRenderer_GetWrapWidth = &Axiom_TextRenderer_GetWrapWidth;
-		b.TextRenderer_SetWrapWidth = &Axiom_TextRenderer_SetWrapWidth;
+		// WrapWidth get/set slots removed; the C# struct doesn't carry
+		// them anymore.
 		b.TextRenderer_GetSortingOrder = &Axiom_TextRenderer_GetSortingOrder;
 		b.TextRenderer_SetSortingOrder = &Axiom_TextRenderer_SetSortingOrder;
 		b.TextRenderer_GetSortingLayer = &Axiom_TextRenderer_GetSortingLayer;
@@ -2562,6 +2577,7 @@ namespace Axiom {
 		b.Texture_LoadAsset = &Axiom_Texture_LoadAsset;
 		b.Texture_GetWidth = &Axiom_Texture_GetWidth;
 		b.Texture_GetHeight = &Axiom_Texture_GetHeight;
+		b.Texture_GetDefaultAssetUUID = &Axiom_Texture_GetDefaultAssetUUID;
 		b.Audio_LoadAsset = &Axiom_Audio_LoadAsset;
 		b.Audio_PlayOneShotAsset = &Axiom_Audio_PlayOneShotAsset;
 		b.Font_LoadAsset = &Axiom_Font_LoadAsset;

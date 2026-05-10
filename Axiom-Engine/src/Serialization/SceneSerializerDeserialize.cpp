@@ -1067,7 +1067,12 @@ namespace Axiom {
 			text.LetterSpacing = GetFloatMember(*textValue, "letterSpacing", text.LetterSpacing);
 			text.HAlign = static_cast<TextAlignment>(GetIntMember(*textValue, "alignment", static_cast<int>(text.HAlign)));
 			text.WrapMode = static_cast<TextWrapMode>(GetIntMember(*textValue, "wrapMode", static_cast<int>(text.WrapMode)));
-			text.WrapWidth = GetFloatMember(*textValue, "wrapWidth", text.WrapWidth);
+			// WrapWidth field removed; old scenes that wrote it just
+			// pass through unread.
+			text.Margin.x = GetFloatMember(*textValue, "marginL", text.Margin.x);
+			text.Margin.y = GetFloatMember(*textValue, "marginT", text.Margin.y);
+			text.Margin.z = GetFloatMember(*textValue, "marginR", text.Margin.z);
+			text.Margin.w = GetFloatMember(*textValue, "marginB", text.Margin.w);
 			text.SortingOrder = static_cast<int16_t>(GetIntMember(*textValue, "sortOrder", text.SortingOrder));
 			text.SortingLayer = static_cast<uint8_t>(GetIntMember(*textValue, "sortLayer", text.SortingLayer));
 			text.ResolvedFont = FontHandle{};
@@ -1317,15 +1322,20 @@ namespace Axiom {
 			image.Color.a = GetFloatMember(*imageValue, "a", 1.0f);
 			image.SortingOrder = static_cast<int16_t>(GetIntMember(*imageValue, "sortOrder", 0));
 			image.SortingLayer = static_cast<uint8_t>(GetIntMember(*imageValue, "sortLayer", 0));
+			image.FilterMode = static_cast<Filter>(GetIntMember(*imageValue, "filterMode",
+				static_cast<int>(image.FilterMode)));
 
 			image.TextureHandle = LoadTextureFromValue(
 				*imageValue,
 				"textureAsset",
 				"texture",
-				Filter::Point,
+				image.FilterMode,
 				Wrap::Clamp,
 				Wrap::Clamp,
 				&image.TextureAssetId);
+			if (auto* tex = TextureManager::GetTexture(image.TextureHandle); tex) {
+				tex->SetFilter(image.FilterMode);
+			}
 		}
 
 		ScriptComponent* scriptComponent = nullptr;
@@ -1630,6 +1640,13 @@ namespace Axiom {
 			text.Color.a = GetFloatMember(componentValue, "a", text.Color.a);
 			text.LetterSpacing = GetFloatMember(componentValue, "letterSpacing", text.LetterSpacing);
 			text.HAlign = static_cast<TextAlignment>(GetIntMember(componentValue, "alignment", static_cast<int>(text.HAlign)));
+			text.WrapMode = static_cast<TextWrapMode>(GetIntMember(componentValue, "wrapMode", static_cast<int>(text.WrapMode)));
+			// WrapWidth field removed; old scenes that wrote it just
+			// pass through unread.
+			text.Margin.x = GetFloatMember(componentValue, "marginL", text.Margin.x);
+			text.Margin.y = GetFloatMember(componentValue, "marginT", text.Margin.y);
+			text.Margin.z = GetFloatMember(componentValue, "marginR", text.Margin.z);
+			text.Margin.w = GetFloatMember(componentValue, "marginB", text.Margin.w);
 			text.SortingOrder = static_cast<int16_t>(GetIntMember(componentValue, "sortOrder", text.SortingOrder));
 			text.SortingLayer = static_cast<uint8_t>(GetIntMember(componentValue, "sortLayer", text.SortingLayer));
 			text.ResolvedFont = FontHandle{};
@@ -1897,15 +1914,20 @@ namespace Axiom {
 			image.Color.a = GetFloatMember(componentValue, "a", 1.0f);
 			image.SortingOrder = static_cast<int16_t>(GetIntMember(componentValue, "sortOrder", image.SortingOrder));
 			image.SortingLayer = static_cast<uint8_t>(GetIntMember(componentValue, "sortLayer", image.SortingLayer));
+			image.FilterMode = static_cast<Filter>(GetIntMember(componentValue, "filterMode",
+				static_cast<int>(image.FilterMode)));
 
 			image.TextureHandle = LoadTextureFromValue(
 				componentValue,
 				"textureAsset",
 				"texture",
-				Filter::Point,
+				image.FilterMode,
 				Wrap::Clamp,
 				Wrap::Clamp,
 				&image.TextureAssetId);
+			if (auto* tex = TextureManager::GetTexture(image.TextureHandle); tex) {
+				tex->SetFilter(image.FilterMode);
+			}
 			return true;
 		}
 
@@ -2082,9 +2104,40 @@ namespace Axiom {
 		}
 		ApplyEntityOverrides(newSource, overridesWrapper);
 
+		// Capture identity-and-hierarchy state from the existing instance
+		// BEFORE destroying it. Without this, the destroy + tree-rebuild
+		// would lose the user's parent link (the new instance always
+		// spawns at scene-root level) and the instance UUID (the new
+		// root would mint a fresh UUID, breaking any saved scene file
+		// or runtime ref that still points at the old one). Mirrors the
+		// "edit a prefab while a scene is open with instances of that
+		// prefab" flow: the instance must end up at the same place in
+		// the hierarchy with the same UUID, just rebuilt from the new
+		// prefab source + preserved overrides.
+		auto& registry = scene.GetRegistry();
+		uint64_t preservedInstanceUuid = 0;
+		if (registry.all_of<UUIDComponent>(existing)) {
+			preservedInstanceUuid = static_cast<uint64_t>(registry.get<UUIDComponent>(existing).Id);
+		}
+		EntityHandle preservedParent = entt::null;
+		if (registry.all_of<HierarchyComponent>(existing)) {
+			preservedParent = registry.get<HierarchyComponent>(existing).Parent;
+		}
+
 		// DeserializeEntityTree preserves Origin and PrefabGUID via the explicit args.
 		scene.DestroyEntity(existing);
-		return DeserializeEntityTree(scene, newSource.Entities, EntityOrigin::Prefab, prefabGuid);
+		const EntityHandle freshRoot =
+			DeserializeEntityTree(scene, newSource.Entities, EntityOrigin::Prefab, prefabGuid);
+		if (freshRoot == entt::null) return entt::null;
+
+		// Restore identity / parent on the freshly-built root.
+		if (preservedInstanceUuid != 0 && registry.all_of<UUIDComponent>(freshRoot)) {
+			registry.get<UUIDComponent>(freshRoot).Id = UUID(preservedInstanceUuid);
+		}
+		if (preservedParent != entt::null && registry.valid(preservedParent)) {
+			scene.GetEntity(freshRoot).SetParent(scene.GetEntity(preservedParent));
+		}
+		return freshRoot;
 	}
 
 	bool SceneSerializer::ComputeInstanceOverrides(Scene& scene, EntityHandle entity, Json::Value& outOverrides) {

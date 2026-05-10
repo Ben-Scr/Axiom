@@ -1,1 +1,5 @@
-IDI_ICON1 ICON "icon.ico"
+// Numeric resource ID 1 — without a #define for IDI_ICON1, rc.exe would
+// otherwise compile this as a STRING-named resource, leaving the editor's
+// build-time icon embedder (which writes RT_GROUP_ICON at numeric ID 1)
+// to add a second group alongside the original instead of overwriting it.
+1 ICON "icon.ico"

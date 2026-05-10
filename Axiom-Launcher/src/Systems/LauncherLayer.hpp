@@ -74,13 +74,25 @@ namespace Axiom {
 #endif
 		};
 
+		// Project sort axis. The launcher persists the user's choice in
+		// launcher_settings.json so reopening the launcher keeps the same
+		// view. "LastOpened descending" matches the prior implicit default
+		// where the registry was sorted on load.
+		enum class SortMode : uint8_t {
+			LastOpened = 0,
+			Name = 1,
+			CreatedAt = 2,
+		};
+
 		void RenderLauncherPanel();
 		void RenderProjectList();
 		void RenderCreateProjectPopup();
 		void RenderDeleteProjectPopups();
+		void RenderSettingsPopup();
 		void OpenProject(const LauncherProjectEntry& entry);
 		void OpenProjectInExplorer(const LauncherProjectEntry& entry);
 		void BrowseForExistingProject();
+		void BrowseForDefaultProjectsLocation();
 		void RequestProjectDelete(const LauncherProjectEntry& entry);
 		bool DeleteProjectFromDisk(const LauncherProjectEntry& entry);
 		void StartCreateProjectAsync(const std::string& name, const std::string& location);
@@ -90,9 +102,23 @@ namespace Axiom {
 		void PollOpenProjectTask();
 		std::shared_ptr<ProjectSizeTaskState> GetOrStartProjectSizeTask(const LauncherProjectEntry& entry);
 		std::string GetProjectSizeDisplayText(const LauncherProjectEntry& entry);
+		std::vector<const LauncherProjectEntry*> GetSortedProjectsView() const;
+		void RefreshProjectsList();
+		void LoadLauncherSettings();
+		void SaveLauncherSettings() const;
+		static std::string GetSettingsPath();
 
 		LauncherRegistry m_Registry;
 		std::unordered_map<std::string, std::shared_ptr<ProjectSizeTaskState>> m_ProjectSizeTasks;
+		// Cached filesystem creation timestamps keyed by project path, so
+		// "Created" sort doesn't stat the disk every frame. Populated lazily.
+		mutable std::unordered_map<std::string, std::int64_t> m_CreatedAtCache;
+
+		SortMode m_SortMode = SortMode::LastOpened;
+		bool m_SortReverse = false;
+
+		std::string m_DefaultProjectsLocation;
+		bool m_OpenSettingsPopup = false;
 
 		char m_NewProjectName[256]{};
 		char m_NewProjectLocation[512]{};

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Collections/Color.hpp"
+#include "Components/UI/InspectorEventBinding.hpp"
 #include "Components/UI/UITransitionMode.hpp"
 #include "Core/UUID.hpp"
 #include "Scene/EntityHandle.hpp"
@@ -148,6 +149,13 @@ namespace Axiom {
 		float PressMouseAxis = 0.0f;
 		float PressValue = 0.0f;
 		bool IsDragging = false;
+
+		// Inspector-bound event list — fires every binding on the rising
+		// edge of `ValueChangedThisFrame`. Use a method that takes a
+		// `float` parameter to receive the new value as the static
+		// argument (the inspector renders a numeric editor for the
+		// argument), or a `void` method for "value-changed-notify" only.
+		InspectorEventList OnValueChanged;
 	};
 
 }

@@ -81,12 +81,18 @@ namespace Axiom {
 		// main viewport. Without this, the popup grows unbounded vertically
 		// and the bottom entries scroll off the screen — there's no built-in
 		// ImGui clamp for popup height. Min width keeps the search field
-		// usable even with a short component name list. Max height = 70% of
-		// the main viewport so there's always visible chrome around it.
+		// usable even with a short component name list. Min height keeps
+		// the popup from collapsing to ~one tree-node tall when sub-trees
+		// are closed (the previous "min 0" let the popup auto-size to a
+		// few lines, which is what made it feel "way too small"). Max
+		// height = 70% of the main viewport so there's always visible
+		// chrome around it.
 		const ImGuiViewport* viewport = ImGui::GetMainViewport();
-		const float maxHeight = viewport ? viewport->WorkSize.y * 0.7f : 600.0f;
-		ImGui::SetNextWindowSizeConstraints(ImVec2(280.0f, 0.0f),
-			ImVec2(420.0f, maxHeight));
+		const float availableH = viewport ? viewport->WorkSize.y : 800.0f;
+		const float maxHeight = availableH * 0.7f;
+		const float minHeight = std::min(maxHeight, std::max(360.0f, availableH * 0.45f));
+		ImGui::SetNextWindowSizeConstraints(ImVec2(320.0f, minHeight),
+			ImVec2(460.0f, maxHeight));
 
 		if (!ImGui::BeginPopup(popupId)) {
 			return;
@@ -175,7 +181,10 @@ namespace Axiom {
 				const bool conflicts = componentConflictsWithSelection(typeId, &conflictName);
 				const bool enabled = !conflicts;
 				if (ImGuiUtils::MenuItemEllipsis(info.displayName, info.displayName.c_str(), nullptr, false, enabled, 260.0f)) {
-					if (enabled) addComponentToAll(info);
+					if (enabled) {
+						addComponentToAll(info);
+						ImGui::CloseCurrentPopup();
+					}
 				}
 				if (conflicts && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
 					ImGui::SetTooltip("Conflicts with %s", conflictName.c_str());
@@ -204,6 +213,7 @@ namespace Axiom {
 							AttachScriptToEntity(const_cast<Entity&>(e), scene, scriptEntry);
 						}
 					}
+					ImGui::CloseCurrentPopup();
 				}
 			}
 		}
@@ -247,7 +257,10 @@ namespace Axiom {
 						const bool conflicts = componentConflictsWithSelection(entry.TypeId, &conflictName);
 						const bool enabled = !conflicts;
 						if (ImGuiUtils::MenuItemEllipsis(info->displayName, info->displayName.c_str(), nullptr, false, enabled, 260.0f)) {
-							if (enabled) addComponentToAll(*info);
+							if (enabled) {
+								addComponentToAll(*info);
+								ImGui::CloseCurrentPopup();
+							}
 						}
 						if (conflicts && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
 							ImGui::SetTooltip("Conflicts with %s", conflictName.c_str());
@@ -285,6 +298,7 @@ namespace Axiom {
 							for (const Entity& e : entities) {
 								AttachManagedComponentToEntity(const_cast<Entity&>(e), scene, scriptEntry);
 							}
+							ImGui::CloseCurrentPopup();
 						}
 					}
 					ImGui::TreePop();
@@ -303,6 +317,7 @@ namespace Axiom {
 							for (const Entity& e : entities) {
 								AttachScriptToEntity(const_cast<Entity&>(e), scene, scriptEntry);
 							}
+							ImGui::CloseCurrentPopup();
 						}
 					}
 					ImGui::TreePop();

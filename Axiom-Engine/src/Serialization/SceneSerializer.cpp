@@ -703,7 +703,12 @@ namespace Axiom {
 				textValue.AddMember("alignment", Value(static_cast<int>(text.HAlign)));
 				textValue.AddMember("letterSpacing", Value(text.LetterSpacing));
 				textValue.AddMember("wrapMode", Value(static_cast<int>(text.WrapMode)));
-				textValue.AddMember("wrapWidth", Value(text.WrapWidth));
+				// WrapWidth field removed — wrap area is now derived
+				// from the host rect's width minus Margin every frame.
+				textValue.AddMember("marginL", Value(text.Margin.x));
+				textValue.AddMember("marginT", Value(text.Margin.y));
+				textValue.AddMember("marginR", Value(text.Margin.z));
+				textValue.AddMember("marginB", Value(text.Margin.w));
 				textValue.AddMember("sortOrder", Value(static_cast<int>(text.SortingOrder)));
 				textValue.AddMember("sortLayer", Value(static_cast<int>(text.SortingLayer)));
 				entityValue.AddMember("TextRenderer", std::move(textValue));
@@ -934,6 +939,7 @@ namespace Axiom {
 				imageValue.AddMember("a", Value(image.Color.a));
 				imageValue.AddMember("sortOrder", Value(static_cast<int>(image.SortingOrder)));
 				imageValue.AddMember("sortLayer", Value(static_cast<int>(image.SortingLayer)));
+				imageValue.AddMember("filterMode", Value(static_cast<int>(image.FilterMode)));
 
 				uint64_t textureAssetId = static_cast<uint64_t>(image.TextureAssetId);
 				if (textureAssetId == 0) {

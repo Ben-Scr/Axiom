@@ -128,6 +128,31 @@ namespace Axiom {
             AIM_CORE_ERROR_TAG("Font", "TTF empty / unreadable: {}", path);
             return false;
         }
+        m_Filepath = path;
+        return BakeAtlas(pixelSize);
+    }
+
+    bool Font::LoadFromBuffer(const std::string& sourcePath,
+        const std::vector<uint8_t>& ttfBuffer, float pixelSize)
+    {
+        if (ttfBuffer.empty() || pixelSize <= 0.0f) {
+            return false;
+        }
+
+        Cleanup();
+        // stb_truetype keeps a raw pointer into our buffer for the
+        // lifetime of the fontinfo — copy the bytes so the caller's
+        // buffer can outlive (or precede) our Font without aliasing
+        // worries.
+        m_TtfBuffer = ttfBuffer;
+        m_Filepath = sourcePath;
+        return BakeAtlas(pixelSize);
+    }
+
+    bool Font::BakeAtlas(float pixelSize) {
+        if (m_TtfBuffer.empty() || pixelSize <= 0.0f) {
+            return false;
+        }
 
         // Reserve fontinfo storage. stbtt_fontinfo size is fixed at compile
         // time; reserve the storage as raw bytes to avoid pulling stb's
@@ -136,7 +161,7 @@ namespace Axiom {
         stbtt_fontinfo* font = reinterpret_cast<stbtt_fontinfo*>(m_StbFontInfoStorage.data());
 
         if (!stbtt_InitFont(font, m_TtfBuffer.data(), stbtt_GetFontOffsetForIndex(m_TtfBuffer.data(), 0))) {
-            AIM_CORE_ERROR_TAG("Font", "stbtt_InitFont failed for: {}", path);
+            AIM_CORE_ERROR_TAG("Font", "stbtt_InitFont failed for: {}", m_Filepath);
             m_TtfBuffer.clear();
             m_StbFontInfoStorage.clear();
             return false;
@@ -163,12 +188,27 @@ namespace Axiom {
         // slices are passed to stbtt_PackFontRanges via the stbtt_pack_range
         // table below; the post-pack loop walks the same slices to translate
         // results back into m_Glyphs.
+        //
+        // Above ~48 px the 2× pre-pass essentially always fails: at 2×
+        // every glyph rasters at ~96 px, and ~256 ASCII+Latin-1 glyphs at
+        // that size don't fit until 4096² atlas (≈ 16 MB R8 upload). The
+        // current loop dutifully walks the entire 256→512→1024→2048→4096
+        // ladder, fails it, then runs the same ladder again at 1×. Skip
+        // the wasted 2× walk when the requested size is large enough that
+        // it's known to fail. The `chosenOversample==1` info-log below
+        // already advises the user to pick a smaller FontSize for sharper
+        // glyphs at these sizes, so the visual outcome is unchanged —
+        // we're just not paying for a doomed pre-pass on every drag tick.
         std::vector<stbtt_packedchar> packed(k_CodepointCount);
         std::vector<uint8_t> bitmap;
         int chosenOversample = 0;
         bool ok = false;
 
-        for (int oversample : { 2, 1 }) {
+        constexpr float k_OversampleSkipThresholdPx = 48.0f;
+        const std::initializer_list<int> oversampleTiers = (pixelSize > k_OversampleSkipThresholdPx)
+            ? std::initializer_list<int>{ 1 }
+            : std::initializer_list<int>{ 2, 1 };
+        for (int oversample : oversampleTiers) {
             int side = k_AtlasInitialSide;
             while (side <= k_AtlasMaxSide) {
                 bitmap.assign(static_cast<size_t>(side) * static_cast<size_t>(side), 0);
@@ -217,14 +257,14 @@ namespace Axiom {
         }
 
         if (!ok) {
-            AIM_CORE_ERROR_TAG("Font", "Atlas packing failed (font too large for max atlas {}px even at 1× oversample): {}", k_AtlasMaxSide, path);
+            AIM_CORE_ERROR_TAG("Font", "Atlas packing failed (font too large for max atlas {}px even at 1× oversample): {}", k_AtlasMaxSide, m_Filepath);
             m_TtfBuffer.clear();
             m_StbFontInfoStorage.clear();
             return false;
         }
         if (chosenOversample == 1) {
             AIM_CORE_INFO_TAG("Font", "{} baked at {} px with 1× oversample (atlas {}²) — pick a smaller FontSize for sharper glyphs",
-                path, static_cast<int>(pixelSize), m_AtlasWidth);
+                m_Filepath, static_cast<int>(pixelSize), m_AtlasWidth);
         }
 
         // Upload as GL_RED (single-channel). Linear filter keeps glyphs
@@ -279,7 +319,6 @@ namespace Axiom {
             }
         }
 
-        m_Filepath = path;
         return true;
     }
 

@@ -509,17 +509,20 @@ namespace Axiom {
 		return std::weak_ptr(*it);
 	}
 
+	// Returning nullptr is part of the contract — every caller is
+	// expected to handle the "no active scene" case (Renderer2D's
+	// ResolveClearCamera, the editor inspector, scripting bridges,
+	// etc. all `if (scene) ...`). Earlier revisions logged a warning
+	// here, but that fired once per frame during legitimate startup
+	// states (splash screen, between-scene unload/load) and flooded
+	// the log with thousands of identical lines, hiding real warnings.
+	// Misuse where a caller genuinely needs an active scene is caught
+	// at the call site (assertion / explicit check) — not here.
 	Scene* SceneManager::GetActiveScene() {
-		if (!m_ActiveScene) {
-			AIM_CORE_WARN_TAG("SceneManager", "There is no active scene");
-		}
 		return m_ActiveScene;
 	}
 
 	const Scene* SceneManager::GetActiveScene() const {
-		if (!m_ActiveScene) {
-			AIM_CORE_WARN_TAG("SceneManager", "There is no active scene");
-		}
 		return m_ActiveScene;
 	}
 

@@ -30,6 +30,7 @@
 #include "Graphics/TextureManager.hpp"
 #include "Gui/UIDrawOrder.hpp"
 #include "Scene/Scene.hpp"
+#include "Scripting/InspectorEventDispatch.hpp"
 #include "Scripting/ScriptEngine.hpp"
 
 #include <unordered_map>
@@ -1252,7 +1253,11 @@ namespace Axiom {
 					const Vec2 size = rect.GetSize();
 					const float outerR = std::min(size.x, size.y) * 0.5f;
 					const float innerR = std::max(0.0f, outerR - cs->RingThickness);
-					const Vec2 c = rect.ResolvedPivot;
+					// Hit-test against the rect's geometric centre — the
+					// renderer paints the disc there, so a slider authored
+					// with non-(0.5, 0.5) pivot would otherwise hit-test
+					// off-axis from the visible ring.
+					const Vec2 c = rect.GetCenter();
 					const float dx = mouseUi.x - c.x;
 					const float dy = mouseUi.y - c.y;
 					const float distSq = dx * dx + dy * dy;
@@ -1307,6 +1312,17 @@ namespace Axiom {
 						&& registry.valid(m_PressedEntity)
 						&& registry.all_of<InteractableComponent>(m_PressedEntity)) {
 						interact.IsClicked = true;
+						// Inspector-bound OnClick handlers fire on the
+						// rising edge — same frame the engine detects the
+						// click. Dispatch lives here (and in the synthetic
+						// keyboard / controller activate block below) so
+						// every IsClicked rising edge fans out to the
+						// component's bindings, not just mouse-driven ones.
+						if (auto* btn = registry.try_get<ButtonComponent>(entity)) {
+							if (!btn->OnClick.Bindings.empty()) {
+								InspectorEvents::FireAll(scene, entity, btn->OnClick.Bindings);
+							}
+						}
 					}
 				}
 			}
@@ -1314,6 +1330,24 @@ namespace Axiom {
 
 		if (mouseUpThisFrame) {
 			m_PressedEntity = entt::null;
+		}
+
+		// ── 3a. Cursor swap (UI hover variant) ──────────────────────
+		// Window hosts two cursor slots — default + UI — and switches
+		// between them per-frame based on whether the cursor sits over
+		// an INTERACTABLE Axiom UI element. We scope to "actually
+		// interactable" so a disabled button doesn't trigger the hover
+		// cursor; the same flag drives hover/press visual state above.
+		// Skipping the whole call when no UI cursor was loaded preserves
+		// the OS-default look for projects that didn't author one.
+		if (Window* win = Application::GetWindow()) {
+			bool overInteractable = false;
+			if (hovered != entt::null) {
+				if (auto* h = registry.try_get<InteractableComponent>(hovered)) {
+					overInteractable = h->Interactable;
+				}
+			}
+			win->SetCursorOverUI(overInteractable);
 		}
 
 		// ── 3b. Synthesise a click for keyboard / controller activate ──
@@ -1330,6 +1364,14 @@ namespace Axiom {
 					interact.IsClicked   = true;
 					interact.IsMouseDown = true;
 					interact.IsPressed   = true;
+					// Mirror the mouse-driven dispatch above so a
+					// keyboard / controller activation also fires the
+					// inspector-bound OnClick handlers.
+					if (auto* btn = registry.try_get<ButtonComponent>(entity)) {
+						if (!btn->OnClick.Bindings.empty()) {
+							InspectorEvents::FireAll(scene, entity, btn->OnClick.Bindings);
+						}
+					}
 				}
 				interact.ActivatedThisFrame = false;
 			}
@@ -1376,6 +1418,20 @@ namespace Axiom {
 			if (dd.SelectedIndex != dd.LastObservedSelectedIndex) {
 				dd.SelectionChangedThisFrame = true;
 				dd.LastObservedSelectedIndex = dd.SelectedIndex;
+
+				if (!dd.OnValueChanged.Bindings.empty()) {
+					// Methods with `int` get the index; methods with
+					// `string` get the option's text. Picking int as
+					// the dynamic kind matches Unity's
+					// Dropdown.OnValueChanged convention; string-typed
+					// bindings still fire with their authored static
+					// argument (the FireAllWithDynamicArg fallback path).
+					InspectorEvents::DynamicArg dyn;
+					dyn.Kind = InspectorEventArgKind::Int;
+					dyn.Encoded = std::to_string(dd.SelectedIndex);
+					InspectorEvents::FireAllWithDynamicArg(scene, entity,
+						dd.OnValueChanged.Bindings, dyn);
+				}
 			}
 		}
 
@@ -1392,11 +1448,24 @@ namespace Axiom {
 		// graphic per-entity inside the loop so a button on a
 		// text-only entity ("Submit", "Cancel" labels) isn't silently
 		// skipped.
-		auto buttonView = registry.view<InteractableComponent, ButtonComponent>(entt::exclude<DisabledTag>);
-		for (auto&& [entity, interact, btn] : buttonView.each()) {
+		// The Target Graphic can own its own InteractableComponent — when
+		// the button itself has no Interactable, hover/press state must
+		// be read from the graphic for the visual swap to react. Iterate
+		// every Button (no Interactable requirement on the button entity)
+		// and resolve the interactable from (a) the Button entity, then
+		// (b) the TargetGraphic. Without the fall-through, a button
+		// authored as "Button on a wrapper, Image+Interactable on a
+		// child" stayed locked at NormalColor regardless of cursor state.
+		auto buttonView = registry.view<ButtonComponent>(entt::exclude<DisabledTag>);
+		for (auto&& [entity, btn] : buttonView.each()) {
 			const EntityHandle target = (btn.TargetGraphic != entt::null && registry.valid(btn.TargetGraphic))
 				? btn.TargetGraphic : entity;
-			ApplyWidgetVisualToEntity(registry, target, interact, btn.TransitionMode,
+			InteractableComponent* interact = registry.try_get<InteractableComponent>(entity);
+			if (!interact && target != entity && registry.valid(target)) {
+				interact = registry.try_get<InteractableComponent>(target);
+			}
+			if (!interact) continue;
+			ApplyWidgetVisualToEntity(registry, target, *interact, btn.TransitionMode,
 				btn.NormalColor, btn.HoveredColor, btn.PressedColor, btn.DisabledColor, btn.FocusedColor,
 				btn.NormalSprite, btn.HoveredSprite, btn.PressedSprite, btn.DisabledSprite, btn.FocusedSprite);
 		}
@@ -1539,6 +1608,20 @@ namespace Axiom {
 			if (slider.Value != slider.LastObservedValue) {
 				slider.ValueChangedThisFrame = true;
 				slider.LastObservedValue = slider.Value;
+
+				// Fan the inspector-bound list out on the same edge.
+				// Methods with a `float` parameter receive the new
+				// value as the dynamic argument; bindings of any
+				// other type keep their authored static value.
+				if (!slider.OnValueChanged.Bindings.empty()) {
+					InspectorEvents::DynamicArg dyn;
+					dyn.Kind = InspectorEventArgKind::Float;
+					char buf[32];
+					std::snprintf(buf, sizeof(buf), "%g", slider.Value);
+					dyn.Encoded = buf;
+					InspectorEvents::FireAllWithDynamicArg(scene, entity,
+						slider.OnValueChanged.Bindings, dyn);
+				}
 			}
 		}
 
@@ -1569,7 +1652,27 @@ namespace Axiom {
 					cs.ValueObserved = true;
 				}
 
-				const Vec2 centre = rect.ResolvedPivot;
+				// Drag can be initiated by clicking the handle OR the ring
+				// — both produce a usable cursor angle. Without the handle
+				// branch, a click that landed squarely on the handle never
+				// reached the ring's annulus hit-test (the handle hovered
+				// first, suppressing the ring) and the slider sat inert
+				// while the user was clearly trying to drag the thumb.
+				InteractableComponent* handleInteract = nullptr;
+				if (cs.HandleEntity != entt::null && registry.valid(cs.HandleEntity)) {
+					handleInteract = registry.try_get<InteractableComponent>(cs.HandleEntity);
+				}
+				const bool handlePressed = handleInteract && handleInteract->Interactable && handleInteract->IsPressed;
+				const bool ringPressed   = interact.Interactable && interact.IsPressed;
+				const bool isPressed     = handlePressed || ringPressed;
+				const bool isMouseDown   = (handleInteract && handleInteract->IsMouseDown) || interact.IsMouseDown;
+
+				// Centre the polar drag math on the rect's geometric centre
+				// (where GuiRenderer paints the disc) rather than on
+				// ResolvedPivot — sliders authored with non-(0.5, 0.5) pivot
+				// would otherwise read cursor angles from the pivot offset
+				// rather than from the visible ring centre.
+				const Vec2 centre = rect.GetCenter();
 				const float dx = mouseUi.x - centre.x;
 				const float dy = mouseUi.y - centre.y;
 				const float cursorAngle = std::atan2(dy, dx);
@@ -1577,8 +1680,8 @@ namespace Axiom {
 				if (cs.IsReadOnly) {
 					cs.IsDragging = false;
 				}
-				else if (interact.Interactable && interact.IsPressed) {
-					if (interact.IsMouseDown) {
+				else if (isPressed) {
+					if (isMouseDown) {
 						cs.PressMouseAngle = cursorAngle;
 						cs.PressValue = cs.Value;
 						cs.IsDragging = false;
@@ -2013,6 +2116,14 @@ namespace Axiom {
 			if (toggle.IsOn != toggle.LastObservedIsOn) {
 				toggle.ValueChangedThisFrame = true;
 				toggle.LastObservedIsOn = toggle.IsOn;
+
+				if (!toggle.OnValueChanged.Bindings.empty()) {
+					InspectorEvents::DynamicArg dyn;
+					dyn.Kind = InspectorEventArgKind::Bool;
+					dyn.Encoded = toggle.IsOn ? "1" : "0";
+					InspectorEvents::FireAllWithDynamicArg(scene, entity,
+						toggle.OnValueChanged.Bindings, dyn);
+				}
 			}
 
 			if (toggle.CheckmarkEntity != entt::null && registry.valid(toggle.CheckmarkEntity)) {
@@ -2321,6 +2432,39 @@ namespace Axiom {
 			ClampCaret(field);
 		}
 
+		// ── Input field event dispatch ────────────────────────────────
+		// OnValueChanged fires whenever Text mutates — covers user
+		// typing, paste, clipboard cut, programmatic writes, scene-load
+		// edits, anything. Diffed against LastObservedText so a freshly-
+		// deserialised field with non-empty Text doesn't fire on the
+		// first tick (ValueObserved gates the baseline). OnSubmitted
+		// fires once when the user pressed Enter while focused.
+		for (auto&& [entity, interact, field] : inputView.each()) {
+			if (!field.ValueObserved) {
+				field.LastObservedText = field.Text;
+				field.ValueObserved = true;
+			}
+
+			if (field.Text != field.LastObservedText) {
+				if (!field.OnValueChanged.Bindings.empty()) {
+					InspectorEvents::DynamicArg dyn;
+					dyn.Kind = InspectorEventArgKind::String;
+					dyn.Encoded = field.Text;
+					InspectorEvents::FireAllWithDynamicArg(scene, entity,
+						field.OnValueChanged.Bindings, dyn);
+				}
+				field.LastObservedText = field.Text;
+			}
+
+			if (field.SubmittedThisFrame && !field.OnSubmitted.Bindings.empty()) {
+				InspectorEvents::DynamicArg dyn;
+				dyn.Kind = InspectorEventArgKind::String;
+				dyn.Encoded = field.Text;
+				InspectorEvents::FireAllWithDynamicArg(scene, entity,
+					field.OnSubmitted.Bindings, dyn);
+			}
+		}
+
 		// Sync the child TextRenderer for every input field so it shows
 		// either the entered text (or placeholder when empty + unfocused).
 		// The caret + selection highlight are NOT inserted into the text
@@ -2504,11 +2648,21 @@ namespace Axiom {
 		// the wrong entity (the button itself) instead of its child
 		// label/background — visually broken for any button whose
 		// graphic lives on a child entity.
-		auto buttonView = registry.view<ButtonComponent, InteractableComponent>(entt::exclude<DisabledTag>);
-		for (auto&& [entity, btn, interact] : buttonView.each()) {
-			const Color tint = interact.Interactable ? btn.NormalColor : btn.DisabledColor;
+		// Edit-mode preview mirrors the play-mode resolver above: walk
+		// every Button (Interactable not required on the button entity),
+		// and read the Interactable from the button OR its TargetGraphic.
+		// Required so a button authored without its own InteractableComponent
+		// previews the right palette in the inspector.
+		auto buttonView = registry.view<ButtonComponent>(entt::exclude<DisabledTag>);
+		for (auto&& [entity, btn] : buttonView.each()) {
+			InteractableComponent* interact = registry.try_get<InteractableComponent>(entity);
 			const EntityHandle target = (btn.TargetGraphic != entt::null && registry.valid(btn.TargetGraphic))
 				? btn.TargetGraphic : entity;
+			if (!interact && target != entity && registry.valid(target)) {
+				interact = registry.try_get<InteractableComponent>(target);
+			}
+			const bool interactable = interact ? interact->Interactable : true;
+			const Color tint = interactable ? btn.NormalColor : btn.DisabledColor;
 			if (auto* targetImage = registry.try_get<ImageComponent>(target)) {
 				targetImage->Color = tint;
 			}

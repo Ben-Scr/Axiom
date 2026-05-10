@@ -1,5 +1,6 @@
 #pragma once
 #include "Collections/Color.hpp"
+#include "Collections/Vec4.hpp"
 #include "Core/Export.hpp"
 #include "Core/UUID.hpp"
 #include "Graphics/Text/FontHandle.hpp"
@@ -81,18 +82,33 @@ namespace Axiom {
         TextAlignment HAlign = TextAlignment::Left;
 
         // Line-wrap strategy. None == legacy single-line + explicit `\n`
-        // behaviour; Word / Character break overlong runs at the wrap
-        // width below. UI text on a RectTransform2D wraps inside the
-        // rect's width by default (WrapWidth == 0); set WrapWidth > 0
-        // to override with an explicit pixel width (also the only way
-        // wrapping has an effect on world-space text, where there's no
-        // ambient rect to fall back on).
+        // behaviour; Word / Character break overlong runs at the rect's
+        // wrap width. UI text on a RectTransform2D wraps inside the
+        // rect's width minus the Margin (so authored insets actually
+        // narrow the wrap area). World-space text (no ambient rect)
+        // doesn't wrap — explicit `\n` is the only line-break source
+        // there. The historical `WrapWidth` override field was removed
+        // because Margin already provides the inset and the dual-path
+        // (explicit width vs rect-derived) made the wrap area
+        // non-obvious in the inspector.
         TextWrapMode WrapMode = TextWrapMode::None;
 
-        // Wrap width in screen-pixel units (same domain as FontSize and
-        // LetterSpacing). 0 = use the host RectTransform2D's width if
-        // present, else disable wrapping. Ignored when WrapMode == None.
-        float WrapWidth = 0.0f;
+        // Insets the rendered text inside the host RectTransform2D. Each
+        // component is in screen-pixel units (same domain as FontSize):
+        //   .x = left   inset (text origin shifts right)
+        //   .y = top    inset (text baseline shifts down)
+        //   .z = right  inset (wrap width / right-align edge shifts in)
+        //   .w = bottom inset (reserved for future vertical-align work)
+        //
+        // The wrap width — derived from the rect's width — is reduced
+        // by `Margin.x + Margin.z` so wrapped lines stop short of the
+        // right margin. Visualised in the Editor View as an inner
+        // rectangle with four edge handles the user can drag.
+        //
+        // World-space text (no host RectTransform2D) only honours the
+        // left + top components today; right / bottom rely on the rect's
+        // edges which world-space text doesn't have.
+        Vec4 Margin{ 0.0f, 0.0f, 0.0f, 0.0f };
 
         // Sort batch — same semantics as SpriteRendererComponent. Text
         // batches independently from sprites today; the sort key only

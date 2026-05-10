@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Collections/Color.hpp"
+#include "Components/UI/InspectorEventBinding.hpp"
 #include "Components/UI/UITransitionMode.hpp"
 #include "Core/UUID.hpp"
 #include "Scene/EntityHandle.hpp"
@@ -61,6 +62,12 @@ namespace Axiom {
 		UUID PressedSprite { 0 };
 		UUID DisabledSprite{ 0 };
 		UUID FocusedSprite { 0 };
+
+		// Inspector-bound event list — fires every binding on the rising
+		// edge of `ValueChangedThisFrame`. Methods that take a `bool`
+		// receive the new IsOn value as the static argument; void
+		// methods just notify "toggle changed".
+		InspectorEventList OnValueChanged;
 	};
 
 }

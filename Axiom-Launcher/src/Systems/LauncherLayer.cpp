@@ -7,6 +7,8 @@
 #include <Core/Log.hpp>
 #include "Serialization/Path.hpp"
 #include "Serialization/Directory.hpp"
+#include "Serialization/File.hpp"
+#include "Serialization/Json.hpp"
 #include "Utils/Process.hpp"
 #include "Graphics/Renderer2D.hpp"
 #include "Utils/Timer.hpp"
@@ -196,12 +198,31 @@ namespace Axiom {
 		(void)app;
 		Application::SetIsPlaying(false);
 
+		// Keep the launcher's main loop ticking even when the OS window
+		// loses focus. Without this, opening a project while the launcher
+		// is in the background made the progress overlay freeze (worker
+		// kept running, but the polling that surfaces stage/progress was
+		// gated on the render loop). With it, the launcher renders in the
+		// background and the open pipeline reports progress regardless of
+		// focus, plus the editor process spawns at the moment the worker
+		// actually finishes — not whenever the user clicks back.
+		Application::SetRunInBackground(true);
+
 		m_Registry.Load();
 		m_Registry.ValidateAll();
 		m_Registry.Save();
 
+		LoadLauncherSettings();
+
+		// Default projects location falls back to the engine's default if
+		// the settings file hasn't been written yet — matches the prior
+		// hard-coded behaviour without requiring a settings round-trip on
+		// the first launch.
+		const std::string defaultLocation = m_DefaultProjectsLocation.empty()
+			? AxiomProject::GetDefaultProjectsDir()
+			: m_DefaultProjectsLocation;
 		std::snprintf(m_NewProjectLocation, sizeof(m_NewProjectLocation), "%s",
-			AxiomProject::GetDefaultProjectsDir().c_str());
+			defaultLocation.c_str());
 
 		AIM_INFO_TAG("Launcher", "Axiom Launcher opened ({} project(s))", m_Registry.GetProjects().size());
 	}
@@ -422,8 +443,9 @@ namespace Axiom {
 		ImGui::Separator();
 		ImGui::Spacing();
 
-		// Snapshot async open-task state for overlay rendering. Reading under lock so
-		// the worker thread's writes are observed coherently.
+		// Snapshot async open-task state for the floating progress strip.
+		// Reading under lock so the worker thread's writes are observed
+		// coherently.
 		bool taskRunning = false;
 		std::string taskStage;
 		float taskProgress = 0.0f;
@@ -434,39 +456,18 @@ namespace Axiom {
 			taskProgress = m_OpenTask.Progress;
 		}
 
-		// Block all launcher interaction while the open pipeline runs OR during the
-		// post-launch 1.5 s grace period.
+		// Non-blocking progress card. The launcher used to draw a
+		// fullscreen overlay that blocked every other interaction for the
+		// duration of the open pipeline (potentially many seconds while
+		// MSBuild ran). Now the open task gets its own auto-sized window
+		// — the user can keep browsing projects, edit settings, or start
+		// a second open (refused upstream) while the previous one is
+		// still spinning up.
 		if (m_IsOpening || taskRunning) {
-			float w = ImGui::GetContentRegionAvail().x;
-			float h = ImGui::GetContentRegionAvail().y;
-			ImVec2 center(ImGui::GetCursorScreenPos().x + w * 0.5f,
-				ImGui::GetCursorScreenPos().y + h * 0.4f);
-
-			ImGui::SetCursorScreenPos(ImVec2(center.x - 120, center.y - 20));
-			if (taskRunning) {
-				ImGui::TextUnformatted(taskStage.empty() ? "Opening project..." : taskStage.c_str());
-			}
-			else {
-				ImGui::TextUnformatted("Opening project...");
-			}
-
-			ImGui::SetCursorScreenPos(ImVec2(center.x - 120, center.y + 5));
-			if (taskRunning) {
-				// Real stage-driven progress while the worker is busy.
-				ImGui::ProgressBar(taskProgress, ImVec2(240, 0), "");
-			}
-			else {
-				// Post-launch indeterminate animation while the editor process spins up.
-				float elapsed = std::chrono::duration<float>(
-					std::chrono::steady_clock::now() - m_OpenStartTime).count();
-				ImGui::ProgressBar(fmodf(elapsed * 0.3f, 1.0f), ImVec2(240, 0), "");
-			}
-
-			ImGui::SetCursorScreenPos(ImVec2(center.x - 120, center.y + 30));
-			ImGui::TextDisabled("%s", m_OpeningProjectName.c_str());
-
-			// Dismiss the post-launch overlay 1.5 s after the worker reports success.
-			// While the worker is still running we never dismiss — the user has to wait.
+			// Dismiss the post-launch grace period 1.5 s after the worker
+			// reports success. While the worker is still running we never
+			// dismiss — the user can't cancel a running build, but they
+			// CAN keep using the rest of the launcher in the meantime.
 			if (!taskRunning) {
 				float elapsed = std::chrono::duration<float>(
 					std::chrono::steady_clock::now() - m_OpenStartTime).count();
@@ -480,15 +481,90 @@ namespace Axiom {
 				}
 			}
 
+			// Pin the progress card to the bottom-right of the launcher
+			// viewport so it never sits over a project row the user might
+			// want to click. Auto-size to its contents.
+			const ImVec2 pad{ 16.0f, 16.0f };
+			const ImVec2 anchor{
+				viewport->Pos.x + viewport->Size.x - pad.x,
+				viewport->Pos.y + viewport->Size.y - pad.y,
+			};
+			ImGui::SetNextWindowPos(anchor, ImGuiCond_Always, ImVec2(1.0f, 1.0f));
+			ImGui::SetNextWindowBgAlpha(0.92f);
+			ImGuiWindowFlags overlayFlags = ImGuiWindowFlags_AlwaysAutoResize
+				| ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse
+				| ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing
+				| ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoDocking;
+
+			if (ImGui::Begin("##LauncherOpenStatus", nullptr, overlayFlags)) {
+				ImGui::TextUnformatted("Opening project");
+				ImGui::TextDisabled("%s", m_OpeningProjectName.c_str());
+				ImGui::Separator();
+				if (taskRunning) {
+					ImGui::TextUnformatted(taskStage.empty() ? "Working..." : taskStage.c_str());
+					ImGui::ProgressBar(taskProgress, ImVec2(260, 0), "");
+				}
+				else {
+					ImGui::TextUnformatted("Launching editor...");
+					float elapsed = std::chrono::duration<float>(
+						std::chrono::steady_clock::now() - m_OpenStartTime).count();
+					ImGui::ProgressBar(fmodf(elapsed * 0.3f, 1.0f), ImVec2(260, 0), "");
+				}
+			}
 			ImGui::End();
-			return; // Skip all other UI — blocks interaction completely
+
+			// IMPORTANT: don't return — the rest of the launcher UI (project
+			// list, create/add/settings buttons, popups) still wants to draw
+			// underneath. The status strip floats over the bottom-right
+			// corner without stealing focus.
 		}
 
 		float panelWidth = ImGui::GetContentRegionAvail().x;
 		float rightColWidth = 200.0f;
 
+		// Sort + refresh strip above the project list. The combo controls
+		// the sort axis (Last Opened, Name, Created), the arrow button
+		// flips the direction, and the refresh icon re-loads launcher.json
+		// + clears the size cache so projects added or modified outside
+		// the launcher show up without restarting the app.
+		const float strip_h = ImGui::GetFrameHeight();
+		const float refreshW = strip_h;
+		const float reverseW = strip_h;
+		const float listColW = panelWidth - rightColWidth - 10.0f;
+
+		ImGui::BeginGroup();
+		const float comboW = listColW - refreshW - reverseW
+			- ImGui::GetStyle().ItemSpacing.x * 2.0f
+			- ImGui::CalcTextSize("Sort:").x - ImGui::GetStyle().ItemSpacing.x;
+		ImGui::TextUnformatted("Sort:");
+		ImGui::SameLine();
+		ImGui::SetNextItemWidth(comboW);
+		const char* k_SortLabels[] = { "Last Opened", "Name", "Created" };
+		int sortMode = static_cast<int>(m_SortMode);
+		if (ImGui::Combo("##LauncherSort", &sortMode, k_SortLabels, IM_ARRAYSIZE(k_SortLabels))) {
+			m_SortMode = static_cast<SortMode>(sortMode);
+			SaveLauncherSettings();
+		}
+		ImGui::SameLine();
+		const char* arrow = m_SortReverse ? "^" : "v";
+		if (ImGui::Button(arrow, ImVec2(reverseW, strip_h))) {
+			m_SortReverse = !m_SortReverse;
+			SaveLauncherSettings();
+		}
+		if (ImGui::IsItemHovered()) {
+			ImGui::SetTooltip(m_SortReverse ? "Sort ascending" : "Sort descending");
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("R", ImVec2(refreshW, strip_h))) {
+			RefreshProjectsList();
+		}
+		if (ImGui::IsItemHovered()) {
+			ImGui::SetTooltip("Refresh project list");
+		}
+		ImGui::EndGroup();
+
 		// Left column: project list
-		ImGui::BeginChild("##ProjectList", ImVec2(panelWidth - rightColWidth - 10, 0), true);
+		ImGui::BeginChild("##ProjectList", ImVec2(listColW, 0), true);
 		RenderProjectList();
 		ImGui::EndChild();
 
@@ -502,12 +578,25 @@ namespace Axiom {
 			m_CreateError.clear();
 			m_IsCreating = false;
 			m_NewProjectName[0] = '\0';
+			// Re-snap the location to whatever the user has set in
+			// settings — they may have changed it since OnAttach.
+			const std::string defaultLocation = m_DefaultProjectsLocation.empty()
+				? AxiomProject::GetDefaultProjectsDir()
+				: m_DefaultProjectsLocation;
+			std::snprintf(m_NewProjectLocation, sizeof(m_NewProjectLocation), "%s",
+				defaultLocation.c_str());
 		}
 
 		ImGui::Spacing();
 
 		if (ImGui::Button("Add Existing Project", ImVec2(-1, 0))) {
 			BrowseForExistingProject();
+		}
+
+		ImGui::Spacing();
+
+		if (ImGui::Button("Settings", ImVec2(-1, 0))) {
+			m_OpenSettingsPopup = true;
 		}
 
 		if (!m_BrowseError.empty()) {
@@ -530,6 +619,7 @@ namespace Axiom {
 		// L6: Render create popup modal inside the launcher window context
 		RenderCreateProjectPopup();
 		RenderDeleteProjectPopups();
+		RenderSettingsPopup();
 
 		ImGui::End();
 	}
@@ -537,18 +627,18 @@ namespace Axiom {
 	// ── Project List ────────────────────────────────────────────────
 
 	void LauncherLayer::RenderProjectList() {
-		const auto& projects = m_Registry.GetProjects();
+		const auto sortedProjects = GetSortedProjectsView();
 
-		if (projects.empty()) {
+		if (sortedProjects.empty()) {
 			ImGui::TextDisabled("No projects yet");
 			ImGui::TextDisabled("Create a new project or add an existing one.");
 			return;
 		}
 
-		int removeIndex = -1;
+		std::string removePath;
 
-		for (int i = 0; i < static_cast<int>(projects.size()); i++) {
-			const auto& entry = projects[i];
+		for (int i = 0; i < static_cast<int>(sortedProjects.size()); i++) {
+			const auto& entry = *sortedProjects[i];
 
 			ImGui::PushID(i);
 
@@ -570,7 +660,7 @@ namespace Axiom {
 				}
 
 				if (ImGui::MenuItem("Remove from List")) {
-					removeIndex = i;
+					removePath = entry.Path;
 				}
 
 				ImGui::Separator();
@@ -626,12 +716,15 @@ namespace Axiom {
 			ImGui::PopID();
 		}
 
-		// Deferred removal to avoid modifying the list during iteration
-		if (removeIndex >= 0) {
-			const std::string removedPath = projects[removeIndex].Path;
-			m_Registry.RemoveProject(removedPath);
+		// Deferred removal to avoid modifying the list during iteration.
+		// Keying by path (not index) because the displayed order is a
+		// sorted *view* over the registry — the index in `sortedProjects`
+		// doesn't map back to the registry's underlying storage.
+		if (!removePath.empty()) {
+			m_Registry.RemoveProject(removePath);
 			m_Registry.Save();
-			m_ProjectSizeTasks.erase(removedPath);
+			m_ProjectSizeTasks.erase(removePath);
+			m_CreatedAtCache.erase(removePath);
 		}
 	}
 
@@ -1216,6 +1309,236 @@ namespace Axiom {
 						else {
 							m_BrowseError = "Not a valid Axiom project (missing axiom-project.json or Assets/)";
 						}
+					}
+					result->Release();
+				}
+			}
+			dialog->Release();
+		}
+
+		CoUninitialize();
+#endif
+	}
+
+	// ── Sort / Refresh / Settings ───────────────────────────────────
+
+	std::vector<const LauncherProjectEntry*> LauncherLayer::GetSortedProjectsView() const {
+		const auto& projects = m_Registry.GetProjects();
+		std::vector<const LauncherProjectEntry*> view;
+		view.reserve(projects.size());
+		for (const auto& entry : projects) view.push_back(&entry);
+
+		auto getCreatedAt = [&](const LauncherProjectEntry* e) -> std::int64_t {
+			auto it = m_CreatedAtCache.find(e->Path);
+			if (it != m_CreatedAtCache.end()) return it->second;
+			std::error_code ec;
+			std::int64_t ts = 0;
+			std::filesystem::path p(e->Path);
+			auto ftime = std::filesystem::last_write_time(p, ec);
+			if (!ec) {
+				ts = std::chrono::duration_cast<std::chrono::seconds>(
+					ftime.time_since_epoch()).count();
+			}
+			m_CreatedAtCache.emplace(e->Path, ts);
+			return ts;
+		};
+
+		switch (m_SortMode) {
+			case SortMode::LastOpened:
+				std::sort(view.begin(), view.end(),
+					[](const auto* a, const auto* b) { return a->LastOpened > b->LastOpened; });
+				break;
+			case SortMode::Name:
+				std::sort(view.begin(), view.end(),
+					[](const auto* a, const auto* b) {
+						return std::lexicographical_compare(
+							a->Name.begin(), a->Name.end(),
+							b->Name.begin(), b->Name.end(),
+							[](unsigned char x, unsigned char y) {
+								return std::tolower(x) < std::tolower(y);
+							});
+					});
+				break;
+			case SortMode::CreatedAt:
+				std::sort(view.begin(), view.end(),
+					[&](const auto* a, const auto* b) { return getCreatedAt(a) > getCreatedAt(b); });
+				break;
+		}
+
+		if (m_SortReverse) {
+			std::reverse(view.begin(), view.end());
+		}
+		return view;
+	}
+
+	void LauncherLayer::RefreshProjectsList() {
+		// Stop any running size workers so they don't write into the cache
+		// after Load() pulls in a different project list (path-keyed map
+		// makes this strictly additive, but stopping eliminates wasted IO).
+		for (auto& [_, task] : m_ProjectSizeTasks) {
+			if (task) task->Worker.request_stop();
+		}
+		m_ProjectSizeTasks.clear();
+		m_CreatedAtCache.clear();
+
+		m_Registry.Load();
+		m_Registry.ValidateAll();
+		m_Registry.Save();
+	}
+
+	std::string LauncherLayer::GetSettingsPath() {
+		return Path::Combine(
+			Path::GetSpecialFolderPath(SpecialFolder::LocalAppData),
+			"Axiom", "launcher_settings.json");
+	}
+
+	void LauncherLayer::LoadLauncherSettings() {
+		const std::string path = GetSettingsPath();
+		if (!File::Exists(path)) return;
+
+		Json::Value root;
+		std::string parseError;
+		const std::string text = File::ReadAllText(path);
+		if (!Json::TryParse(text, root, &parseError) || !root.IsObject()) {
+			AIM_CORE_WARN_TAG("Launcher", "Failed to parse '{}': {}", path, parseError);
+			return;
+		}
+
+		if (const Json::Value* v = root.FindMember("defaultProjectsLocation")) {
+			m_DefaultProjectsLocation = v->AsStringOr();
+		}
+		if (const Json::Value* v = root.FindMember("sortMode")) {
+			int mode = v->AsIntOr(static_cast<int>(SortMode::LastOpened));
+			if (mode >= 0 && mode <= static_cast<int>(SortMode::CreatedAt)) {
+				m_SortMode = static_cast<SortMode>(mode);
+			}
+		}
+		if (const Json::Value* v = root.FindMember("sortReverse")) {
+			m_SortReverse = v->AsBoolOr(false);
+		}
+	}
+
+	void LauncherLayer::SaveLauncherSettings() const {
+		const std::string path = GetSettingsPath();
+
+		std::error_code ec;
+		std::filesystem::create_directories(std::filesystem::path(path).parent_path(), ec);
+
+		Json::Value root = Json::Value::MakeObject();
+		root.AddMember("defaultProjectsLocation", m_DefaultProjectsLocation);
+		root.AddMember("sortMode", Json::Value(static_cast<int>(m_SortMode)));
+		root.AddMember("sortReverse", Json::Value(m_SortReverse));
+		if (!File::WriteAllText(path, Json::Stringify(root, true))) {
+			AIM_CORE_WARN_TAG("Launcher", "Failed to write launcher settings to '{}'", path);
+		}
+	}
+
+	void LauncherLayer::RenderSettingsPopup() {
+		if (m_OpenSettingsPopup) {
+			ImGui::OpenPopup("Launcher Settings");
+			m_OpenSettingsPopup = false;
+		}
+
+		ImGui::SetNextWindowSize(ImVec2(560, 0), ImGuiCond_Appearing);
+		if (!ImGui::BeginPopupModal("Launcher Settings", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+			return;
+		}
+
+		// The "effective" path — what `Create New Project` would use right
+		// now if the user clicked it. Falls back to the engine's bundled
+		// default when the user hasn't authored an override. Always
+		// non-empty (modulo a missing engine install), so the input below
+		// always shows something the user can edit instead of looking
+		// blank-by-default the first time the popup is opened.
+		const std::string effectiveDefault = m_DefaultProjectsLocation.empty()
+			? AxiomProject::GetDefaultProjectsDir()
+			: m_DefaultProjectsLocation;
+
+		ImGui::TextUnformatted("Default projects location");
+		ImGui::TextDisabled("Used when creating a new project.");
+
+		// Surface the current value as a small read-only line so the user
+		// can compare what's saved vs. what they're typing — particularly
+		// useful when the input is the engine fallback (no explicit
+		// override) so it's clear they haven't customised anything yet.
+		ImGui::TextDisabled("Current: %s%s",
+			effectiveDefault.c_str(),
+			m_DefaultProjectsLocation.empty() ? "  (engine default)" : "");
+		ImGui::Spacing();
+
+		// Editable buffer kept on the popup itself — sized for typical
+		// long Windows paths plus a margin. Pre-fill with the effective
+		// path (override or engine default) so the user immediately sees
+		// what's in use rather than an empty field.
+		static char s_LocationBuffer[1024]{};
+		if (ImGui::IsWindowAppearing()) {
+			std::snprintf(s_LocationBuffer, sizeof(s_LocationBuffer), "%s",
+				effectiveDefault.c_str());
+		}
+		ImGui::SetNextItemWidth(-110.0f);
+		ImGui::InputText("##DefaultLocation", s_LocationBuffer, sizeof(s_LocationBuffer));
+		ImGui::SameLine();
+		if (ImGui::Button("Browse...", ImVec2(100, 0))) {
+			BrowseForDefaultProjectsLocation();
+			std::snprintf(s_LocationBuffer, sizeof(s_LocationBuffer), "%s",
+				m_DefaultProjectsLocation.c_str());
+		}
+
+		ImGui::Spacing();
+		ImGui::Separator();
+		ImGui::Spacing();
+
+		if (ImGui::Button("Save", ImVec2(100, 0))) {
+			// If the user left the field at the engine default verbatim,
+			// don't persist it as an override — the empty-string sentinel
+			// keeps the "follows engine default" behaviour even if the
+			// engine's default path changes in a future version.
+			const std::string typed(s_LocationBuffer);
+			if (typed == AxiomProject::GetDefaultProjectsDir()) {
+				m_DefaultProjectsLocation.clear();
+			}
+			else {
+				m_DefaultProjectsLocation = typed;
+			}
+			SaveLauncherSettings();
+			ImGui::CloseCurrentPopup();
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("Cancel", ImVec2(100, 0))) {
+			ImGui::CloseCurrentPopup();
+		}
+
+		ImGui::EndPopup();
+	}
+
+	void LauncherLayer::BrowseForDefaultProjectsLocation() {
+#ifdef AIM_PLATFORM_WINDOWS
+		CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+
+		IFileOpenDialog* dialog = nullptr;
+		HRESULT hr = CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_ALL,
+			IID_IFileOpenDialog, reinterpret_cast<void**>(&dialog));
+
+		if (SUCCEEDED(hr)) {
+			DWORD options;
+			dialog->GetOptions(&options);
+			dialog->SetOptions(options | FOS_PICKFOLDERS);
+			dialog->SetTitle(L"Default projects location");
+
+			if (SUCCEEDED(dialog->Show(nullptr))) {
+				IShellItem* result = nullptr;
+				dialog->GetResult(&result);
+				if (result) {
+					PWSTR widePath = nullptr;
+					result->GetDisplayName(SIGDN_FILESYSPATH, &widePath);
+					if (widePath) {
+						const int len = WideCharToMultiByte(CP_UTF8, 0, widePath, -1, nullptr, 0, nullptr, nullptr);
+						if (len > 1) {
+							std::string path(static_cast<size_t>(len - 1), '\0');
+							WideCharToMultiByte(CP_UTF8, 0, widePath, -1, path.data(), len, nullptr, nullptr);
+							m_DefaultProjectsLocation = std::move(path);
+						}
+						CoTaskMemFree(widePath);
 					}
 					result->Release();
 				}

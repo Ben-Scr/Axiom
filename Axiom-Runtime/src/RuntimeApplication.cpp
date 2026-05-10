@@ -85,21 +85,25 @@ public:
 
 	~RuntimeApplication() override = default;
 
+	void ConfigureLayers() override {
+		// Splash screen pushed as an overlay BEFORE InitializeStartupScenes
+		// runs so the splash is on the layer stack — and visible to the
+		// preload-frame Application::Init renders right before the
+		// (potentially seconds-long) blocking scene load. Pushing it in
+		// Start() instead would have meant the entire scene-load + Awake/
+		// Start ran with a black window before the splash ever showed.
+		AxiomProject* project = ProjectManager::GetCurrentProject();
+		if (project && project->SplashScreen.Enabled) {
+			PushOverlay<RuntimeSplashLayer>("RuntimeSplash");
+		}
+	}
+
 	void Start() override {
 		if (!ProjectManager::GetCurrentProject()) {
 			EntityHelper::CreateCamera2DEntity();
 		}
 
 		AxiomProject* project = ProjectManager::GetCurrentProject();
-
-		// Splash screen as an overlay so it draws ABOVE every gameplay
-		// layer until it self-hides at the end of its timeline. Skipped
-		// for projects that opt out (`SplashScreen.Enabled == false`)
-		// and for the no-project fallback (still want a fast path for
-		// engine smoke tests / sample scene runs).
-		if (project && project->SplashScreen.Enabled) {
-			PushOverlay<RuntimeSplashLayer>("RuntimeSplash");
-		}
 
 		// Push the runtime profiler layer only when the project opted into it.
 		// (When --no-profiler was passed at premake time, the layer is built

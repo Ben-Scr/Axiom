@@ -168,6 +168,24 @@ namespace Axiom::ReferencePicker {
 		AssetRegistry::MarkDirty();
 		AssetRegistry::Sync();
 
+		// Editor-icon textures are an implementation detail of the
+		// editor chrome (FileIcons / General / etc. inside
+		// AxiomAssets/Textures/Editor). They balloon the texture
+		// picker by hundreds of entries no project ever wants to
+		// reference, so filter them out of every asset-kind listing.
+		// Match path-separator-agnostic: the AssetRegistry stores
+		// canonicalised paths with native separators, while the .ico
+		// scanner and copy_file emit forward slashes. Matching both
+		// shapes covers the BuiltIn (engine-shipped) and project copy
+		// alike.
+		auto isEditorIconPath = [](const std::string& path) {
+			auto contains = [&path](std::string_view needle) {
+				return path.find(needle) != std::string::npos;
+			};
+			return contains("AxiomAssets/Textures/Editor")
+				|| contains("AxiomAssets\\Textures\\Editor");
+		};
+
 		std::vector<Entry> entries;
 		entries.push_back({ "(None)", "", "(none)", "", "__none__", false });
 		const auto records = AssetRegistry::GetAssetsByKind(kind);
@@ -188,6 +206,7 @@ namespace Axiom::ReferencePicker {
 		}
 #endif
 		for (const AssetRegistry::Record& record : records) {
+			if (isEditorIconPath(record.Path)) continue;
 			Entry entry;
 			entry.Label = std::filesystem::path(record.Path).filename().string();
 			entry.Secondary = record.Path;

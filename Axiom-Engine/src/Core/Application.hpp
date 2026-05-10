@@ -102,6 +102,28 @@ namespace Axiom {
 		const SceneManager* GetSceneManager() const { return m_SceneManager.get(); }
 
 		static void Quit();
+		// Request the editor to stop play mode on its next pre-render
+		// pass. No-op outside the editor and outside play. Used by the
+		// scripting binding for Application.Quit() so a script-side
+		// "quit the game" call inside the editor exits play mode rather
+		// than closing the editor window.
+		static void RequestEditorStopPlay() {
+			if (s_Instance) s_Instance->m_EditorStopPlayRequested = true;
+		}
+
+		// Splash-layer status hooks. The runtime splash overlay calls
+		// SignalSplashAttached on push and SignalSplashDetached when it
+		// pops itself at the end of its timeline. The main loop drains
+		// `m_DeferredStartupScenes` once SignalSplashDetached has fired,
+		// so the first scene only begins loading after the splash is
+		// fully gone — matches the user-facing rule "scene loads only
+		// when the splash is over".
+		static void SignalSplashAttached() {
+			if (s_Instance) s_Instance->m_SplashLayerActive = true;
+		}
+		static void SignalSplashDetached() {
+			if (s_Instance) s_Instance->m_SplashLayerActive = false;
+		}
 		static void Pause(bool paused) { if (s_Instance) s_Instance->m_IsPaused = paused; }
 		static void Reload() { if (s_Instance) { s_Instance->m_ShouldQuit = true; s_Instance->m_CanReload = true; } };
 		static bool IsPaused() { return s_Instance ? s_Instance->IsEnginePaused() : false; }
@@ -139,6 +161,19 @@ namespace Axiom {
 			m_LayerStack.PushOverlay(std::move(layer));
 			layerRef.OnAttach(*this);
 			return layerRef;
+		}
+
+		// Pop an overlay by pointer. Used by self-popping overlays (the
+		// runtime splash) so they can remove themselves at the end of
+		// their timeline without the host layer needing to track them.
+		// PopOverlay is dispatch-safe: when a layer dispatch is in
+		// flight, the actual erase is deferred to dispatch end so the
+		// caller's `this` stays alive for the rest of the OnUpdate
+		// loop. OnDetach runs as part of the deferred erase.
+		bool PopOverlay(Layer* layer) {
+			if (!layer) return false;
+			layer->OnDetach(*this);
+			return m_LayerStack.PopOverlay(layer);
 		}
 
 		template<typename TEvent, typename F>
@@ -239,6 +274,22 @@ namespace Axiom {
 		bool m_IsPlaying = true;
 		bool m_IsGameplayPaused = false;
 		bool m_IsScriptInputEnabled = true;
+		// Set when a scripted Application.Quit() runs inside the editor —
+		// the editor's pre-render polls this and routes through its
+		// normal stop-play path so quit-from-script doesn't close the
+		// editor window. Cleared after the editor consumes it.
+		bool m_EditorStopPlayRequested = false;
+		// Set when Initialize() saw a splash overlay attached and
+		// skipped the InitializeStartupScenes / RaiseApplicationStart /
+		// MarkGameStart trio. Drained by the main loop once the splash
+		// pops itself (m_SplashLayerActive flips false), so the first
+		// scene only starts loading once the splash is fully done.
+		bool m_DeferredStartupScenes = false;
+		// Toggled by the splash layer's OnAttach / OnDetach via
+		// SignalSplashAttached / SignalSplashDetached. Stays false in
+		// the editor and in projects that disable the splash, so the
+		// deferred-load gate is opt-in.
+		bool m_SplashLayerActive = false;
 		bool m_WasEnginePaused = false;
 		bool m_IsRenderingFrame = false;
 		bool m_IsRenderingRefresh = false;
@@ -270,6 +321,10 @@ namespace Axiom {
 		void CoreInput();
 		void ResetTimePoints();
 		void TryCompleteQuitRequest();
+		// Drains m_DeferredStartupScenes when the splash has popped.
+		// Called from the main loop right after the layer OnUpdate
+		// dispatch (which is where the splash actually detaches itself).
+		void TickDeferredStartupScenes();
 		void BeginFrame();
 		void BeginFixedFrame();
 		void EndFixedFrame();

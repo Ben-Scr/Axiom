@@ -148,33 +148,22 @@ namespace Axiom {
 			ImGui::Separator();
 		}
 
-		// Reserve bottom strip; each tab is a scrollable child so the tab bar stays anchored.
-		// statusHeight = 0 when there's no message; the tab content's
-		// BeginChild then gets size (0, 0) which fills available space.
-		const float statusHeight = !m_StatusMessage.empty() ? ImGui::GetFrameHeightWithSpacing() : 0.0f;
-
+		// Tab bar + content. The tab body used to be wrapped in BeginChild
+		// for an "anchored bar / scrolling content" effect, but in ImGui
+		// 1.92 the child's size param + ImGuiChildFlags interaction left
+		// the content area collapsed to zero height inside a docked tab
+		// page — so the tab strip rendered while every tab body looked
+		// blank. Letting the parent window scroll directly avoids that
+		// failure mode and matches every other panel in the editor.
 		if (ImGui::BeginTabBar("##PackageManagerTabs")) {
 			if (ImGui::BeginTabItem("Search Packages")) {
 				m_TabIndex = 0;
-				// ImGuiChildFlags_None / size (0,0) fills remaining area;
-				// using -statusHeight reserves space ONLY when we have a
-				// status to show, otherwise the child fills the tab page
-				// completely so the filter row + Axiom Registry header
-				// always have non-zero width.
-				const ImVec2 childSize = (statusHeight > 0.0f)
-					? ImVec2(0.0f, -statusHeight) : ImVec2(0.0f, 0.0f);
-				ImGui::BeginChild("##SearchScroll", childSize, false);
 				RenderSearchPackagesTab();
-				ImGui::EndChild();
 				ImGui::EndTabItem();
 			}
 			if (ImGui::BeginTabItem("In Project")) {
 				m_TabIndex = 1;
-				const ImVec2 childSize = (statusHeight > 0.0f)
-					? ImVec2(0.0f, -statusHeight) : ImVec2(0.0f, 0.0f);
-				ImGui::BeginChild("##InProjectScroll", childSize, false);
 				RenderInstalledPackagesTab();
-				ImGui::EndChild();
 				ImGui::EndTabItem();
 			}
 			ImGui::EndTabBar();
@@ -259,6 +248,7 @@ namespace Axiom {
 
 		ImGui::Spacing();
 
+		ImGui::SetNextItemOpen(true, ImGuiCond_FirstUseEver);
 		ImGui::SetNextItemOpen(true, ImGuiCond_FirstUseEver);
 		if (ImGui::CollapsingHeader("Axiom Registry")) {
 			RenderAxiomRegistrySection();

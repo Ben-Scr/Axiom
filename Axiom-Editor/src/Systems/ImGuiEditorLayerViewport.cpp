@@ -334,6 +334,75 @@ namespace Axiom {
 			Gizmo::DrawLine(corners[1], corners[2]);
 			Gizmo::DrawLine(corners[2], corners[3]);
 			Gizmo::DrawLine(corners[3], corners[0]);
+
+			// ── Text margin gizmo ─────────────────────────────────
+			// When the selected rect carries a TextRendererComponent,
+			// paint an inner rect indicating the wrap area + four tiny
+			// solid handle squares centred on each edge midpoint. The
+			// handles are draggable; the InvisibleButton overlays + drag
+			// math live in RenderEditorView, where mouse state and the
+			// FBO's screen rect are in scope.
+			if (scene.HasComponent<TextRendererComponent>(m_SelectedEntity)) {
+				const auto& text = scene.GetComponent<TextRendererComponent>(m_SelectedEntity);
+
+				// Margin is in pixel units (FontSize domain). Convert to
+				// world units the same way the renderer does — via the
+				// rect's uniform scale. Use the rect's local scale axis
+				// since worldScale is already baked into `corners`.
+				const float marginScale = worldScale * std::max(0.01f, std::abs(rect.Scale.x));
+				const float ml = text.Margin.x * marginScale;
+				const float mt = text.Margin.y * marginScale;
+				const float mr = text.Margin.z * marginScale;
+				const float mb = text.Margin.w * marginScale;
+
+				// corners[] indices (world units, pre-rotation): 0=BL,1=BR,2=TR,3=TL.
+				// Reconstruct the inner rect in unrotated space, then rotate
+				// around the same pivot the outer rect uses. Working in
+				// unrotated space lets margin offsets stay axis-aligned in
+				// the rect's local frame, matching how the renderer applies
+				// them (Margin.x always insets along the rect's local +X,
+				// regardless of world rotation).
+				const Vec2 innerBL{ bl.x * worldScale + ml, bl.y * worldScale + mb };
+				const Vec2 innerTR{ tr.x * worldScale - mr, tr.y * worldScale - mt };
+				Vec2 inner[4] = {
+					Vec2{ innerBL.x, innerBL.y },
+					Vec2{ innerTR.x, innerBL.y },
+					Vec2{ innerTR.x, innerTR.y },
+					Vec2{ innerBL.x, innerTR.y },
+				};
+				if (rect.Rotation != 0.0f) {
+					const Vec2 worldPivot{ pivot.x * worldScale, pivot.y * worldScale };
+					for (int i = 0; i < 4; ++i) {
+						inner[i] = worldPivot + Rotated(inner[i] - worldPivot, rect.Rotation);
+					}
+				}
+
+				Gizmo::SetColor(Color(0.95f, 0.95f, 0.95f, 0.85f));
+				Gizmo::SetLineWidth(1.0f);
+				Gizmo::DrawLine(inner[0], inner[1]);
+				Gizmo::DrawLine(inner[1], inner[2]);
+				Gizmo::DrawLine(inner[2], inner[3]);
+				Gizmo::DrawLine(inner[3], inner[0]);
+
+				// Edge-midpoint handles. Size scales with the camera's
+				// world-per-pixel so the handles stay roughly screen-px
+				// constant regardless of zoom — matches what users expect
+				// from a manipulator handle.
+				const AABB camAABB = m_EditorCamera.GetViewportAABB();
+				const float worldPerScreenPx = camAABB.Scale().x / std::max(1.0f, static_cast<float>(m_EditorViewFBO.ViewportSize.GetWidth()));
+				const float handleHalf = 5.0f * worldPerScreenPx;
+				const Vec2 handleSize{ handleHalf * 2.0f, handleHalf * 2.0f };
+				const float rectRotDeg = Degrees(rect.Rotation);
+
+				const Vec2 midL{ (inner[0].x + inner[3].x) * 0.5f, (inner[0].y + inner[3].y) * 0.5f };
+				const Vec2 midR{ (inner[1].x + inner[2].x) * 0.5f, (inner[1].y + inner[2].y) * 0.5f };
+				const Vec2 midB{ (inner[0].x + inner[1].x) * 0.5f, (inner[0].y + inner[1].y) * 0.5f };
+				const Vec2 midT{ (inner[2].x + inner[3].x) * 0.5f, (inner[2].y + inner[3].y) * 0.5f };
+				Gizmo::DrawSquare(midL, handleSize, rectRotDeg);
+				Gizmo::DrawSquare(midR, handleSize, rectRotDeg);
+				Gizmo::DrawSquare(midB, handleSize, rectRotDeg);
+				Gizmo::DrawSquare(midT, handleSize, rectRotDeg);
+			}
 		}
 
 		// Package-registered viewport gizmos. Walk every registered component
@@ -493,6 +562,145 @@ namespace Axiom {
 						iconPos,
 						ImVec2(iconPos.x + iconSize, iconPos.y + iconSize),
 						ImVec2(0, 1), ImVec2(1, 0));
+				}
+
+				// ── Text margin draggable handles ─────────────────────
+				// Layered on top of the FBO image as InvisibleButtons.
+				// The visual squares are painted into the FBO by the
+				// margin-gizmo block in DrawEditorComponentGizmos; this
+				// loop only handles mouse picking + drag-to-margin
+				// updates, so the picking rect always lines up with what
+				// the user sees painted.
+				if (m_SelectedEntity != entt::null
+					&& renderScene->IsValid(m_SelectedEntity)
+					&& renderScene->HasComponent<TextRendererComponent>(m_SelectedEntity)
+					&& renderScene->HasComponent<RectTransform2DComponent>(m_SelectedEntity))
+				{
+					auto& text = renderScene->GetComponent<TextRendererComponent>(m_SelectedEntity);
+					auto& rect = renderScene->GetComponent<RectTransform2DComponent>(m_SelectedEntity);
+
+					const float worldScale = GuiRenderer::ComputeWorldUIPixelScale();
+					const Vec2 bl = rect.GetBottomLeft();
+					const Vec2 tr = rect.GetTopRight();
+					const Vec2 pivot = rect.ResolvedValid ? rect.ResolvedPivot
+						: Vec2{ (bl.x + tr.x) * 0.5f, (bl.y + tr.y) * 0.5f };
+					const float marginScale = worldScale * std::max(0.01f, std::abs(rect.Scale.x));
+
+					// Inner-rect midpoints in world space (matches the
+					// gizmo block in DrawEditorComponentGizmos so the
+					// invisible buttons sit exactly on the painted squares).
+					const float innerLx = bl.x * worldScale + text.Margin.x * marginScale;
+					const float innerRx = tr.x * worldScale - text.Margin.z * marginScale;
+					const float innerBy = bl.y * worldScale + text.Margin.w * marginScale;
+					const float innerTy = tr.y * worldScale - text.Margin.y * marginScale;
+					const float midLx = innerLx, midLy = (innerBy + innerTy) * 0.5f;
+					const float midRx = innerRx, midRy = (innerBy + innerTy) * 0.5f;
+					const float midBx = (innerLx + innerRx) * 0.5f, midBy = innerBy;
+					const float midTx = (innerLx + innerRx) * 0.5f, midTy = innerTy;
+
+					Vec2 handles[4] = {
+						Vec2{ midLx, midLy }, // 0 = Left
+						Vec2{ midRx, midRy }, // 1 = Right
+						Vec2{ midBx, midBy }, // 2 = Bottom
+						Vec2{ midTx, midTy }, // 3 = Top
+					};
+					if (rect.Rotation != 0.0f) {
+						const Vec2 worldPivot{ pivot.x * worldScale, pivot.y * worldScale };
+						for (int i = 0; i < 4; ++i) {
+							handles[i] = worldPivot + Rotated(handles[i] - worldPivot, rect.Rotation);
+						}
+					}
+
+					// World→screen for each handle (same projection used
+					// by the camera-icon overlay above).
+					auto worldToScreen = [&](const Vec2& w, ImVec2& outScreen) -> bool {
+						glm::vec4 wp(w.x, w.y, 0.0f, 1.0f);
+						glm::vec4 cp = vp * wp;
+						if (cp.w == 0.0f) return false;
+						const float ndcX = cp.x / cp.w;
+						const float ndcY = cp.y / cp.w;
+						outScreen.x = (ndcX * 0.5f + 0.5f) * viewportSize.x;
+						outScreen.y = (1.0f - (ndcY * 0.5f + 0.5f)) * viewportSize.y;
+						return true;
+					};
+
+					// World units per screen pixel — needed to convert the
+					// drag delta back into the rect's local pixel-domain
+					// margin units.
+					const AABB camAABB = m_EditorCamera.GetViewportAABB();
+					const float worldPerScreenPxX = camAABB.Scale().x / std::max(1.0f, viewportSize.x);
+					const float worldPerScreenPxY = camAABB.Scale().y / std::max(1.0f, viewportSize.y);
+
+					constexpr const char* kButtonIds[4] = {
+						"##TextMarginL", "##TextMarginR",
+						"##TextMarginB", "##TextMarginT",
+					};
+					constexpr float kHandleSizePx = 12.0f;
+					const float kHalf = kHandleSizePx * 0.5f;
+
+					// Per-handle InvisibleButtons each call SetCursorScreenPos
+					// then submit an InvisibleButton; ImGui's ItemSize clears
+					// IsSetPos at the end of each item, so the loop itself
+					// doesn't trip the "extending boundaries without an item
+					// afterwards" check.
+					//
+					// We deliberately do NOT capture/restore an outer
+					// cursor position around this loop. The capture site
+					// is right after the FBO image, where ImGui has
+					// already advanced cursor.y past CursorMaxPos.y for
+					// the next-line slot — restoring to that position
+					// at loop end with SetCursorScreenPos flips IsSetPos
+					// back to true, and ImGui::End()'s post-window check
+					// then asserts because cursor.y > max.y. Nothing in
+					// this function consumes the cursor after this block
+					// (just IsWindowHovered / IsWindowFocused / End), so
+					// leaving the cursor wherever the last InvisibleButton
+					// left it is harmless.
+
+					for (int i = 0; i < 4; ++i) {
+						ImVec2 screen;
+						if (!worldToScreen(handles[i], screen)) continue;
+
+						const ImVec2 btnTL(imageTopLeft.x + screen.x - kHalf,
+							imageTopLeft.y + screen.y - kHalf);
+						ImGui::SetCursorScreenPos(btnTL);
+						ImGui::InvisibleButton(kButtonIds[i], ImVec2(kHandleSizePx, kHandleSizePx));
+
+						if (ImGui::IsItemHovered() || ImGui::IsItemActive()) {
+							// Cursor hint matching the axis being dragged.
+							ImGui::SetMouseCursor(
+								(i < 2) ? ImGuiMouseCursor_ResizeEW
+										: ImGuiMouseCursor_ResizeNS);
+						}
+						if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 0.0f)) {
+							const ImVec2 mouseDelta = ImGui::GetIO().MouseDelta;
+							// Convert pixel delta into rect-local pixel-margin
+							// units. Up screen = -Y in world (we already flip
+							// Y for screen → world), and growing margins shrink
+							// the inner rect. Per-handle sign tables encode
+							// the direction each handle should move the
+							// corresponding margin axis.
+							const float worldDx = mouseDelta.x * worldPerScreenPxX;
+							const float worldDy = -mouseDelta.y * worldPerScreenPxY;
+							// World-to-rect-pixel: divide by marginScale.
+							const float pixDx = (marginScale > 0.0f) ? worldDx / marginScale : 0.0f;
+							const float pixDy = (marginScale > 0.0f) ? worldDy / marginScale : 0.0f;
+							switch (i) {
+							case 0: text.Margin.x += pixDx; break; // Left   → drag right grows left margin
+							case 1: text.Margin.z -= pixDx; break; // Right  → drag right SHRINKS right margin
+							case 2: text.Margin.w += pixDy; break; // Bottom → drag up grows bottom margin
+							case 3: text.Margin.y -= pixDy; break; // Top    → drag up SHRINKS top margin
+							}
+							// Clamp to non-negative; a negative margin would
+							// place the inner rect outside the outer rect.
+							if (text.Margin.x < 0.0f) text.Margin.x = 0.0f;
+							if (text.Margin.y < 0.0f) text.Margin.y = 0.0f;
+							if (text.Margin.z < 0.0f) text.Margin.z = 0.0f;
+							if (text.Margin.w < 0.0f) text.Margin.w = 0.0f;
+							if (renderScene) renderScene->MarkDirty();
+						}
+					}
+					// (No cursor restore — see comment above the loop.)
 				}
 			}
 		}
@@ -682,6 +890,43 @@ namespace Axiom {
 					renderFrame = true;
 				}
 
+				// Compute imageMin BEFORE rendering so we can publish UIRegion
+				// before the UI pass runs. ImGui::GetCursorScreenPos returns the
+				// position the upcoming InvisibleButton will use as its top-left
+				// (matches what we'd otherwise get from ItemRectMin after the
+				// button) — getting it ahead of time lets us set UIRegion in
+				// time for the engine UI systems inside RenderSceneIntoFBO.
+				const ImVec2 canvasMin = ImGui::GetCursorScreenPos();
+				const ImVec2 canvasMax(canvasMin.x + viewportSize.x, canvasMin.y + viewportSize.y);
+				const ImVec2 imageMin(
+					canvasMin.x + (viewportSize.x - renderSize.x) * 0.5f,
+					canvasMin.y + (viewportSize.y - renderSize.y) * 0.5f);
+				const ImVec2 imageMax(imageMin.x + renderSize.x, imageMin.y + renderSize.y);
+
+				// Publish the panel's pixel rect so engine UI systems
+				// (UILayoutSystem, UIEventSystem, GuiRenderer) resolve in
+				// panel-relative coordinates instead of full-OS-window
+				// coordinates. Without this, mouse hit-tests miss widgets
+				// because the rendered position (panel-centered) differs
+				// from the layout-resolved position (window-centered).
+				//
+				// Crucially this MUST happen before RenderSceneIntoFBO. The
+				// game camera's m_Viewport aliases Window::s_MainViewport
+				// (Camera2DComponent::Initialize), and savedViewport->SetSize
+				// above mutates that shared object to the FBO size. UI systems
+				// fall back to MainViewport when UIRegion is inactive, so
+				// without the region published first they'd compute uiScale
+				// against the temporarily-mutated MainViewport — different
+				// from the editor view's uiScale and visually inconsistent
+				// (rect resolves at one scale while the renderer projects with
+				// another). Publishing UIRegion first pins layout, ortho, and
+				// text rendering all to the same renderSize.
+				Window::SetUIRegion(
+					static_cast<int>(imageMin.x),
+					static_cast<int>(imageMin.y),
+					static_cast<int>(renderSize.x),
+					static_cast<int>(renderSize.y));
+
 				if (renderFrame) {
 					RenderSceneIntoFBO(m_GameViewFBO, scene, vp, viewAABB, true, true, gameCam->GetClearColor());
 					m_LastGameViewRenderTime = now;
@@ -694,27 +939,8 @@ namespace Axiom {
 				// is no longer needed and would be a redundant double-set.
 
 				ImGui::InvisibleButton("##GameViewCanvas", viewportSize);
-				const ImVec2 canvasMin = ImGui::GetItemRectMin();
-				const ImVec2 canvasMax = ImGui::GetItemRectMax();
 				ImDrawList* drawList = ImGui::GetWindowDrawList();
 				drawList->AddRectFilled(canvasMin, canvasMax, IM_COL32(0, 0, 0, 255));
-
-				const ImVec2 imageMin(
-					canvasMin.x + (viewportSize.x - renderSize.x) * 0.5f,
-					canvasMin.y + (viewportSize.y - renderSize.y) * 0.5f);
-				const ImVec2 imageMax(imageMin.x + renderSize.x, imageMin.y + renderSize.y);
-
-				// Publish the panel's pixel rect so engine UI systems
-				// (UILayoutSystem, UIEventSystem, GuiRenderer) resolve in
-				// panel-relative coordinates instead of full-OS-window
-				// coordinates. Without this, mouse hit-tests miss widgets
-				// because the rendered position (panel-centered) differs
-				// from the layout-resolved position (window-centered).
-				Window::SetUIRegion(
-					static_cast<int>(imageMin.x),
-					static_cast<int>(imageMin.y),
-					static_cast<int>(renderSize.x),
-					static_cast<int>(renderSize.y));
 
 				drawList->AddImage(
 					static_cast<ImTextureID>(static_cast<intptr_t>(m_GameViewFBO.ColorTextureId)),

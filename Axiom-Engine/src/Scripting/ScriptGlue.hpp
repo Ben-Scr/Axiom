@@ -131,8 +131,8 @@ namespace Axiom {
 		void        (*TextRenderer_SetHAlign)(uint64_t entityID, int alignment);
 		int         (*TextRenderer_GetWrapMode)(uint64_t entityID);
 		void        (*TextRenderer_SetWrapMode)(uint64_t entityID, int mode);
-		float       (*TextRenderer_GetWrapWidth)(uint64_t entityID);
-		void        (*TextRenderer_SetWrapWidth)(uint64_t entityID, float width);
+		// WrapWidth slots removed — wrap area is now derived from
+		// the host RectTransform2D's width minus Margin.
 		int         (*TextRenderer_GetSortingOrder)(uint64_t entityID);
 		void        (*TextRenderer_SetSortingOrder)(uint64_t entityID, int order);
 		int         (*TextRenderer_GetSortingLayer)(uint64_t entityID);
@@ -255,6 +255,10 @@ namespace Axiom {
 		int         (*Texture_LoadAsset)(uint64_t assetId);
 		int         (*Texture_GetWidth)(uint64_t assetId);
 		int         (*Texture_GetHeight)(uint64_t assetId);
+		// Resolve a built-in DefaultTexture enum value to its
+		// AssetRegistry GUID so `new Texture(assetId)` round-trips.
+		// Returns 0 for out-of-range or pre-init queries.
+		uint64_t    (*Texture_GetDefaultAssetUUID)(uint8_t which);
 		int         (*Audio_LoadAsset)(uint64_t assetId);
 		void        (*Audio_PlayOneShotAsset)(uint64_t assetId, float volume);
 		int         (*Font_LoadAsset)(uint64_t assetId);
@@ -626,6 +630,25 @@ namespace Axiom {
 		// called at the top of ScriptSystem::FixedUpdate.
 		void        (*PumpCoroutinesUpdate)(float deltaTime);
 		void        (*PumpCoroutinesFixedUpdate)();
+
+		// ── Inspector event bindings (appended for binary compat) ──
+		// Powers Unity-style "On Click ()" lists wired from the editor.
+		// GetInvokableMethodsBuffer returns a JSON string array of every
+		// invokable method declared on `className`'s user subclass — the
+		// inspector's method-name combo populates from this. Each entry
+		// is encoded as "<methodName>:<argKind>" where argKind is the
+		// numeric value of `InspectorEventArgKind` describing the
+		// method's first (and only) parameter type, or 0 for void.
+		// Methods with more than one parameter or unsupported types
+		// are filtered out at enumeration time.
+		// InvokeScriptMethodByName invokes the named method on the
+		// live instance addressed by `handle` and passes the typed
+		// `argValue` parsed against `argKind`; returns 1 on success,
+		// 0 when the method isn't on the class so the native side can
+		// log-once. argValue may be null when argKind == 0 (Void).
+		int         (*GetInvokableMethodsBuffer)(const char* className, char* outBuffer, int capacity);
+		int         (*InvokeScriptMethodByName)(int32_t handle, const char* methodName,
+			uint8_t argKind, const char* argValue);
 	};
 
 } // namespace Axiom

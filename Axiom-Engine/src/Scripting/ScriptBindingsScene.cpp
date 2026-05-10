@@ -79,8 +79,19 @@ namespace Axiom {
 	static void  Axiom_Application_SetTargetFrameRate(float fps) { Application::SetTargetFramerate(fps); }
 
 	static void Axiom_Application_Quit() {
-		// Only quit in build mode, not in the editor
-		if (!Application::GetIsPlaying() || Application::GetInstance() == nullptr) return;
+		Application* app = Application::GetInstance();
+		if (!app) return;
+		if (Application::IsEditor()) {
+			// In editor: route through the editor's stop-play path
+			// instead of closing the editor window. Without this hook,
+			// the call was a silent no-op and the user couldn't end a
+			// play session from script (had to click Stop manually);
+			// with it, scripted Application.Quit() inside the editor
+			// behaves like clicking Stop. The editor's pre-render
+			// drains the flag via ApplicationEditorAccess.
+			Application::RequestEditorStopPlay();
+			return;
+		}
 		Application::Quit();
 	}
 

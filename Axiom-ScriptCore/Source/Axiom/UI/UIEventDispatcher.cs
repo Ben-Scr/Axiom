@@ -53,6 +53,7 @@ internal static class UIEventDispatcher
         try
         {
             DispatchInteractables();
+            DispatchButtons();
             DispatchSliders();
             DispatchToggles();
             DispatchDropdowns();
@@ -147,12 +148,10 @@ internal static class UIEventDispatcher
             if (clicked)
             {
                 interactable.RaiseClicked();
-                // Sibling Button on the same entity — fan out to Button.OnClick.
-                if (InternalCalls.Entity_HasComponent(id, "Button"))
-                {
-                    Button? button = entity.GetComponent<Button>();
-                    button?.RaiseClick();
-                }
+                // Button click fan-out moved to DispatchButtons so a
+                // Button whose TargetGraphic owns the Interactable (rather
+                // than the Button entity itself) still receives OnClick.
+                // Same-entity buttons are covered by the same iteration.
             }
 
             if (mouseDown) interactable.RaiseMouseDown();
@@ -165,6 +164,39 @@ internal static class UIEventDispatcher
         foreach (ulong id in nowPressed) s_PrevPressed.Add(id);
         s_PrevFocused.Clear();
         foreach (ulong id in nowFocused) s_PrevFocused.Add(id);
+    }
+
+    private static void DispatchButtons()
+    {
+        // Buttons fan out their click event from whichever entity owns
+        // the Interactable: the button entity itself OR the configured
+        // TargetGraphic. The dispatcher looks up the target's
+        // IsClicked flag rather than tracking a button-side edge,
+        // because that flag is already a one-frame edge on the
+        // Interactable side.
+        int count = Query("Button");
+        for (int i = 0; i < count; i++)
+        {
+            ulong buttonId = s_QueryBuffer[i];
+            ulong interactableId = 0;
+            if (InternalCalls.Entity_HasComponent(buttonId, "Interactable"))
+            {
+                interactableId = buttonId;
+            }
+            else
+            {
+                ulong target = InternalCalls.Button_GetTargetGraphic(buttonId);
+                if (target != 0 && InternalCalls.Entity_HasComponent(target, "Interactable"))
+                {
+                    interactableId = target;
+                }
+            }
+            if (interactableId == 0) continue;
+            if (!InternalCalls.Interactable_GetIsClicked(interactableId)) continue;
+
+            Button? button = new Entity(buttonId).GetComponent<Button>();
+            button?.RaiseClick();
+        }
     }
 
     private static void DispatchSliders()

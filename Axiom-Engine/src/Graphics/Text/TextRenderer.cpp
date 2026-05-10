@@ -137,9 +137,28 @@ namespace Axiom {
         const float requested = pixelSize > 0.0f ? pixelSize : text.FontSize;
         const float bakeRequest = std::min(requested, k_MaxBakedPixelSize);
 
+        // Cache match uses the same quantize ladder FontManager keys on
+        // (1 / 2 / 4 / 8 / 16 px steps as size grows). Without this, a
+        // rect animating between scale 1.0 and 1.04 — or two text rows
+        // with FontSize 14 and 15 — would each see lround mismatch and
+        // force a fresh LoadFontByUUID call every frame, even though
+        // FontManager's quantize bucket is identical and the lookup is
+        // returning the SAME atlas. Bucket-equality skips the lookup.
+        auto quantizeBucket = [](float p) -> int {
+            int v = std::max(1, static_cast<int>(std::lround(p)));
+            auto snap = [](int value, int step) {
+                return ((value + step / 2) / step) * step;
+            };
+            if (v <= 16)  return v;
+            if (v <= 32)  return snap(v, 2);
+            if (v <= 64)  return snap(v, 4);
+            if (v <= 128) return snap(v, 8);
+            return snap(v, 16);
+        };
+
         if (FontManager::IsValid(text.ResolvedFont)) {
             if (Font* font = FontManager::GetFont(text.ResolvedFont)) {
-                if (std::lround(font->GetPixelSize()) == std::lround(bakeRequest)) {
+                if (quantizeBucket(font->GetPixelSize()) == quantizeBucket(bakeRequest)) {
                     return font;
                 }
             }
@@ -656,20 +675,24 @@ namespace Axiom {
             TextDrawCmd cmd;
             cmd.FontPtr = font;
             cmd.Text = std::string_view(text.Text);
-            cmd.X = tr.Position.x;
-            cmd.Y = tr.Position.y;
+            // World-space text has no host rect, so right / bottom margins
+            // would have nothing to inset against. Left / top still apply —
+            // they shift the text origin by the authored amount (in pixel
+            // units, scaled by drawScale to land in world units).
+            cmd.X = tr.Position.x + text.Margin.x * drawScale;
+            cmd.Y = tr.Position.y - text.Margin.y * drawScale;
             cmd.Scale = drawScale;
             cmd.LetterSpacing = text.LetterSpacing;
             cmd.Tint = text.Color;
             cmd.Align = text.HAlign;
             cmd.Wrap = text.WrapMode;
             // World-space text has no ambient rect, so wrapping is
-            // gated entirely on the explicit per-component WrapWidth.
-            // Express it in atlas-pixel units (same domain MeasureLineWidth
-            // uses) so EmitText doesn't have to know about scale.
-            cmd.WrapWidthPixels = text.WrapWidth > 0.0f
-                ? text.WrapWidth
-                : 0.0f;
+            // disabled here (no source for the wrap width). Use UI
+            // text on a RectTransform2D for wrapped layouts; world-
+            // space text honours explicit `\n` line breaks but won't
+            // auto-wrap. The historical explicit WrapWidth override
+            // was removed alongside the rest of the field.
+            cmd.WrapWidthPixels = 0.0f;
             cmd.SortingOrder = text.SortingOrder;
             cmd.SortingLayer = text.SortingLayer;
             m_PendingDrawCmds.push_back(cmd);

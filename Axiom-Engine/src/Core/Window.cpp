@@ -108,6 +108,21 @@ namespace Axiom {
 		}
 	}
 
+	void Window::CloseCallback(GLFWwindow* window) {
+		// Fires for the title-bar X click AND Alt+F4 (Windows posts
+		// the same WM_CLOSE for both). Forward to the engine's event
+		// system; the WindowCloseEvent handler in
+		// Application::DispatchEvent calls RequestQuit and resets
+		// glfwSetWindowShouldClose so the main loop continues for at
+		// least one more frame, giving layers a chance to intercept
+		// (the editor's save-before-quit dialog).
+		Window* win = reinterpret_cast<Window*>(glfwGetWindowUserPointer(window));
+		if (win && win->m_EventCallback) {
+			WindowCloseEvent e;
+			win->m_EventCallback(e);
+		}
+	}
+
 	void Window::Create(const WindowSpecification& props) {
 		AIM_ASSERT(s_IsInitialized, AxiomErrorCode::NotInitialized, "The Window isn't initialized");
 
@@ -148,6 +163,15 @@ namespace Axiom {
 
 		glfwSetDropCallback(m_GLFWwindow, SetDropCallback);
 		glfwSetWindowRefreshCallback(m_GLFWwindow, RefreshCallback);
+		// Required so layers can intercept the window-close attempt
+		// (Alt+F4 + title-bar X button both go through here on
+		// Windows). The handler in Application::DispatchEvent already
+		// calls RequestQuit + resets shouldClose so the main loop
+		// stays alive long enough for the editor's OnPreRender
+		// intercept to pop the save-before-quit dialog. Without the
+		// registration, GLFW's default WM_CLOSE handler just sets
+		// shouldClose=true and the loop exits with no warning.
+		glfwSetWindowCloseCallback(m_GLFWwindow, &Window::CloseCallback);
 
 		glfwSwapInterval(s_IsVsync ? 1 : 0);
 		SyncViewportFromFramebuffer();
@@ -159,9 +183,18 @@ namespace Axiom {
 			return;
 		}
 
-		if (m_Cursor) {
-			glfwDestroyCursor(m_Cursor);
-			m_Cursor = nullptr;
+		// m_Cursor aliases either m_DefaultCursor or m_UICursor (or is
+		// null when the OS default is in use). Free the underlying
+		// owners; clearing m_Cursor avoids a double-destroy of the
+		// alias.
+		m_Cursor = nullptr;
+		if (m_DefaultCursor) {
+			glfwDestroyCursor(m_DefaultCursor);
+			m_DefaultCursor = nullptr;
+		}
+		if (m_UICursor) {
+			glfwDestroyCursor(m_UICursor);
+			m_UICursor = nullptr;
 		}
 		glfwSetWindowUserPointer(m_GLFWwindow, nullptr);
 		m_EventCallback = {};
@@ -356,36 +389,73 @@ namespace Axiom {
 	void Window::SetCursorHidden(bool enabled) {
 		glfwSetInputMode(m_GLFWwindow, GLFW_CURSOR, enabled ? GLFW_CURSOR_HIDDEN : GLFW_CURSOR_NORMAL);
 	}
+	namespace {
+		// Build a GLFWcursor from a Texture2D. Returns nullptr on any
+		// failure with a warning logged. The caller owns the returned
+		// cursor and must free it via glfwDestroyCursor.
+		GLFWcursor* MakeCursorFromTexture(const Texture2D* tex2D) {
+			if (!tex2D) return nullptr;
+			std::unique_ptr<ImageData> imgData = tex2D->GetImageData();
+			if (!imgData || !imgData->Pixels) {
+				AIM_WARN_TAG("Window", "Cannot set cursor image from invalid texture data");
+				return nullptr;
+			}
+			GLFWimage img;
+			img.width = imgData->Width;
+			img.height = imgData->Height;
+			img.pixels = imgData->Pixels;
+			return glfwCreateCursor(&img, 0, 0);
+		}
+	}
+
 	void Window::SetCursorImage(const Texture2D* tex2D) {
-		if (!tex2D) {
-			AIM_WARN_TAG("Window", "Cannot set cursor image from null texture");
-			return;
+		// Stage as the new "default" cursor. If the cursor isn't currently
+		// over UI we apply it immediately; otherwise the swap waits for
+		// SetCursorOverUI(false). Passing nullptr clears the slot back
+		// to the OS default.
+		GLFWcursor* fresh = tex2D ? MakeCursorFromTexture(tex2D) : nullptr;
+		if (tex2D && !fresh) return;
+
+		const bool wasUsingDefault = (m_Cursor == m_DefaultCursor);
+		if (m_DefaultCursor) {
+			glfwDestroyCursor(m_DefaultCursor);
 		}
+		m_DefaultCursor = fresh;
 
-		std::unique_ptr<ImageData> imgData = tex2D->GetImageData();
-		if (!imgData || !imgData->Pixels) {
-			AIM_WARN_TAG("Window", "Cannot set cursor image from invalid texture data");
-			return;
+		if (wasUsingDefault) {
+			m_Cursor = m_DefaultCursor;
+			glfwSetCursor(m_GLFWwindow, m_DefaultCursor);
 		}
+	}
 
-		GLFWimage img;
-		img.width = imgData->Width;
-		img.height = imgData->Height;
-		img.pixels = imgData->Pixels;
+	void Window::SetUICursorImage(const Texture2D* tex2D) {
+		GLFWcursor* fresh = tex2D ? MakeCursorFromTexture(tex2D) : nullptr;
+		if (tex2D && !fresh) return;
 
-		int xhot = 0;
-		int yhot = 0;
+		const bool wasUsingUI = (m_Cursor == m_UICursor);
+		if (m_UICursor) {
+			glfwDestroyCursor(m_UICursor);
+		}
+		m_UICursor = fresh;
 
-		GLFWcursor* newCursor = glfwCreateCursor(&img, xhot, yhot);
-		if (!newCursor)
-			return;
+		if (wasUsingUI) {
+			m_Cursor = m_UICursor;
+			glfwSetCursor(m_GLFWwindow, m_UICursor);
+		}
+	}
 
-		glfwSetCursor(m_GLFWwindow, newCursor);
+	void Window::SetCursorOverUI(bool overUI) {
+		if (overUI == m_CursorOverUI) return;
+		m_CursorOverUI = overUI;
 
-		if (m_Cursor)
-			glfwDestroyCursor(m_Cursor);
-
-		m_Cursor = newCursor;
+		// Resolve which slot to apply. UI hovering only switches when the
+		// project supplied a UI cursor — otherwise we keep the default
+		// active so an unset UI cursor doesn't fall back to the OS arrow
+		// every time the user mouses over a button.
+		GLFWcursor* desired = overUI && m_UICursor ? m_UICursor : m_DefaultCursor;
+		if (desired == m_Cursor) return;
+		m_Cursor = desired;
+		glfwSetCursor(m_GLFWwindow, desired);
 	}
 
 	void Window::SetWindowIcon(const Texture2D* tex2D) {

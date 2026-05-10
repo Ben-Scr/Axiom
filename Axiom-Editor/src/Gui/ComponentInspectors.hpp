@@ -28,4 +28,25 @@ namespace Axiom {
 	// and a different layout than the standard "label : Vec2 drag" row.
 	void DrawRectTransform2DInspector(std::span<const Entity> entities);
 
+	// Hybrid: standard ButtonComponent properties via the auto-drawer, then
+	// the Unity-style "On Click ()" event list — entity-target picker +
+	// script-class combo + method-name combo + typed-argument editor per
+	// row, plus add/remove. The list fires through
+	// Axiom::InspectorEvents::Fire when UIEventSystem detects a rising
+	// edge of InteractableComponent::IsClicked.
+	void DrawButtonInspector(std::span<const Entity> entities);
+
+	// Same hybrid pattern as DrawButtonInspector for the value-driven
+	// widgets. Each appends its own InspectorEventList foldout below the
+	// auto-drawn properties; UIEventSystem fires each list on the
+	// matching trigger (slider/toggle/dropdown ValueChanged,
+	// inputField OnValueChanged + OnSubmitted) and forwards a
+	// dynamic-argument value of the corresponding type so methods like
+	// `void OnSliderChanged(float v)` receive the new slider value
+	// directly.
+	void DrawSliderInspector(std::span<const Entity> entities);
+	void DrawToggleInspector(std::span<const Entity> entities);
+	void DrawInputFieldInspector(std::span<const Entity> entities);
+	void DrawDropdownInspector(std::span<const Entity> entities);
+
 } // namespace Axiom

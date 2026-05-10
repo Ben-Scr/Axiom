@@ -21,9 +21,16 @@ namespace Axiom {
 		}
 
 		static Vec2 RotateGizmoPoint(const Vec2& v, float radians) {
+			// Standard CCW rotation matrix: [c,-s; s, c]. The previous
+			// formulation `(v.x*c + v.y*s, -v.x*s + v.y*c)` was the
+			// transpose / CW rotation, so the editor's selection box,
+			// camera frustum, and collider outlines all rotated in the
+			// OPPOSITE direction from the entity itself — most visible
+			// when dragging the rotation handle and watching the gizmo
+			// counter-rotate against the sprite.
 			const float c = Cos(radians);
 			const float s = Sin(radians);
-			return Vec2(v.x * c + v.y * s, -v.x * s + v.y * c);
+			return Vec2(v.x * c - v.y * s, v.x * s + v.y * c);
 		}
 	}
 

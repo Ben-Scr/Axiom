@@ -81,6 +81,14 @@ internal unsafe struct ManagedCallbacksStruct
     // and ScriptSystem::FixedUpdate for fixed-tick continuations.
     public delegate* unmanaged<float, void> PumpCoroutinesUpdate;
     public delegate* unmanaged<void> PumpCoroutinesFixedUpdate;
+
+    // ── Inspector event bindings (appended for binary compat) ──
+    // Order must match ScriptGlue.hpp's ManagedCallbacks struct exactly.
+    public delegate* unmanaged<byte*, byte*, int, int> GetInvokableMethodsBuffer;
+    // Typed-argument variant: argKind is the byte value of
+    // InspectorEventArgKind, argValue is the encoded string per the kind
+    // (or null when argKind == 0 / Void).
+    public delegate* unmanaged<int, byte*, byte, byte*, int> InvokeScriptMethodByName;
 }
 
 /// <summary>
@@ -161,6 +169,10 @@ internal static class ScriptHostBridge
             // ── Coroutine pump (appended for binary compat) ──
             managedCallbacks->PumpCoroutinesUpdate = &ScriptInstanceManager.PumpCoroutinesUpdate;
             managedCallbacks->PumpCoroutinesFixedUpdate = &ScriptInstanceManager.PumpCoroutinesFixedUpdate;
+
+            // ── Inspector event bindings (appended for binary compat) ──
+            managedCallbacks->GetInvokableMethodsBuffer = &ScriptInstanceManager.GetInvokableMethodsBuffer;
+            managedCallbacks->InvokeScriptMethodByName = &ScriptInstanceManager.InvokeScriptMethodByName;
 
             ScriptInstanceManager.SetCoreAssembly(typeof(ScriptHostBridge).Assembly);
 

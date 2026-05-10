@@ -432,7 +432,15 @@ namespace Axiom {
 				if (flipY) row = (rows - 1) - row;
 				const float x = originX + static_cast<float>(col) * (cellW + spacingX);
 				const float y = originY + static_cast<float>(row) * (cellH + spacingY);
-				auto& cr = registry.get<RectTransform2DComponent>(children[i]);
+				// Reverse swaps which child lands in which cell: cell index
+				// i now receives child[n-1-i] instead of child[i]. Cell
+				// positions are still derived from StartCorner/StartAxis
+				// (so the same on-screen geometry), only the children
+				// list is mirrored. Done at consumption time so a layout
+				// with Reverse=true on a 1-child grid behaves identically
+				// to Reverse=false; only multi-child grids visibly flip.
+				const int childIdx = layout.Reverse ? (n - 1 - i) : i;
+				auto& cr = registry.get<RectTransform2DComponent>(children[childIdx]);
 				PinChildToTopLeft(cr, x, y, cellW, cellH, s);
 			}
 		}

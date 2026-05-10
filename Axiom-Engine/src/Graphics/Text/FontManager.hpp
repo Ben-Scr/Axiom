@@ -73,6 +73,18 @@ namespace Axiom {
         inline static std::vector<Slot> s_Slots;
         inline static std::unordered_map<LookupKey, uint16_t, LookupKeyHash> s_Lookup;
         inline static FontHandle s_DefaultFont;
+
+        // Per-UUID cache of the raw .ttf bytes. Loading the same font at a
+        // new pixel size used to re-read the file from disk (a measurable
+        // hit when a UI scene drives dozens of texts at slightly different
+        // baked sizes — every quantize bucket triggered a fresh disk read +
+        // stbtt init). Now we read once and reuse for every subsequent
+        // bake of the same font.
+        struct TtfBufferEntry {
+            std::vector<uint8_t> Bytes;
+            std::string Path;
+        };
+        inline static std::unordered_map<uint64_t, TtfBufferEntry> s_TtfBufferCache;
     };
 
 }

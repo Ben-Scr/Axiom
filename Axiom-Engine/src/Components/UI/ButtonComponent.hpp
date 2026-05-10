@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Collections/Color.hpp"
+#include "Components/UI/InspectorEventBinding.hpp"
 #include "Components/UI/UITransitionMode.hpp"
 #include "Core/UUID.hpp"
 #include "Scene/EntityHandle.hpp"
@@ -62,6 +63,14 @@ namespace Axiom {
 		UUID PressedSprite { 0 };
 		UUID DisabledSprite{ 0 };
 		UUID FocusedSprite { 0 };
+
+		// Inspector-bound event list: parameterless C# methods invoked on the
+		// rising edge of InteractableComponent::IsClicked. Mirrors Unity's
+		// "On Click ()" foldout. UIEventSystem fires these via
+		// InspectorEvents::Fire, which resolves each row's
+		// (TargetEntityUUID, ScriptClassName, MethodName) against the active
+		// scene at dispatch time.
+		InspectorEventList OnClick;
 	};
 
 }

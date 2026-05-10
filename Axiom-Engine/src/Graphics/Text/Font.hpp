@@ -50,6 +50,16 @@ namespace Axiom {
         // failure; on failure no GL state is left allocated.
         bool LoadFromFile(const std::string& path, float pixelSize);
 
+        // Same as LoadFromFile but seeded from an in-memory TTF buffer.
+        // Used by FontManager when the same .ttf is requested at multiple
+        // pixel sizes — skips the disk read that LoadFromFile would do
+        // for every size (a non-trivial cost for large fonts and the
+        // common UI pattern of dozens of texts at slightly different
+        // baked sizes). The Font copies the bytes it needs into its own
+        // m_TtfBuffer so the caller's buffer can free at any time.
+        bool LoadFromBuffer(const std::string& sourcePath,
+            const std::vector<uint8_t>& ttfBuffer, float pixelSize);
+
         bool IsLoaded() const { return m_AtlasTexture != 0; }
 
         // Returns nullptr if the codepoint isn't in the baked range.
@@ -74,6 +84,10 @@ namespace Axiom {
 
     private:
         void Cleanup();
+        // Shared body of LoadFromFile/LoadFromBuffer once m_TtfBuffer +
+        // m_Filepath are populated: stbtt init, range bake, atlas upload.
+        // Returns false on any failure with all GL state cleaned up.
+        bool BakeAtlas(float pixelSize);
 
         std::vector<uint8_t> m_TtfBuffer;
         std::unordered_map<uint32_t, GlyphMetrics> m_Glyphs;

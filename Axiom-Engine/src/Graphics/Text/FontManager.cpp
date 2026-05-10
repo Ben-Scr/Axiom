@@ -2,6 +2,7 @@
 #include "Graphics/Text/FontManager.hpp"
 
 #include "Assets/AssetRegistry.hpp"
+#include "Serialization/File.hpp"
 #include "Serialization/Path.hpp"
 
 #include <cmath>
@@ -81,6 +82,7 @@ namespace Axiom {
             return;
         }
         UnloadAll();
+        s_TtfBufferCache.clear();
         s_DefaultFont = FontHandle::Invalid();
         s_IsInitialized = false;
     }
@@ -103,8 +105,28 @@ namespace Axiom {
         }
 
         auto font = std::make_unique<Font>();
-        if (!font->LoadFromFile(pathStr, pixelSize)) {
-            return FontHandle::Invalid();
+
+        // First-bake-of-this-font reads the file and seeds the per-UUID
+        // buffer cache; subsequent bakes (same font, different size) skip
+        // the disk read entirely.
+        if (uuid != 0) {
+            auto cacheIt = s_TtfBufferCache.find(uuid);
+            if (cacheIt == s_TtfBufferCache.end()) {
+                std::vector<uint8_t> bytes = File::ReadAllBytes(pathStr);
+                if (bytes.empty()) {
+                    return FontHandle::Invalid();
+                }
+                cacheIt = s_TtfBufferCache.emplace(uuid,
+                    TtfBufferEntry{ std::move(bytes), pathStr }).first;
+            }
+            if (!font->LoadFromBuffer(pathStr, cacheIt->second.Bytes, pixelSize)) {
+                return FontHandle::Invalid();
+            }
+        }
+        else {
+            if (!font->LoadFromFile(pathStr, pixelSize)) {
+                return FontHandle::Invalid();
+            }
         }
 
         return CreateSlot(std::move(font), uuid, pixelSize);
@@ -133,18 +155,31 @@ namespace Axiom {
             return existing;
         }
 
-        std::string path = AssetRegistry::ResolvePath(assetId);
-        if (path.empty()) {
-            AssetRegistry::MarkDirty();
-            AssetRegistry::Sync();
-            path = AssetRegistry::ResolvePath(assetId);
-        }
-        if (path.empty()) {
-            return FontHandle::Invalid();
+        // Re-bake from the cached TTF bytes when we already loaded this
+        // font for a different pixel size. The first time, read from disk
+        // and stash the bytes; every subsequent (different-size) request
+        // reuses them and skips the disk + std::filesystem::canonical hop.
+        auto cacheIt = s_TtfBufferCache.find(assetId);
+        if (cacheIt == s_TtfBufferCache.end()) {
+            std::string path = AssetRegistry::ResolvePath(assetId);
+            if (path.empty()) {
+                AssetRegistry::MarkDirty();
+                AssetRegistry::Sync();
+                path = AssetRegistry::ResolvePath(assetId);
+            }
+            if (path.empty()) {
+                return FontHandle::Invalid();
+            }
+            std::vector<uint8_t> bytes = File::ReadAllBytes(path);
+            if (bytes.empty()) {
+                return FontHandle::Invalid();
+            }
+            cacheIt = s_TtfBufferCache.emplace(assetId,
+                TtfBufferEntry{ std::move(bytes), std::move(path) }).first;
         }
 
         auto font = std::make_unique<Font>();
-        if (!font->LoadFromFile(path, pixelSize)) {
+        if (!font->LoadFromBuffer(cacheIt->second.Path, cacheIt->second.Bytes, pixelSize)) {
             return FontHandle::Invalid();
         }
 

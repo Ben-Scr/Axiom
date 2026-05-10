@@ -82,6 +82,17 @@ namespace Axiom {
 			Bind<Camera2DComponent>(DrawCamera2DInspector),
 			Bind<FastBody2DComponent>(DrawFastBody2DInspector),
 
+			// Hybrid: properties + Unity-style event lists. Each value-
+			// driven UI widget owns one or more InspectorEventLists below
+			// its standard fields (Slider/Toggle/Dropdown have a single
+			// "On Value Changed (T)" list; InputField has both
+			// OnValueChanged and OnSubmitted).
+			Bind<ButtonComponent>(DrawButtonInspector),
+			Bind<SliderComponent>(DrawSliderInspector),
+			Bind<ToggleComponent>(DrawToggleInspector),
+			Bind<InputFieldComponent>(DrawInputFieldInspector),
+			Bind<DropdownComponent>(DrawDropdownInspector),
+
 			// Custom-only: variant types + per-shape branches don't map cleanly.
 			Bind<ParticleSystem2DComponent>(DrawParticleSystem2DInspector),
 

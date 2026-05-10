@@ -85,49 +85,48 @@ public class Transform2D : Component
         }
     }
 
-    public Transform2D? Child => GetChildAt(0);
+    public Entity? Child => GetChildAt(0);
 
-    public Transform2D? Parent
+    public Entity? Parent
     {
         get
         {
             ulong parentId = InternalCalls.Transform2D_GetParent(RequireComponent<Transform2D>());
-            return parentId != 0 ? new Entity(parentId).GetComponent<Transform2D>() : null;
+            return parentId != 0 ? new Entity(parentId) : null;
         }
     }
 
     public int ChildCount => InternalCalls.Transform2D_GetChildCount(RequireComponent<Transform2D>());
 
-    public Transform2D[] GetChilds()
+    public Entity[] GetChildren()
     {
         ulong entityId = RequireComponent<Transform2D>();
         int count = InternalCalls.Transform2D_GetChildCount(entityId);
-        if (count <= 0) return Array.Empty<Transform2D>();
+        if (count <= 0) return Array.Empty<Entity>();
 
         ulong[] ids = new ulong[count];
         int actual = InternalCalls.Transform2D_GetChildren(entityId, ids);
 
-        var result = new List<Transform2D>(actual);
+        var result = new List<Entity>(actual);
         for (int i = 0; i < actual; i++)
         {
             if (ids[i] == 0) continue;
-            Transform2D? child = new Entity(ids[i]).GetComponent<Transform2D>();
-            if (child != null) result.Add(child);
+            result.Add(new Entity(ids[i]));
         }
         return result.ToArray();
     }
 
-    public Transform2D? GetChildAt(int index)
+    public Entity? GetChildAt(int index)
     {
         if (index < 0) return null;
         ulong childId = InternalCalls.Transform2D_GetChildAt(RequireComponent<Transform2D>(), index);
-        return childId != 0 ? new Entity(childId).GetComponent<Transform2D>() : null;
+        return childId != 0 ? new Entity(childId) : null;
     }
 
-    public bool SetParent(Transform2D? newParent)
+    public bool SetParent(Entity? newParent)
     {
         ulong entityId = RequireComponent<Transform2D>();
-        ulong parentId = newParent?.RequireComponent<Transform2D>() ?? 0;
+        ulong parentId = newParent != null && newParent != Entity.Invalid ? newParent.ID : 0;
         return InternalCalls.Transform2D_SetParent(entityId, parentId);
     }
 
@@ -249,11 +248,10 @@ public class TextRenderer : Component
         set => InternalCalls.TextRenderer_SetWrapMode(RequireComponent<TextRenderer>(), (int)value);
     }
 
-    public float WrapWidth
-    {
-        get => InternalCalls.TextRenderer_GetWrapWidth(RequireComponent<TextRenderer>());
-        set => InternalCalls.TextRenderer_SetWrapWidth(RequireComponent<TextRenderer>(), value);
-    }
+    // WrapWidth was removed — wrap area now comes from the host
+    // RectTransform2D's width minus the (Left + Right) Margin
+    // components on this TextRenderer. Adjust Margin instead to inset
+    // wrapped lines.
 
     public int SortingOrder
     {

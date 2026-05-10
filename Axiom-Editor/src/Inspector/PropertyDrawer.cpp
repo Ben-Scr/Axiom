@@ -210,9 +210,33 @@ namespace Axiom::PropertyDrawer {
 				: valueMax;
 			ImGui::PushID(d.Name.c_str());
 			ImGuiUtils::BeginInspectorFieldRow(d.DisplayName.c_str());
-			const float speed = d.Metadata.DragSpeed > 0 ? d.Metadata.DragSpeed : 1.0f;
-			const bool changed = ImGui::DragInt("##Value", &tmp, speed, clampMin, clampMax,
-				uniform ? "%d" : "-");
+			bool changed = false;
+			if (d.Metadata.HasClamp) {
+				// Two-widget combo: a slider drives the value visually
+				// across the [Min, Max] range, while a narrow input on the
+				// right lets the user type an exact integer that the same
+				// frame will clamp back into bounds. The native DragInt
+				// path doesn't visualise the range, which is what the
+				// [ClampValue] attribute is asking for. SliderInt is gated
+				// to HasClamp because it requires both bounds — drag-only
+				// mode stays for unclamped fields.
+				const float fullW = ImGui::CalcItemWidth();
+				const float style = ImGui::GetStyle().ItemInnerSpacing.x;
+				const float inputW = std::min(80.0f, fullW * 0.30f);
+				const float sliderW = std::max(40.0f, fullW - inputW - style);
+				ImGui::SetNextItemWidth(sliderW);
+				changed |= ImGui::SliderInt("##Slider", &tmp, clampMin, clampMax,
+					uniform ? "%d" : "-");
+				ImGui::SameLine(0.0f, style);
+				ImGui::SetNextItemWidth(inputW);
+				changed |= ImGui::InputInt("##Value", &tmp, 0, 0,
+					ImGuiInputTextFlags_CharsDecimal);
+			}
+			else {
+				const float speed = d.Metadata.DragSpeed > 0 ? d.Metadata.DragSpeed : 1.0f;
+				changed = ImGui::DragInt("##Value", &tmp, speed, clampMin, clampMax,
+					uniform ? "%d" : "-");
+			}
 			ImGui::PopID();
 			if (changed) {
 				if (tmp < clampMin) tmp = clampMin;
@@ -291,9 +315,33 @@ namespace Axiom::PropertyDrawer {
 			const float clampMax = d.Metadata.HasClamp ? static_cast<float>(d.Metadata.ClampMax) : 0.0f;
 			ImGui::PushID(d.Name.c_str());
 			ImGuiUtils::BeginInspectorFieldRow(d.DisplayName.c_str());
-			const float speed = d.Metadata.DragSpeed > 0 ? d.Metadata.DragSpeed : 0.1f;
-			const bool changed = ImGui::DragFloat("##Value", &tmp, speed, clampMin, clampMax,
-				uniform ? "%.3f" : "-");
+			bool changed = false;
+			if (d.Metadata.HasClamp && clampMax > clampMin) {
+				// Slider + numeric input combo for [ClampValue]-attributed
+				// fields. The slider gives a visual sense of where the
+				// value sits inside [Min, Max]; the input lets the user
+				// type a precise value that's clamped back on commit. The
+				// non-clamp DragFloat path stays as the default for
+				// unbounded float fields so existing behaviour is preserved.
+				const float fullW = ImGui::CalcItemWidth();
+				const float style = ImGui::GetStyle().ItemInnerSpacing.x;
+				const float inputW = std::min(80.0f, fullW * 0.30f);
+				const float sliderW = std::max(40.0f, fullW - inputW - style);
+				ImGui::SetNextItemWidth(sliderW);
+				changed |= ImGui::SliderFloat("##Slider", &tmp, clampMin, clampMax,
+					uniform ? "%.3f" : "-");
+				ImGui::SameLine(0.0f, style);
+				ImGui::SetNextItemWidth(inputW);
+				changed |= ImGui::InputFloat("##Value", &tmp, 0.0f, 0.0f, "%.3f",
+					ImGuiInputTextFlags_CharsDecimal);
+				if (tmp < clampMin) tmp = clampMin;
+				if (tmp > clampMax) tmp = clampMax;
+			}
+			else {
+				const float speed = d.Metadata.DragSpeed > 0 ? d.Metadata.DragSpeed : 0.1f;
+				changed = ImGui::DragFloat("##Value", &tmp, speed, clampMin, clampMax,
+					uniform ? "%.3f" : "-");
+			}
 			ImGui::PopID();
 			if (changed) {
 				PropertyValue out;
@@ -745,6 +793,34 @@ namespace Axiom::PropertyDrawer {
 								outValue.UIntValue = std::strtoull(refStr.substr(0, sep).c_str(), nullptr, 10);
 								outValue.StringValue = typeName;
 								return outValue.UIntValue != 0;
+							}
+						}
+					}
+					// Accept a hierarchy-entity drag too: when the dropped
+					// entity owns a component matching `componentTypeName`,
+					// auto-derive the ComponentRef from it. Saves the user
+					// from explicitly dragging the inspector "Component"
+					// header (which produces COMPONENT_REF) — a plain
+					// hierarchy drag now works and silently ignores entities
+					// that lack the required component.
+					if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("HIERARCHY_ENTITY")) {
+						if (payload->DataSize == sizeof(HierarchyDragData)) {
+							const auto* data = static_cast<const HierarchyDragData*>(payload->Data);
+							const EntityHandle handle = static_cast<EntityHandle>(data->EntityHandle);
+							const Scene* scene = SceneManager::Get().GetActiveScene();
+							if (scene && scene->IsValid(handle)) {
+								const ComponentInfo* info = nullptr;
+								SceneManager::Get().GetComponentRegistry().ForEachComponentInfo(
+									[&](const std::type_index&, const ComponentInfo& candidate) {
+										if (info) return;
+										if (candidate.displayName == componentTypeName) info = &candidate;
+									});
+								Entity dropped = scene->GetEntity(handle);
+								if (info && info->has && info->has(dropped)) {
+									outValue.UIntValue = scene->GetEntityPersistentID(handle);
+									outValue.StringValue = componentTypeName;
+									return outValue.UIntValue != 0;
+								}
 							}
 						}
 					}

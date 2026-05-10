@@ -1,8 +1,10 @@
 using System;
 using System.Collections.Generic;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Loader;
+using Axiom;
 using Axiom.Coroutines;
 
 namespace Axiom.Interop;
@@ -139,6 +141,53 @@ internal static class ScriptInstanceManager
         public bool IsGlobalSystem;
         public MethodInfo? StartMethod;
         public MethodInfo? UpdateMethod;
+
+        // Lazily populated by EnsureInvokableMethods. Holds every public
+        // instance method on this class that an inspector "On Click ()" /
+        // "On Value Changed ()" list can target — returns void, takes
+        // 0 or 1 supported parameter (bool / int / float / double /
+        // string / Vector2 / Color / Entity), declared on the user's
+        // subclass (not on EntityScript / Component / object). Keyed by
+        // name so InvokeScriptMethodByName is an O(1) lookup. The
+        // parallel `InvokableMethodArgKinds` list tags each enumerated
+        // method with the wire-level arg-kind byte (matches the C++
+        // `InspectorEventArgKind` enum) so the inspector can render the
+        // appropriate value editor.
+        public Dictionary<string, MethodInfo>? InvokableMethodsByName;
+        public List<string>? InvokableMethodNames;
+        public List<byte>? InvokableMethodArgKinds;
+    }
+
+    // Mirrors InspectorEventArgKind in C++. Stays as constants rather than
+    // a real enum to keep the wire byte values explicit — adding kinds
+    // here without renumbering would silently break already-saved scenes.
+    private const byte k_ArgKindVoid      = 0;
+    private const byte k_ArgKindBool      = 1;
+    private const byte k_ArgKindInt       = 2;
+    private const byte k_ArgKindFloat     = 3;
+    private const byte k_ArgKindDouble    = 4;
+    private const byte k_ArgKindString    = 5;
+    private const byte k_ArgKindVec2      = 6;
+    private const byte k_ArgKindColor     = 7;
+    private const byte k_ArgKindEntityRef = 8;
+
+    private static byte ResolveArgKind(Type t)
+    {
+        if (t == typeof(bool))    return k_ArgKindBool;
+        if (t == typeof(int)
+         || t == typeof(short)
+         || t == typeof(byte)
+         || t == typeof(sbyte)
+         || t == typeof(uint)
+         || t == typeof(long)
+         || t == typeof(ushort)) return k_ArgKindInt;
+        if (t == typeof(float))   return k_ArgKindFloat;
+        if (t == typeof(double))  return k_ArgKindDouble;
+        if (t == typeof(string))  return k_ArgKindString;
+        if (t == typeof(Vector2)) return k_ArgKindVec2;
+        if (t == typeof(Color))   return k_ArgKindColor;
+        if (t == typeof(Entity))  return k_ArgKindEntityRef;
+        return 0xFF; // unsupported — caller filters out
     }
 
     internal static void SetCoreAssembly(Assembly assembly)
@@ -773,24 +822,23 @@ internal static class ScriptInstanceManager
 
             var instance = data.Instance;
             var type = instance.GetType();
-            var fields = type.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
 
             var sb = new System.Text.StringBuilder();
             sb.Append('[');
             bool first = true;
 
-            foreach (var field in fields)
+            foreach (var member in CollectEditorMembers(type))
             {
-                if (field.DeclaringType == typeof(EntityScript)) continue;
-                if (!IsFieldEditorVisible(field)) continue;
+                if (member.DeclaringType == typeof(EntityScript)) continue;
+                if (!IsMemberEditorVisible(member)) continue;
 
-                string fieldType = MapFieldType(field.FieldType);
+                string fieldType = MapFieldType(member.ValueType);
                 if (fieldType == "unsupported") continue;
 
-                object? val = field.GetValue(instance);
+                object? val = TryGetMemberValue(member, instance);
                 if (!first) sb.Append(',');
                 first = false;
-                AppendFieldJson(sb, field, val);
+                AppendMemberJson(sb, member, val);
             }
 
             sb.Append(']');
@@ -848,53 +896,91 @@ internal static class ScriptInstanceManager
         }
     }
 
-    // Shared field-write path for both EntityScript and GameSystem instances:
-    // resolves the field by name, parses the string-encoded value, and writes
-    // it back through reflection. Skips silently when the field doesn't exist
-    // or the value can't be parsed — matches the existing SetScriptField
-    // tolerance, since the editor may post stale field names after a script
-    // edit.
+    // Shared write path for both EntityScript and GameSystem instances:
+    // resolves the named member by reflection, parses the string-encoded
+    // value, and pushes it through. Looks up FIELDS first (faster path
+    // and the only thing the editor used to write to), then falls back
+    // to PROPERTIES so users can expose validated/computed setters in
+    // the inspector. Silently skips on miss / parse failure — matches
+    // the existing SetScriptField tolerance, since the editor may post
+    // stale member names after a script edit.
+    //
+    // Property setters can throw (validation, ArgumentOutOfRange, etc.).
+    // We catch and log so a bad inspector edit doesn't take down the
+    // whole script-host call.
     private static unsafe void ApplyFieldEdit(object instance, byte* fieldNamePtr, byte* valuePtr)
     {
         string fieldName = Marshal.PtrToStringUTF8((IntPtr)fieldNamePtr) ?? "";
         string valueStr = Marshal.PtrToStringUTF8((IntPtr)valuePtr) ?? "";
 
-        var field = instance.GetType().GetField(fieldName,
-            BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-        if (field == null) return;
+        const BindingFlags k_Flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+        Type type = instance.GetType();
 
-        object? parsed = ParseFieldValue(field.FieldType, valueStr);
-        if (parsed != null)
-            field.SetValue(instance, parsed);
+        var field = type.GetField(fieldName, k_Flags);
+        if (field != null)
+        {
+            object? parsed = ParseFieldValue(field.FieldType, valueStr);
+            if (parsed != null) field.SetValue(instance, parsed);
+            return;
+        }
+
+        var property = type.GetProperty(fieldName, k_Flags);
+        if (property == null) return;
+
+        // Refuse the write if no public setter — the inspector should
+        // already have flagged the row read-only via AppendMemberJson,
+        // but defend against a stale write anyway. (CanWrite alone
+        // returns true for `init`-only and private setters.)
+        if (!property.CanWrite || property.SetMethod == null || !property.SetMethod.IsPublic)
+            return;
+
+        object? parsedProp = ParseFieldValue(property.PropertyType, valueStr);
+        if (parsedProp == null) return;
+
+        try
+        {
+            property.SetValue(instance, parsedProp);
+        }
+        catch (TargetInvocationException tie) when (tie.InnerException != null)
+        {
+            // Surface the underlying validation error from the user's
+            // setter (e.g. ArgumentOutOfRangeException) without the
+            // reflection wrapper.
+            Log.Error($"Inspector write to property '{type.Name}.{fieldName}' threw: {tie.InnerException.Message}");
+        }
+        catch (Exception ex)
+        {
+            Log.Error($"Inspector write to property '{type.Name}.{fieldName}' failed: {ex.Message}");
+        }
     }
 
-    // Walks every instance field, drops fields declared on the supplied base
-    // type (so EntityScript / GameSystem boilerplate stays out of the
-    // inspector), and emits the same JSON shape the editor already parses for
-    // [ShowInEditor]. Centralising it keeps GetScriptFields and
-    // GetGameSystemFields in lock-step so the C++ inspector sees identical
-    // payloads regardless of which kind of script the field lives on.
+    // Walks every instance field + property, drops members declared on
+    // the supplied base type (so EntityScript / GameSystem boilerplate
+    // stays out of the inspector), and emits the same JSON shape the
+    // editor already parses for [ShowInEditor]. Centralising it keeps
+    // GetScriptFields and GetGameSystemFields in lock-step so the C++
+    // inspector sees identical payloads regardless of which kind of
+    // script the member lives on.
     private static unsafe byte* SerializeInstanceFields(object instance, Type ignoreBaseType)
     {
         var type = instance.GetType();
-        var fields = type.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
 
         var sb = new System.Text.StringBuilder();
         sb.Append('[');
         bool first = true;
 
-        foreach (var field in fields)
+        foreach (var member in CollectEditorMembers(type))
         {
-            if (field.DeclaringType == ignoreBaseType) continue;
-            if (!IsFieldEditorVisible(field)) continue;
+            if (member.DeclaringType == ignoreBaseType) continue;
+            if (!IsMemberEditorVisible(member)) continue;
 
-            string fieldType = MapFieldType(field.FieldType);
+            string fieldType = MapFieldType(member.ValueType);
             if (fieldType == "unsupported") continue;
 
-            object? val = field.GetValue(instance);
+            object? val = TryGetMemberValue(member, instance);
             if (!first) sb.Append(',');
             first = false;
-            AppendFieldJson(sb, field, val);
+            AppendMemberJson(sb, member, val);
         }
 
         sb.Append(']');
@@ -1232,6 +1318,105 @@ internal static class ScriptInstanceManager
         return field.GetCustomAttribute<ShowInEditorAttribute>() != null;
     }
 
+    // Unified adapter over `FieldInfo` / `PropertyInfo` so the inspector
+    // pipeline can reflect on both without duplicating every traversal.
+    // Properties surface with the same visibility rules as fields:
+    //   public property (public getter)                    -> visible
+    //   private getter / protected with [ShowInEditor]     -> visible
+    //   indexer / write-only / [EditorIgnore]              -> hidden
+    // Read-only properties (no public setter) display but the editor
+    // marks the row read-only so the user can't drive an edit through a
+    // setter the script doesn't expose.
+    private readonly struct EditorMember
+    {
+        public readonly MemberInfo Member;
+        public readonly Type ValueType;
+        public readonly bool IsProperty;
+        public readonly bool CanWrite;
+        public readonly bool IsPublic;
+        public readonly string Name;
+        public readonly Type? DeclaringType;
+
+        private EditorMember(MemberInfo m, Type t, bool isProperty, bool canWrite, bool isPublic, string name, Type? declType)
+        {
+            Member = m;
+            ValueType = t;
+            IsProperty = isProperty;
+            CanWrite = canWrite;
+            IsPublic = isPublic;
+            Name = name;
+            DeclaringType = declType;
+        }
+
+        public static EditorMember FromField(FieldInfo f) => new(
+            f, f.FieldType, isProperty: false,
+            canWrite: !f.IsInitOnly && !f.IsLiteral,
+            isPublic: f.IsPublic,
+            name: f.Name, declType: f.DeclaringType);
+
+        public static EditorMember FromProperty(PropertyInfo p)
+        {
+            // "Writable from the inspector" means there's a setter the
+            // editor can legally invoke. We require a non-null setter
+            // (excludes get-only properties) AND a public setter
+            // (excludes init-only and private setters which would throw
+            // a MethodAccessException when SetValue dispatches).
+            bool canWrite = p.CanWrite
+                && p.SetMethod != null
+                && p.SetMethod.IsPublic;
+            // "Public" for visibility purposes is whether the GETTER is
+            // public — a property without a public reader can't be
+            // displayed regardless of [ShowInEditor].
+            bool isPublic = p.GetMethod != null && p.GetMethod.IsPublic;
+            return new EditorMember(p, p.PropertyType, isProperty: true,
+                canWrite, isPublic, p.Name, p.DeclaringType);
+        }
+
+        public T? GetCustomAttribute<T>() where T : Attribute => Member.GetCustomAttribute<T>();
+
+        public object? GetValue(object instance) =>
+            IsProperty ? ((PropertyInfo)Member).GetValue(instance)
+                       : ((FieldInfo)Member).GetValue(instance);
+
+        public void SetValue(object instance, object? value)
+        {
+            if (IsProperty) ((PropertyInfo)Member).SetValue(instance, value);
+            else ((FieldInfo)Member).SetValue(instance, value);
+        }
+    }
+
+    // Walks every instance field + property on `type`, filters them
+    // through the same visibility rules `IsFieldEditorVisible` applies
+    // to fields, and skips compiler-generated backing storage so an
+    // auto-property `public T Foo { get; set; }` shows up exactly once
+    // (as `Foo`) rather than twice (as `<Foo>k__BackingField` and `Foo`).
+    private static IEnumerable<EditorMember> CollectEditorMembers(Type type)
+    {
+        const BindingFlags k_Flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+        foreach (var field in type.GetFields(k_Flags))
+        {
+            // Auto-property backing fields (`<Prop>k__BackingField`) are
+            // tagged with [CompilerGenerated] — surface only the property
+            // wrapper so the user sees the name they wrote.
+            if (field.IsDefined(typeof(CompilerGeneratedAttribute), false)) continue;
+            yield return EditorMember.FromField(field);
+        }
+        foreach (var property in type.GetProperties(k_Flags))
+        {
+            if (property.GetIndexParameters().Length > 0) continue;  // indexers (`this[int]`)
+            if (property.GetMethod == null) continue;                 // write-only — nothing to display
+            yield return EditorMember.FromProperty(property);
+        }
+    }
+
+    private static bool IsMemberEditorVisible(in EditorMember member)
+    {
+        if (member.GetCustomAttribute<EditorIgnoreAttribute>() != null) return false;
+        if (member.GetCustomAttribute<HideFromEditorAttribute>() != null) return false;
+        if (member.IsPublic) return true;
+        return member.GetCustomAttribute<ShowInEditorAttribute>() != null;
+    }
+
     // Build a single field's JSON object for the editor metadata payload.
     // Centralised here so GetScriptFields and GetClassFieldDefs emit the same
     // shape — the C++ inspector parses the result into PropertyDescriptor.
@@ -1239,24 +1424,29 @@ internal static class ScriptInstanceManager
     // Enum / FlagEnum fields gain `enumIsFlags` and `enumOptions` arrays so
     // the editor can render the correct combo / multi-checkbox UI without a
     // second reflection round-trip.
-    private static void AppendFieldJson(System.Text.StringBuilder sb, FieldInfo field, object? value)
+    //
+    // The same path serves both fields and properties; for properties
+    // without a public setter the row is force-marked read-only so the
+    // editor can't post a write back through `SetScriptField`.
+    private static void AppendMemberJson(System.Text.StringBuilder sb, in EditorMember member, object? value)
     {
         var ic = System.Globalization.CultureInfo.InvariantCulture;
-        // showAttr is optional now: public fields are visible by default
+        // showAttr is optional now: public members are visible by default
         // and only need ShowInEditor when overriding the display name.
-        var showAttr = field.GetCustomAttribute<ShowInEditorAttribute>();
+        var showAttr = member.GetCustomAttribute<ShowInEditorAttribute>();
 
-        string fieldType = MapFieldType(field.FieldType);
-        string valueStr = FormatFieldValue(field.FieldType, value);
+        string fieldType = MapFieldType(member.ValueType);
+        string valueStr = FormatFieldValue(member.ValueType, value);
         string displayName = (showAttr != null && !string.IsNullOrEmpty(showAttr.DisplayName))
             ? showAttr.DisplayName
-            : field.Name;
+            : member.Name;
         bool readOnly = (showAttr?.ReadOnly ?? false)
-            || field.GetCustomAttribute<EditorReadOnlyAttribute>() != null;
+            || member.GetCustomAttribute<EditorReadOnlyAttribute>() != null
+            || !member.CanWrite;
 
         float clampMin = 0, clampMax = 0;
         bool hasClamp = false;
-        var clampAttr = field.GetCustomAttribute<ClampValueAttribute>();
+        var clampAttr = member.GetCustomAttribute<ClampValueAttribute>();
         if (clampAttr != null)
         {
             clampMin = clampAttr.Min;
@@ -1265,12 +1455,12 @@ internal static class ScriptInstanceManager
         }
 
         string tooltip = "";
-        var tooltipAttr = field.GetCustomAttribute<ToolTipAttribute>();
+        var tooltipAttr = member.GetCustomAttribute<ToolTipAttribute>();
         if (tooltipAttr != null) tooltip = tooltipAttr.Text;
 
         string headerContent = "";
         int headerSize = 0;
-        var headerAttr = field.GetCustomAttribute<HeaderAttribute>();
+        var headerAttr = member.GetCustomAttribute<HeaderAttribute>();
         if (headerAttr != null)
         {
             headerContent = headerAttr.Content;
@@ -1279,7 +1469,7 @@ internal static class ScriptInstanceManager
 
         float spaceHeight = 0.0f;
         bool hasSpace = false;
-        var spaceAttr = field.GetCustomAttribute<SpaceAttribute>();
+        var spaceAttr = member.GetCustomAttribute<SpaceAttribute>();
         if (spaceAttr != null)
         {
             spaceHeight = spaceAttr.Height;
@@ -1295,7 +1485,7 @@ internal static class ScriptInstanceManager
         string enabledIfValue = "";
         bool hasEnabledIf = false;
         bool enabledIfAny = false;  // true == "enable when any truthy value" (no expected value supplied)
-        var enabledIfAttr = field.GetCustomAttribute<EnabledIfAttribute>();
+        var enabledIfAttr = member.GetCustomAttribute<EnabledIfAttribute>();
         if (enabledIfAttr != null)
         {
             enabledIfField = enabledIfAttr.FieldName;
@@ -1313,7 +1503,7 @@ internal static class ScriptInstanceManager
             }
         }
 
-        sb.Append("{\"name\":\"").Append(EscapeJson(field.Name))
+        sb.Append("{\"name\":\"").Append(EscapeJson(member.Name))
           .Append("\",\"displayName\":\"").Append(EscapeJson(displayName))
           .Append("\",\"type\":\"").Append(fieldType)
           .Append("\",\"value\":\"").Append(EscapeJson(valueStr))
@@ -1331,15 +1521,15 @@ internal static class ScriptInstanceManager
           .Append("\",\"enabledIfValue\":\"").Append(EscapeJson(enabledIfValue))
           .Append("\",\"enabledIfAny\":").Append(enabledIfAny ? "true" : "false");
 
-        if (field.FieldType.IsEnum)
+        if (member.ValueType.IsEnum)
         {
-            bool isFlags = field.FieldType.GetCustomAttribute<FlagsAttribute>() != null;
+            bool isFlags = member.ValueType.GetCustomAttribute<FlagsAttribute>() != null;
             sb.Append(",\"enumIsFlags\":").Append(isFlags ? "true" : "false");
             sb.Append(",\"enumOptions\":[");
             bool firstOpt = true;
-            foreach (var name in Enum.GetNames(field.FieldType))
+            foreach (var name in Enum.GetNames(member.ValueType))
             {
-                object enumValue = Enum.Parse(field.FieldType, name);
+                object enumValue = Enum.Parse(member.ValueType, name);
                 long underlying = Convert.ToInt64(enumValue, ic);
                 if (!firstOpt) sb.Append(',');
                 firstOpt = false;
@@ -1351,6 +1541,21 @@ internal static class ScriptInstanceManager
         }
 
         sb.Append("}");
+    }
+
+    // Read a member's value defensively. Property getters can throw
+    // arbitrary exceptions (e.g. validation that depends on another
+    // field that the inspector hasn't pushed yet). Swallow those so a
+    // single throwing getter doesn't blank the entire inspector — the
+    // row falls back to `default` so the UI shows something coherent.
+    private static object? TryGetMemberValue(in EditorMember member, object instance)
+    {
+        try { return member.GetValue(instance); }
+        catch (Exception ex)
+        {
+            Log.Warn($"Reading {(member.IsProperty ? "property" : "field")} '{instance.GetType().Name}.{member.Name}' threw: {ex.Message}");
+            return null;
+        }
     }
 
     private static void ReleaseFieldJsonBuffer()
@@ -1407,27 +1612,25 @@ internal static class ScriptInstanceManager
             try { tempInstance = Activator.CreateInstance(classInfo.Type)!; }
             catch { return NullTerminated("[]"); }
 
-            var fields = classInfo.Type.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-
             var sb = new System.Text.StringBuilder();
             sb.Append('[');
             bool first = true;
 
-            foreach (var field in fields)
+            foreach (var member in CollectEditorMembers(classInfo.Type))
             {
-                if (field.DeclaringType == typeof(EntityScript)) continue;
-                if (field.DeclaringType == typeof(Component)) continue;
-                if (field.DeclaringType == typeof(GameSystem)) continue;
-                if (field.DeclaringType == typeof(GlobalSystem)) continue;
-                if (!IsFieldEditorVisible(field)) continue;
+                if (member.DeclaringType == typeof(EntityScript)) continue;
+                if (member.DeclaringType == typeof(Component)) continue;
+                if (member.DeclaringType == typeof(GameSystem)) continue;
+                if (member.DeclaringType == typeof(GlobalSystem)) continue;
+                if (!IsMemberEditorVisible(member)) continue;
 
-                string fieldType = MapFieldType(field.FieldType);
+                string fieldType = MapFieldType(member.ValueType);
                 if (fieldType == "unsupported") continue;
 
-                object? val = field.GetValue(tempInstance);
+                object? val = TryGetMemberValue(member, tempInstance);
                 if (!first) sb.Append(',');
                 first = false;
-                AppendFieldJson(sb, field, val);
+                AppendMemberJson(sb, member, val);
             }
 
             sb.Append(']');
@@ -1438,6 +1641,315 @@ internal static class ScriptInstanceManager
             Log.Error($"GetClassFieldDefs failed: {ex.Message}");
             return NullTerminated("[]");
         }
+    }
+
+    // ── Inspector event bindings ────────────────────────────────
+    // Backs the native InspectorEventList (Button.OnClick, etc.). The C++
+    // side stores (entityUUID, className, methodName) per row and calls
+    // InvokeScriptMethodByName when the trigger fires. We reflect every
+    // parameterless `void` method declared on the user's subclass and cache
+    // the MethodInfo in ScriptClassInfo. Cache lifetime rides on
+    // s_ClassCache, which LoadUserAssembly clears on hot reload.
+
+    private static readonly Type[] s_InvokableExcludedDeclaringTypes =
+    {
+        typeof(object),
+        typeof(EntityScript),
+        typeof(Component),
+        typeof(GameSystem),
+        typeof(GlobalSystem),
+    };
+
+    private static void EnsureInvokableMethods(ScriptClassInfo info)
+    {
+        if (info.InvokableMethodsByName != null) return;
+
+        var byName = new Dictionary<string, MethodInfo>(StringComparer.Ordinal);
+        var nameKinds = new List<(string Name, byte Kind)>();
+
+        var methods = info.Type.GetMethods(BindingFlags.Public | BindingFlags.Instance);
+        foreach (var method in methods)
+        {
+            if (method.ReturnType != typeof(void)) continue;
+            if (method.IsGenericMethod) continue;
+            if (method.IsSpecialName) continue;  // property accessors, op_*, etc.
+
+            var parameters = method.GetParameters();
+            if (parameters.Length > 1) continue;
+
+            byte argKind;
+            if (parameters.Length == 0)
+            {
+                argKind = k_ArgKindVoid;
+            }
+            else
+            {
+                if (parameters[0].IsOut || parameters[0].ParameterType.IsByRef) continue;
+                argKind = ResolveArgKind(parameters[0].ParameterType);
+                if (argKind == 0xFF) continue; // unsupported argument type
+            }
+
+            // Skip lifecycle methods and anything inherited from the framework
+            // bases. Users want to wire up their own gameplay methods, not
+            // OnUpdate / ToString.
+            bool excluded = false;
+            for (int i = 0; i < s_InvokableExcludedDeclaringTypes.Length; ++i)
+            {
+                if (method.DeclaringType == s_InvokableExcludedDeclaringTypes[i])
+                {
+                    excluded = true;
+                    break;
+                }
+            }
+            if (excluded) continue;
+
+            // Overloads: pick the first one we see for a given name. The
+            // dispatcher resolves by name only, so two methods with the
+            // same name and different parameter types would otherwise
+            // race for the slot. Picking deterministically (first hit)
+            // mirrors Unity's "name uniqueness wins" — if a class wants
+            // both signatures, rename one.
+            if (byName.TryAdd(method.Name, method))
+            {
+                nameKinds.Add((method.Name, argKind));
+            }
+        }
+
+        nameKinds.Sort((a, b) => string.CompareOrdinal(a.Name, b.Name));
+
+        var names = new List<string>(nameKinds.Count);
+        var kinds = new List<byte>(nameKinds.Count);
+        foreach (var nk in nameKinds)
+        {
+            names.Add(nk.Name);
+            kinds.Add(nk.Kind);
+        }
+
+        info.InvokableMethodsByName = byName;
+        info.InvokableMethodNames = names;
+        info.InvokableMethodArgKinds = kinds;
+    }
+
+    [UnmanagedCallersOnly]
+    public static unsafe int GetInvokableMethodsBuffer(byte* classNamePtr, byte* outBuffer, int capacity)
+    {
+        try
+        {
+            string className = PtrToString(classNamePtr);
+            var classInfo = GetOrCacheClass(className);
+            if (classInfo == null) return WriteUtf8("[]", outBuffer, capacity);
+
+            EnsureInvokableMethods(classInfo);
+
+            // Wire format: array of "<methodName>:<argKind>" strings. The
+            // C++ inspector splits on ':' to get the bare name (for the
+            // dropdown) and the argKind byte (for the value editor).
+            // Void methods land as "<name>:0" — same colon separator
+            // for every kind keeps the parser simple.
+            var sb = new System.Text.StringBuilder();
+            sb.Append('[');
+            bool first = true;
+            for (int i = 0; i < classInfo.InvokableMethodNames!.Count; ++i)
+            {
+                string name = classInfo.InvokableMethodNames[i];
+                byte kind = classInfo.InvokableMethodArgKinds![i];
+                if (!first) sb.Append(',');
+                first = false;
+                sb.Append('"')
+                  .Append(EscapeJson(name))
+                  .Append(':')
+                  .Append(kind)
+                  .Append('"');
+            }
+            sb.Append(']');
+            return WriteUtf8(sb.ToString(), outBuffer, capacity);
+        }
+        catch (Exception ex)
+        {
+            Log.Error($"GetInvokableMethodsBuffer failed: {ex.Message}");
+            return WriteUtf8("[]", outBuffer, capacity);
+        }
+    }
+
+    // Parse an "x,y" / "r,g,b,a" / etc. comma-separated float string into a
+    // fixed-size span. Returns false on any parse failure or a count that
+    // doesn't match `expected`. Caller decides what to do on failure
+    // (typically: log and skip the invoke).
+    private static bool TryParseFloatList(string s, int expected, Span<float> outValues)
+    {
+        if (string.IsNullOrEmpty(s) || expected <= 0 || outValues.Length < expected) return false;
+        int filled = 0;
+        int start = 0;
+        for (int i = 0; i <= s.Length; ++i)
+        {
+            if (i == s.Length || s[i] == ',')
+            {
+                if (filled >= expected) return false;
+                var slice = s.AsSpan(start, i - start).Trim();
+                if (slice.IsEmpty) return false;
+                if (!float.TryParse(slice,
+                        System.Globalization.NumberStyles.Float,
+                        System.Globalization.CultureInfo.InvariantCulture,
+                        out outValues[filled])) return false;
+                ++filled;
+                start = i + 1;
+            }
+        }
+        return filled == expected;
+    }
+
+    private static unsafe object?[]? BuildInvokeArguments(MethodInfo method, byte argKind, byte* argValuePtr)
+    {
+        var parameters = method.GetParameters();
+        if (parameters.Length == 0)
+        {
+            // Method takes no arg — the editor's `argKind != 0` is just
+            // stale data from when the user picked a different overload.
+            // Drop the arg silently rather than failing the dispatch.
+            return null;
+        }
+        if (parameters.Length != 1) return null;
+
+        // No value provided — fall through to default(T) so a binding
+        // saved before the user filled in a value still fires the method
+        // (rather than throwing on a null Span<byte>).
+        string raw = argValuePtr == null ? string.Empty : PtrToString(argValuePtr);
+        var ic = System.Globalization.CultureInfo.InvariantCulture;
+
+        switch (argKind)
+        {
+            case k_ArgKindBool:
+                return new object?[] { raw == "1" || string.Equals(raw, "true", StringComparison.OrdinalIgnoreCase) };
+            case k_ArgKindInt:
+            {
+                long v = 0;
+                long.TryParse(raw, System.Globalization.NumberStyles.Integer, ic, out v);
+                Type pt = parameters[0].ParameterType;
+                if (pt == typeof(int))    return new object?[] { (int)v };
+                if (pt == typeof(short))  return new object?[] { (short)v };
+                if (pt == typeof(byte))   return new object?[] { (byte)v };
+                if (pt == typeof(sbyte))  return new object?[] { (sbyte)v };
+                if (pt == typeof(uint))   return new object?[] { (uint)v };
+                if (pt == typeof(long))   return new object?[] { v };
+                if (pt == typeof(ushort)) return new object?[] { (ushort)v };
+                return new object?[] { (int)v };
+            }
+            case k_ArgKindFloat:
+            {
+                float f = 0f;
+                float.TryParse(raw, System.Globalization.NumberStyles.Float, ic, out f);
+                return new object?[] { f };
+            }
+            case k_ArgKindDouble:
+            {
+                double d = 0.0;
+                double.TryParse(raw, System.Globalization.NumberStyles.Float, ic, out d);
+                return new object?[] { d };
+            }
+            case k_ArgKindString:
+                return new object?[] { raw };
+            case k_ArgKindVec2:
+            {
+                Span<float> v = stackalloc float[2];
+                v[0] = 0f; v[1] = 0f;
+                TryParseFloatList(raw, 2, v);
+                return new object?[] { new Vector2(v[0], v[1]) };
+            }
+            case k_ArgKindColor:
+            {
+                Span<float> v = stackalloc float[4];
+                v[0] = 1f; v[1] = 1f; v[2] = 1f; v[3] = 1f;
+                TryParseFloatList(raw, 4, v);
+                return new object?[] { new Color(v[0], v[1], v[2], v[3]) };
+            }
+            case k_ArgKindEntityRef:
+            {
+                ulong uuid = 0;
+                ulong.TryParse(raw, System.Globalization.NumberStyles.Integer, ic, out uuid);
+                // The C# Entity wrapper accepts the persistent UUID as
+                // its `ID` field directly — every `InternalCalls.Entity_*`
+                // call routes through the native resolver, so a UUID-keyed
+                // wrapper looks up correctly even when the underlying
+                // entt handle was reallocated. Empty / unparseable
+                // payloads collapse to Entity.Invalid (id=0).
+                return new object?[] { uuid == 0 ? Entity.Invalid : new Entity(uuid) };
+            }
+            default:
+                return null;
+        }
+    }
+
+    [UnmanagedCallersOnly]
+    public static unsafe int InvokeScriptMethodByName(int handle, byte* methodNamePtr,
+        byte argKind, byte* argValuePtr)
+    {
+        if (!s_Instances.TryGetValue(handle, out var data)) return 0;
+
+        EntityScript instance = data.Instance;
+        string methodName = PtrToString(methodNamePtr);
+
+        var info = GetOrCacheClass(instance.GetType().Name);
+        if (info == null) return 0;
+
+        EnsureInvokableMethods(info);
+
+        if (!info.InvokableMethodsByName!.TryGetValue(methodName, out var method))
+        {
+            return 0;
+        }
+
+        object?[]? args = null;
+        if (argKind != k_ArgKindVoid)
+        {
+            args = BuildInvokeArguments(method, argKind, argValuePtr);
+            if (args == null && method.GetParameters().Length > 0)
+            {
+                // Method needs an arg but the binding's encoded value was
+                // unparseable for its declared kind — log once and skip
+                // rather than crash inside method.Invoke with a TypeMismatch.
+                Log.Warn($"Inspector binding {info.Type.Name}.{methodName}: argument value could not be parsed for kind {argKind}");
+                return 1; // method located; just couldn't dispatch this fire
+            }
+        }
+
+        try
+        {
+            method.Invoke(instance, args);
+            return 1;
+        }
+        catch (TargetInvocationException ex)
+        {
+            Log.Error($"Exception in {info.Type.Name}.{methodName}(): {ex.InnerException}");
+            return 1;  // method exists; the user's body threw — don't log "missing".
+        }
+        catch (Exception ex)
+        {
+            Log.Error($"Exception invoking {info.Type.Name}.{methodName}(): {ex}");
+            return 1;
+        }
+    }
+
+    // Standalone two-call buffer writer for the new event-binding helpers.
+    // We don't reuse NullTerminated() here because it's a singleton pinned
+    // buffer — concurrent reflection calls from the same frame (drawer
+    // sampling several classes) would clobber each other's output. The
+    // event-binding callers always pass their own destination buffer.
+    private static unsafe int WriteUtf8(string s, byte* outBuffer, int capacity)
+    {
+        int byteCount = System.Text.Encoding.UTF8.GetByteCount(s);
+        if (outBuffer == null || capacity <= 0) return byteCount + 1;
+        if (capacity < byteCount + 1)
+        {
+            // Caller's buffer too small — write null terminator and return
+            // the required capacity so they can resize and retry.
+            outBuffer[0] = 0;
+            return byteCount + 1;
+        }
+
+        var span = new Span<byte>(outBuffer, capacity);
+        int written = System.Text.Encoding.UTF8.GetBytes(s, span);
+        span[written] = 0;
+        return written + 1;
     }
 
     // ── Class cache ─────────────────────────────────────────────

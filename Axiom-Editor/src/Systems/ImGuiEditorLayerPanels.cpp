@@ -6,6 +6,8 @@
 #include "Assets/AssetRegistry.hpp"
 #include "Core/Application.hpp"
 #include "Core/Window.hpp"
+#include "Graphics/ImageData.hpp"
+#include "Graphics/Texture2D.hpp"
 #include "Graphics/TextureManager.hpp"
 #include "Gui/EditorIcons.hpp"
 #include "Gui/ImGuiUtils.hpp"
@@ -27,11 +29,83 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <filesystem>
+#include <fstream>
+#include <span>
 #include <unordered_set>
+
+#ifdef AIM_PLATFORM_WINDOWS
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 namespace Axiom {
 	namespace {
+		// Hook the just-submitted ImGui item (e.g. a Browse... button) as a
+		// drop target accepting an Asset Browser file payload. The callback
+		// runs once on a successful drop with the dropped item's absolute
+		// path. `extWhitelist` filters by extension (lower-cased, dot-
+		// included, e.g. {".png", ".jpg"}); pass an empty span to accept any
+		// file. Returns true when a valid drop was applied. Used by every
+		// Browse... button in the Project Settings panel so the user can
+		// drag-drop assets onto the field as an alternative to the picker.
+		bool BrowseAcceptImageDrop(std::span<const std::string_view> extWhitelist,
+			const std::function<void(const std::string&)>& onDrop)
+		{
+			if (!ImGui::BeginDragDropTarget()) return false;
+			bool applied = false;
+			if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ASSET_BROWSER_ITEM")) {
+				if (payload->Data && payload->DataSize > 0) {
+					std::string dropped(static_cast<const char*>(payload->Data),
+						static_cast<std::size_t>(payload->DataSize));
+					if (!dropped.empty() && dropped.back() == '\0') dropped.pop_back();
+					if (!dropped.empty()) {
+						bool extOk = extWhitelist.empty();
+						if (!extOk) {
+							std::string ext = std::filesystem::path(dropped).extension().string();
+							std::transform(ext.begin(), ext.end(), ext.begin(),
+								[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+							for (std::string_view allowed : extWhitelist) {
+								if (ext == allowed) { extOk = true; break; }
+							}
+						}
+						if (extOk) {
+							onDrop(dropped);
+							applied = true;
+						}
+					}
+				}
+			}
+			ImGui::EndDragDropTarget();
+			return applied;
+		}
+
+		// Convert a dropped (or picked) absolute asset path to the
+		// project-relative form the project file persists. Mirrors the
+		// post-picker logic each settings slot already runs: prefer
+		// `Assets/foo.png` when the file lives under the project's
+		// Assets dir; otherwise fall back to the bare filename so the
+		// stored path stays portable across project relocations.
+		std::string ToProjectRelativeAssetPath(const std::filesystem::path& absPath,
+			const std::string& assetsDirectory)
+		{
+			std::filesystem::path assetsDir(assetsDirectory);
+			if (absPath.string().find(assetsDir.string()) == 0) {
+				return std::filesystem::relative(absPath, assetsDir.parent_path()).string();
+			}
+			return absPath.filename().string();
+		}
+
+		// Shared image-extension whitelist for every texture-typed
+		// Browse... drop site (App Icon, Splash Image, Cursors). Matches
+		// the AssetKind::Texture filter the picker uses.
+		constexpr std::string_view k_ImageExts[] = {
+			".png", ".jpg", ".jpeg", ".bmp"
+		};
+
 		bool NeedsCopy(const std::filesystem::path& src, const std::filesystem::path& dest) {
 			if (!std::filesystem::exists(dest)) return true;
 			try {
@@ -134,6 +208,424 @@ namespace Axiom {
 			return "Axiom-Runtime";
 #endif
 		}
+
+#ifdef AIM_PLATFORM_WINDOWS
+		// Build a single-image .ico blob containing a 32-bit BMP DIB from a
+		// PNG/JPEG/etc. that the engine's Texture2D class can decode. We
+		// reuse Texture2D so we don't have to pull stb_image into the editor
+		// (the engine DLL doesn't dllexport stb's symbols). The texture
+		// round-trips through GL — it's a one-shot per build, so the cost
+		// is irrelevant.
+		//
+		// Layout produced (matches what Win32's RT_ICON / RT_GROUP_ICON
+		// loaders expect):
+		//   [IconDir (6 bytes)]
+		//   [IcoEntry (16 bytes)]
+		//   [BITMAPINFOHEADER (40 bytes)] biHeight = 2*H (XOR + AND mask)
+		//   [BGRA pixels, bottom-up] W * H * 4 bytes
+		//   [AND mask, 1bpp, 4-byte aligned rows] all zero (alpha-channel cutout)
+		std::string BuildIcoBytesFromImage(const std::filesystem::path& imagePath,
+			std::vector<std::uint8_t>& outIcoBytes)
+		{
+#pragma pack(push, 1)
+			struct IconDirHdr {
+				std::uint16_t Reserved;
+				std::uint16_t Type;
+				std::uint16_t Count;
+			};
+			struct IcoEntryHdr {
+				std::uint8_t Width;
+				std::uint8_t Height;
+				std::uint8_t ColorCount;
+				std::uint8_t Reserved;
+				std::uint16_t Planes;
+				std::uint16_t BitCount;
+				std::uint32_t BytesInRes;
+				std::uint32_t ImageOffset;
+			};
+			struct BitmapInfoHdr {
+				std::uint32_t biSize;
+				std::int32_t  biWidth;
+				std::int32_t  biHeight;
+				std::uint16_t biPlanes;
+				std::uint16_t biBitCount;
+				std::uint32_t biCompression;
+				std::uint32_t biSizeImage;
+				std::int32_t  biXPelsPerMeter;
+				std::int32_t  biYPelsPerMeter;
+				std::uint32_t biClrUsed;
+				std::uint32_t biClrImportant;
+			};
+#pragma pack(pop)
+
+			// flipVertical=false so we read pixels in the PNG's natural
+			// top-down order; we'll flip + BGRA-swizzle on the way into the
+			// DIB. generateMipmaps=false because we only need level 0.
+			Texture2D tex(imagePath.string().c_str(), Filter::Point,
+				Wrap::Clamp, Wrap::Clamp,
+				/*generateMipmaps*/ false,
+				/*srgb*/ false,
+				/*flipVertical*/ false);
+			if (!tex.IsValid()) {
+				return "failed to decode image";
+			}
+
+			std::unique_ptr<ImageData> img = tex.GetImageData();
+			if (!img) {
+				return "failed to read decoded pixels";
+			}
+
+			const int width = img->Width;
+			const int height = img->Height;
+			if (width <= 0 || height <= 0) {
+				return "image has zero size";
+			}
+			// Win32 ICO entries store width/height in 8-bit fields with 0
+			// meaning "256 or larger". We refuse > 256 — Explorer scales the
+			// largest entry it finds anyway, and accidentally writing a 257
+			// would silently truncate to 1 in the on-disk entry.
+			if (width > 256 || height > 256) {
+				return "image exceeds 256x256 (use a smaller icon source)";
+			}
+
+			const std::uint32_t pixelBytes =
+				static_cast<std::uint32_t>(width) *
+				static_cast<std::uint32_t>(height) * 4u;
+			// AND mask: 1 bit per pixel, each row padded to a 4-byte boundary.
+			const std::uint32_t maskRowBytes =
+				((static_cast<std::uint32_t>(width) + 31u) / 32u) * 4u;
+			const std::uint32_t maskBytes = maskRowBytes * static_cast<std::uint32_t>(height);
+			const std::uint32_t dibBytes = sizeof(BitmapInfoHdr) + pixelBytes + maskBytes;
+
+			outIcoBytes.assign(sizeof(IconDirHdr) + sizeof(IcoEntryHdr) + dibBytes, 0);
+
+			IconDirHdr dir{};
+			dir.Reserved = 0;
+			dir.Type = 1;
+			dir.Count = 1;
+			std::memcpy(outIcoBytes.data(), &dir, sizeof(dir));
+
+			IcoEntryHdr entry{};
+			entry.Width = static_cast<std::uint8_t>(width == 256 ? 0 : width);
+			entry.Height = static_cast<std::uint8_t>(height == 256 ? 0 : height);
+			entry.ColorCount = 0;
+			entry.Reserved = 0;
+			entry.Planes = 1;
+			entry.BitCount = 32;
+			entry.BytesInRes = dibBytes;
+			entry.ImageOffset = sizeof(IconDirHdr) + sizeof(IcoEntryHdr);
+			std::memcpy(outIcoBytes.data() + sizeof(IconDirHdr), &entry, sizeof(entry));
+
+			BitmapInfoHdr bih{};
+			bih.biSize = sizeof(BitmapInfoHdr);
+			bih.biWidth = width;
+			// 2*H is the ICO convention: top half is the XOR (color) bitmap,
+			// bottom half is the AND mask. biHeight stays positive — the DIB
+			// is bottom-up.
+			bih.biHeight = height * 2;
+			bih.biPlanes = 1;
+			bih.biBitCount = 32;
+			bih.biCompression = 0; // BI_RGB
+			bih.biSizeImage = pixelBytes + maskBytes;
+			std::uint8_t* dibStart = outIcoBytes.data() + entry.ImageOffset;
+			std::memcpy(dibStart, &bih, sizeof(bih));
+
+			// Swizzle RGBA top-down -> BGRA bottom-up. ImageData's pixels are
+			// laid out row by row with row 0 at the top; the DIB needs row 0
+			// at the bottom.
+			const std::uint8_t* srcPixels = img->Pixels;
+			std::uint8_t* dstPixels = dibStart + sizeof(BitmapInfoHdr);
+			for (int y = 0; y < height; ++y) {
+				const std::uint8_t* srcRow = srcPixels + (height - 1 - y) * width * 4;
+				std::uint8_t* dstRow = dstPixels + y * width * 4;
+				for (int x = 0; x < width; ++x) {
+					dstRow[x * 4 + 0] = srcRow[x * 4 + 2]; // B
+					dstRow[x * 4 + 1] = srcRow[x * 4 + 1]; // G
+					dstRow[x * 4 + 2] = srcRow[x * 4 + 0]; // R
+					dstRow[x * 4 + 3] = srcRow[x * 4 + 3]; // A
+				}
+			}
+			// AND mask region is already zero-initialised (assign() above).
+			// All-zero AND mask means "use the alpha channel for transparency",
+			// which is what we want for 32-bit icons.
+
+			return std::string{};
+		}
+
+		// Read an existing .ico file straight into a byte vector. Used when
+		// the user supplied a real .ico (no decode/re-encode needed).
+		std::string ReadIcoFileBytes(const std::filesystem::path& icoPath,
+			std::vector<std::uint8_t>& outIcoBytes)
+		{
+			std::ifstream in(icoPath, std::ios::binary);
+			if (!in) return "open .ico failed";
+			outIcoBytes.assign((std::istreambuf_iterator<char>(in)),
+				std::istreambuf_iterator<char>());
+			return std::string{};
+		}
+
+		// Identifier of an existing RT_ICON / RT_GROUP_ICON resource. Win32
+		// names a resource either by a numeric ordinal (the high 16 bits of
+		// the LPSTR are zero) or by a string. We capture both forms so we
+		// can hand the original LPSTR-encoded name back to UpdateResource.
+		struct ExistingResName {
+			bool IsNumeric = false;
+			WORD NumericId = 0;
+			std::string StringName;
+		};
+
+		// Enumerate every resource of `resType` that the .exe at `exePath`
+		// already carries. Used so EmbedIconIntoExecutable can DELETE the
+		// runtime's pristine icon (whatever name `Axiom-Runtime/icon.rc`
+		// happened to compile it under) before adding our own — leaving a
+		// stale RT_GROUP_ICON alongside ours risks Explorer picking the
+		// wrong one. Returns empty vector and sets error string on failure.
+		std::vector<ExistingResName> EnumerateExistingResources(
+			const std::string& exePath, WORD resType, std::string& outError)
+		{
+			std::vector<ExistingResName> out;
+			HMODULE hMod = ::LoadLibraryExA(exePath.c_str(), nullptr,
+				LOAD_LIBRARY_AS_DATAFILE);
+			if (!hMod) {
+				const DWORD err = ::GetLastError();
+				outError = "LoadLibraryEx failed (error " +
+					std::to_string(err) + ")";
+				return out;
+			}
+			struct Ctx { std::vector<ExistingResName>* List; };
+			Ctx ctx{ &out };
+			auto cb = [](HMODULE, LPCSTR, LPSTR lpName, LONG_PTR lParam) -> BOOL {
+				auto* c = reinterpret_cast<Ctx*>(lParam);
+				ExistingResName r{};
+				if ((reinterpret_cast<ULONG_PTR>(lpName) >> 16) == 0) {
+					r.IsNumeric = true;
+					r.NumericId = static_cast<WORD>(reinterpret_cast<ULONG_PTR>(lpName) & 0xFFFF);
+				}
+				else {
+					r.IsNumeric = false;
+					r.StringName = lpName;
+				}
+				c->List->push_back(std::move(r));
+				return TRUE;
+			};
+			if (!::EnumResourceNamesA(hMod, MAKEINTRESOURCEA(resType),
+				cb, reinterpret_cast<LONG_PTR>(&ctx)))
+			{
+				const DWORD err = ::GetLastError();
+				// ERROR_RESOURCE_TYPE_NOT_FOUND (1813) just means the .exe
+				// has no resources of this type — return an empty list.
+				if (err != ERROR_RESOURCE_TYPE_NOT_FOUND
+					&& err != ERROR_RESOURCE_DATA_NOT_FOUND)
+				{
+					outError = "EnumResourceNames failed (error " +
+						std::to_string(err) + ")";
+				}
+			}
+			::FreeLibrary(hMod);
+			return out;
+		}
+
+		// Replace the RT_GROUP_ICON / RT_ICON resources of `exePath` with the
+		// icons in `icoBytes` (the contents of a .ico — either read from disk
+		// or built from a PNG by BuildIcoBytesFromImage). Returns an empty
+		// string on success or a human-readable error description on failure.
+		// The runtime exe is compiled with `1 ICON "icon.ico"`
+		// (Axiom-Runtime/icon.rc), so we overwrite group ID 1 — Explorer /
+		// taskbar / Alt+Tab pick the new icon up immediately because we use
+		// the same resource name. Pre-existing RT_GROUP_ICON / RT_ICON
+		// resources under any OTHER name (e.g. older `IDI_ICON1` builds where
+		// rc.exe with no `#define` compiled the symbol as a STRING-named
+		// resource) are deleted as part of the same update so Explorer can't
+		// fall through to a stale group and render the default Axiom icon.
+		// Wraps EmbedIconIntoExecutableOnce with a small retry loop.
+		// Error 1359 (ERROR_INTERNAL_ERROR) and the kernel-level "another
+		// process has the file open" failures from BeginUpdateResource
+		// are nearly always transient: the runtime exe was copy_file'd
+		// moments ago and Windows / antivirus / Explorer haven't fully
+		// released their handles yet. Sleep + retry a handful of times
+		// before giving up so a Build that races AV doesn't randomly
+		// fail to update the taskbar icon. (The function is defined
+		// later in this file; declaration here keeps the wrapper next
+		// to the public entry point users will call.)
+		std::string EmbedIconIntoExecutableOnce(const std::string& exePath,
+			const std::vector<std::uint8_t>& icoBytes);
+
+		std::string EmbedIconIntoExecutable(const std::string& exePath,
+			const std::vector<std::uint8_t>& icoBytes)
+		{
+			constexpr int k_MaxAttempts = 6;
+			constexpr int k_BaseDelayMs = 150;
+			std::string lastErr;
+			for (int attempt = 0; attempt < k_MaxAttempts; ++attempt) {
+				lastErr = EmbedIconIntoExecutableOnce(exePath, icoBytes);
+				if (lastErr.empty()) return {};
+				// Only retry on the well-known transient failure modes;
+				// other errors (malformed .ico, ico-out-of-bounds, etc.)
+				// won't fix themselves with a delay.
+				const bool transient = lastErr.find("error 1359") != std::string::npos
+					|| lastErr.find("error 32") != std::string::npos       // ERROR_SHARING_VIOLATION
+					|| lastErr.find("error 33") != std::string::npos       // ERROR_LOCK_VIOLATION
+					|| lastErr.find("BeginUpdateResource") != std::string::npos;
+				if (!transient) return lastErr;
+				::Sleep(static_cast<DWORD>(k_BaseDelayMs * (attempt + 1)));
+			}
+			return lastErr.empty() ? std::string("icon embed retry exhausted") : lastErr;
+		}
+
+		std::string EmbedIconIntoExecutableOnce(const std::string& exePath,
+			const std::vector<std::uint8_t>& icoBytes)
+		{
+#pragma pack(push, 1)
+			struct IconDir {
+				std::uint16_t Reserved;
+				std::uint16_t Type;
+				std::uint16_t Count;
+			};
+			struct IcoEntry {
+				std::uint8_t Width;
+				std::uint8_t Height;
+				std::uint8_t ColorCount;
+				std::uint8_t Reserved;
+				std::uint16_t Planes;
+				std::uint16_t BitCount;
+				std::uint32_t BytesInRes;
+				std::uint32_t ImageOffset;
+			};
+			// The wire-format RT_GROUP_ICON entry differs from the on-disk
+			// .ico entry: the trailing field is a 16-bit resource ID rather
+			// than a 32-bit byte offset, so the per-entry size is 14 bytes
+			// instead of 16. Pack to avoid trailing padding the loader would
+			// reject.
+			struct GroupEntry {
+				std::uint8_t Width;
+				std::uint8_t Height;
+				std::uint8_t ColorCount;
+				std::uint8_t Reserved;
+				std::uint16_t Planes;
+				std::uint16_t BitCount;
+				std::uint32_t BytesInRes;
+				std::uint16_t Id;
+			};
+#pragma pack(pop)
+
+			if (icoBytes.size() < sizeof(IconDir)) return "ico too small";
+
+			IconDir dir{};
+			std::memcpy(&dir, icoBytes.data(), sizeof(dir));
+			if (dir.Type != 1 || dir.Count == 0) return "not a .ico";
+
+			const std::size_t entriesEnd = sizeof(IconDir)
+				+ static_cast<std::size_t>(dir.Count) * sizeof(IcoEntry);
+			if (icoBytes.size() < entriesEnd) return "ico header truncated";
+
+			std::vector<IcoEntry> entries(dir.Count);
+			std::memcpy(entries.data(), icoBytes.data() + sizeof(IconDir),
+				entries.size() * sizeof(IcoEntry));
+
+			// Snapshot pre-existing icon resource names BEFORE opening the
+			// update handle (LoadLibraryEx + UpdateResource on the same
+			// file have to be sequential). Whatever names rc.exe compiled
+			// `Axiom-Runtime/icon.rc` under, we delete them in the update
+			// pass below — without that, Explorer is free to pick a stale
+			// group instead of the one we add at numeric ID 1.
+			std::string enumErr;
+			std::vector<ExistingResName> existingGroups =
+				EnumerateExistingResources(exePath, 14 /*RT_GROUP_ICON*/, enumErr);
+			if (!enumErr.empty()) return enumErr;
+			std::vector<ExistingResName> existingIcons =
+				EnumerateExistingResources(exePath, 3 /*RT_ICON*/, enumErr);
+			if (!enumErr.empty()) return enumErr;
+
+			HANDLE hUpdate = ::BeginUpdateResourceA(exePath.c_str(), FALSE);
+			if (!hUpdate) {
+				return "BeginUpdateResource failed (error " +
+					std::to_string(::GetLastError()) + ")";
+			}
+
+			// Delete every pre-existing RT_GROUP_ICON / RT_ICON. Win32 spec:
+			// passing lpData=NULL, cbData=0 to UpdateResource removes that
+			// resource from the in-progress update. Failing to delete one
+			// (returns FALSE) is non-fatal — log nothing and keep going so a
+			// single oddity can't sabotage the entire embed.
+			auto deleteRes = [&](WORD resType, const ExistingResName& r) {
+				LPSTR name = r.IsNumeric
+					? MAKEINTRESOURCEA(r.NumericId)
+					: const_cast<LPSTR>(r.StringName.c_str());
+				::UpdateResourceA(hUpdate, MAKEINTRESOURCEA(resType), name,
+					MAKELANGID(LANG_NEUTRAL, SUBLANG_NEUTRAL),
+					nullptr, 0);
+			};
+			for (const auto& r : existingGroups) deleteRes(14, r);
+			for (const auto& r : existingIcons)  deleteRes(3, r);
+
+			// Write each RT_ICON. We pick fresh IDs (101..N) — the runtime's
+			// icon.rc compiled into RT_ICON IDs that we don't read back, so
+			// using a high base avoids any overlap with the existing entries
+			// we're about to abandon. The RT_GROUP_ICON we write next ties
+			// these IDs together for the Win32 loader.
+			constexpr WORD k_BaseIconId = 101;
+			std::vector<GroupEntry> groupEntries(dir.Count);
+			for (std::size_t i = 0; i < entries.size(); ++i) {
+				const IcoEntry& e = entries[i];
+				if (e.ImageOffset + e.BytesInRes > icoBytes.size()) {
+					::EndUpdateResourceA(hUpdate, TRUE);
+					return "ico entry out of bounds";
+				}
+				const WORD iconId = static_cast<WORD>(k_BaseIconId + i);
+				// Bypass RT_ICON / RT_GROUP_ICON macros — those expand
+				// through MAKEINTRESOURCE which is the WIDE (LPWSTR) form
+				// when UNICODE is defined (the default for VS projects),
+				// triggering a type mismatch against UpdateResourceA's
+				// LPCSTR. Use MAKEINTRESOURCEA directly with the documented
+				// numeric IDs (RT_ICON=3, RT_GROUP_ICON=14).
+				if (!::UpdateResourceA(hUpdate,
+					MAKEINTRESOURCEA(3),
+					MAKEINTRESOURCEA(iconId),
+					MAKELANGID(LANG_NEUTRAL, SUBLANG_NEUTRAL),
+					const_cast<std::uint8_t*>(icoBytes.data()) + e.ImageOffset,
+					e.BytesInRes))
+				{
+					const DWORD err = ::GetLastError();
+					::EndUpdateResourceA(hUpdate, TRUE);
+					return "UpdateResource(RT_ICON) failed (error " +
+						std::to_string(err) + ")";
+				}
+				groupEntries[i] = GroupEntry{
+					e.Width, e.Height, e.ColorCount, e.Reserved,
+					e.Planes, e.BitCount, e.BytesInRes, iconId,
+				};
+			}
+
+			std::vector<std::uint8_t> groupBlob(sizeof(IconDir)
+				+ groupEntries.size() * sizeof(GroupEntry));
+			std::memcpy(groupBlob.data(), &dir, sizeof(IconDir));
+			std::memcpy(groupBlob.data() + sizeof(IconDir),
+				groupEntries.data(),
+				groupEntries.size() * sizeof(GroupEntry));
+
+			// Group ID 1 matches Axiom-Runtime/icon.rc — overwriting at the
+			// same ID swaps Explorer's icon for the new one without leaving
+			// the old group alongside. RT_GROUP_ICON's numeric ID is 14.
+			if (!::UpdateResourceA(hUpdate,
+				MAKEINTRESOURCEA(14),
+				MAKEINTRESOURCEA(1),
+				MAKELANGID(LANG_NEUTRAL, SUBLANG_NEUTRAL),
+				groupBlob.data(),
+				static_cast<DWORD>(groupBlob.size())))
+			{
+				const DWORD err = ::GetLastError();
+				::EndUpdateResourceA(hUpdate, TRUE);
+				return "UpdateResource(RT_GROUP_ICON) failed (error " +
+					std::to_string(err) + ")";
+			}
+
+			if (!::EndUpdateResourceA(hUpdate, FALSE)) {
+				return "EndUpdateResource failed (error " +
+					std::to_string(::GetLastError()) + ")";
+			}
+			return std::string{};
+		}
+#endif
 
 		std::string GetEngineRuntimeFilename() {
 #if defined(AIM_PLATFORM_WINDOWS)
@@ -336,17 +828,36 @@ namespace Axiom {
 		}
 	}
 
-	void ImGuiEditorLayer::ExecuteBuild() {
-		m_BuildStartTime = std::chrono::steady_clock::now();
+	void ImGuiEditorLayer::ReportBuildProgress(float progress, std::string_view stage) {
+		// Atomics for the bar (read every frame), mutex for the
+		// human-readable string (read once per frame). Splitting the
+		// state lets the per-frame UI poll be lock-free for the bar
+		// and only acquire the lock to copy the latest stage label.
+		m_BuildProgress.store(std::clamp(progress, 0.0f, 1.0f), std::memory_order_relaxed);
+		{
+			std::lock_guard<std::mutex> lk(m_BuildProgressMutex);
+			m_BuildStage.assign(stage);
+		}
+	}
+
+	void ImGuiEditorLayer::ExecuteBuildAsync() {
+		m_BuildProgress.store(0.0f, std::memory_order_relaxed);
+		m_BuildSucceeded.store(true, std::memory_order_relaxed);
+		ReportBuildProgress(0.0f, "Starting build");
 
 		AxiomProject* project = ProjectManager::GetCurrentProject();
-		if (!project) { AIM_ERROR_TAG("Build", "No project loaded."); return; }
+		if (!project) {
+			AIM_ERROR_TAG("Build", "No project loaded.");
+			m_BuildSucceeded.store(false, std::memory_order_relaxed);
+			ReportBuildProgress(1.0f, "No project loaded");
+			return;
+		}
 
-		m_BuildOutputDir = std::string(m_BuildOutputDirBuffer);
-		if (m_BuildOutputDir.empty()) { AIM_ERROR_TAG("Build", "No output directory specified."); return; }
-
-		AIM_INFO_TAG("Build", "Starting build for '{}'...", project->Name);
-
+		// Persist the current scene + project on the UI thread before
+		// the worker starts. SceneSerializer / project Save touch
+		// state owned by the UI side (active scene, LastOpenedScene)
+		// and aren't thread-safe to call from the worker. Doing it
+		// here mirrors the original synchronous flow.
 		Scene* active = SceneManager::Get().GetActiveScene();
 		if (active && active->IsDirty()) {
 			std::string scenePath = project->GetSceneFilePath(active->GetName());
@@ -356,11 +867,41 @@ namespace Axiom {
 			AIM_INFO_TAG("Build", "Saved current scene.");
 		}
 
+		// Kick off the actual build on a worker thread. The future
+		// becomes "ready" when ExecuteBuild returns; the UI polls
+		// it once per frame in the editor's chrome update.
+		m_BuildFuture = std::async(std::launch::async, [this]() {
+			ExecuteBuild();
+		});
+	}
+
+	void ImGuiEditorLayer::ExecuteBuild() {
+		m_BuildStartTime = std::chrono::steady_clock::now();
+
+		AxiomProject* project = ProjectManager::GetCurrentProject();
+		if (!project) {
+			AIM_ERROR_TAG("Build", "No project loaded.");
+			m_BuildSucceeded.store(false, std::memory_order_relaxed);
+			return;
+		}
+
+		m_BuildOutputDir = std::string(m_BuildOutputDirBuffer);
+		if (m_BuildOutputDir.empty()) {
+			AIM_ERROR_TAG("Build", "No output directory specified.");
+			m_BuildSucceeded.store(false, std::memory_order_relaxed);
+			ReportBuildProgress(1.0f, "No output directory");
+			return;
+		}
+
+		AIM_INFO_TAG("Build", "Starting build for '{}'...", project->Name);
+		ReportBuildProgress(0.05f, "Preparing build");
+
 		auto exeDir = std::filesystem::path(Path::ExecutableDir());
 		auto outDir = std::filesystem::path(m_BuildOutputDir);
 		const std::string buildConfiguration = AxiomProject::GetActiveBuildConfiguration();
 
 		if (std::filesystem::exists(project->CsprojPath)) {
+			ReportBuildProgress(0.10f, "Compiling C# scripts");
 			AIM_INFO_TAG("Build", "Compiling C# scripts...");
 			Process::Result buildResult = Process::Run({
 				"dotnet",
@@ -376,9 +917,12 @@ namespace Axiom {
 				if (!buildResult.Output.empty()) {
 					AIM_ERROR_TAG("Build", "{}", buildResult.Output);
 				}
+				m_BuildSucceeded.store(false, std::memory_order_relaxed);
+				ReportBuildProgress(1.0f, "C# compilation failed");
 				return;
 			}
 			AIM_INFO_TAG("Build", "C# scripts compiled.");
+			ReportBuildProgress(0.30f, "C# scripts compiled");
 		}
 
 		// Rebuild native scripts with the project's chosen build profile so
@@ -390,6 +934,7 @@ namespace Axiom {
 		const std::filesystem::path nativeProjectDir(project->NativeScriptsDir);
 		const std::filesystem::path nativeCMakeLists = nativeProjectDir / "CMakeLists.txt";
 		if (std::filesystem::exists(nativeCMakeLists)) {
+			ReportBuildProgress(0.35f, "Compiling native scripts");
 			AIM_INFO_TAG("Build", "Compiling native scripts ({} profile)...",
 				AxiomProject::BuildProfileToString(project->ActiveBuildProfile));
 			const std::string profileCmakeArg = std::string("-DAXIOM_BUILD_PROFILE=")
@@ -429,8 +974,11 @@ namespace Axiom {
 		}
 		catch (const std::exception& e) {
 			AIM_ERROR_TAG("Build", "Failed to create output directory: {}", e.what());
+			m_BuildSucceeded.store(false, std::memory_order_relaxed);
+			ReportBuildProgress(1.0f, "Output directory creation failed");
 			return;
 		}
+		ReportBuildProgress(0.55f, "Copying runtime binaries");
 
 		auto copyFile = [&](const std::filesystem::path& src, const std::filesystem::path& dest, const std::string& name) {
 			try {
@@ -497,6 +1045,7 @@ namespace Axiom {
 			AIM_WARN_TAG("Build", "Failed to copy axiom-project.json: {}", e.what());
 		}
 
+		ReportBuildProgress(0.75f, "Copying project assets");
 		if (std::filesystem::exists(project->AssetsDirectory)) {
 			int updatedFiles = CopyDirIncremental(project->AssetsDirectory, outDir / "Assets");
 			AIM_INFO_TAG("Build", "Assets: {} file(s) updated", updatedFiles);
@@ -555,11 +1104,131 @@ namespace Axiom {
 			}
 		}
 
-		float elapsed = std::chrono::duration<float>(std::chrono::steady_clock::now() - m_BuildStartTime).count();
-		AIM_INFO_TAG("Build", "Build completed in {:.2f}s -> {}", elapsed, m_BuildOutputDir);
+		// Native package DLLs.
+		//
+		// `PackageHost::LoadAll` (engine side) scans `<exeDir>/Packages/` for
+		// folders matching `Pkg.<Name>.Native/Pkg.<Name>.Native.dll` and
+		// LoadLibrary-loads each one — that's how packages with a native
+		// layer (engine_core / standalone_cpp / pinvoke_dll) register their
+		// components, systems, and P/Invoke surface in the runtime.
+		//
+		// The user's csproj reference already pulls the C# `Pkg.<Name>.dll`
+		// into the build via MSBuild's standard copy. The native sibling has
+		// no such automatic copy, so without this block a project that uses
+		// e.g. `Axiom.Tilemap2D` shipped with `Pkg.Axiom.Tilemap2D.dll`
+		// alone — DllImport resolves into a process where no native module
+		// exists, components never register, `GetComponent<Tilemap2D>()`
+		// returns null, and the user's first `tilemap.SetTile(...)` NREs.
+		//
+		// Source layout (dev): the editor exe lives at
+		//   <axiomBin>/<config>/Axiom-Editor/Axiom-Editor.exe
+		// and each native package is a sibling folder:
+		//   <axiomBin>/<config>/Pkg.<Name>.Native/Pkg.<Name>.Native.dll
+		// We mirror that into the build's distribution layout under
+		// `<buildOutput>/Packages/`, which matches the second probe
+		// PackageHost::LoadInternal walks (`exeDir / "Packages"`).
+		{
+			const std::filesystem::path packageSearchRoot = exeDir / "..";
+			int copiedPackages = 0;
+			for (const std::string& packageName : project->Packages) {
+				if (packageName.empty()) continue;
+				const std::string nativeFolderName = "Pkg." + packageName + ".Native";
+				const std::string nativeFileName = nativeFolderName + ".dll";
+				const std::filesystem::path src = packageSearchRoot / nativeFolderName / nativeFileName;
+				const std::filesystem::path dst = outDir / "Packages" / nativeFolderName / nativeFileName;
+				if (!std::filesystem::exists(src)) {
+					// Package may be managed-only (csharp layer with no
+					// engine_core/standalone_cpp). That's a valid manifest, so
+					// surface as INFO rather than WARN.
+					AIM_INFO_TAG("Build",
+						"Package '{}' has no native DLL at '{}' — skipping (managed-only?).",
+						packageName, src.string());
+					continue;
+				}
+				copyFile(src, dst, nativeFileName);
+				copiedPackages++;
+
+				// Best-effort PDB copy so a native crash inside a shipped
+				// package surfaces with line numbers when the user keeps
+				// debug symbols around.
+				const std::filesystem::path pdbSrc = packageSearchRoot / nativeFolderName /
+					(nativeFolderName + ".pdb");
+				if (std::filesystem::exists(pdbSrc)) {
+					copyFile(pdbSrc, dst.parent_path() / pdbSrc.filename(), pdbSrc.filename().string());
+				}
+			}
+			if (copiedPackages > 0) {
+				AIM_INFO_TAG("Build", "Native packages: {} DLL(s) staged under Packages/.", copiedPackages);
+			}
+		}
 
 #ifdef AIM_PLATFORM_WINDOWS
-		ShellExecuteA(nullptr, "open", outDir.string().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+		// Embed a custom icon resource into the copied runtime executable.
+		// Without this, the shipped .exe always shows the default Axiom
+		// runtime icon (compiled into Axiom-Runtime via icon.rc) regardless
+		// of what AppIconPath points to — the project setting only ever
+		// affected the in-app window icon. We update RT_GROUP_ICON / RT_ICON
+		// directly via the Win32 resource APIs so the Explorer / taskbar /
+		// Alt+Tab icon all match what the user picked. PNG / JPEG / BMP /
+		// any format Texture2D can decode is converted to a 32-bit BMP-DIB
+		// .ico in-memory before embedding, so the user's .png AppIconPath
+		// works without re-exporting to .ico.
+		if (!project->AppIconPath.empty()) {
+			std::filesystem::path iconPath(project->AppIconPath);
+			if (!iconPath.is_absolute()) {
+				iconPath = std::filesystem::path(project->RootDirectory) / project->AppIconPath;
+			}
+			const std::string iconExt = iconPath.has_extension()
+				? iconPath.extension().string() : std::string{};
+			std::string iconExtLower = iconExt;
+			std::transform(iconExtLower.begin(), iconExtLower.end(),
+				iconExtLower.begin(), [](unsigned char c) { return std::tolower(c); });
+			const std::filesystem::path embedTargetExe = outDir
+				/ (outputExecutableStem + std::filesystem::path(runtimeExecutableFilename).extension().string());
+			if (!std::filesystem::exists(iconPath)) {
+				AIM_WARN_TAG("Build", "AppIcon not found at {}", iconPath.string());
+			}
+			else if (!std::filesystem::exists(embedTargetExe)) {
+				AIM_WARN_TAG("Build", "Cannot embed icon — built executable not found at {}",
+					embedTargetExe.string());
+			}
+			else {
+				std::vector<std::uint8_t> icoBytes;
+				std::string buildErr;
+				if (iconExtLower == ".ico") {
+					buildErr = ReadIcoFileBytes(iconPath, icoBytes);
+				}
+				else {
+					buildErr = BuildIcoBytesFromImage(iconPath, icoBytes);
+				}
+				if (!buildErr.empty()) {
+					AIM_WARN_TAG("Build", "Failed to prepare icon ({}): {}",
+						iconPath.filename().string(), buildErr);
+				}
+				else {
+					const std::string err = EmbedIconIntoExecutable(
+						embedTargetExe.string(), icoBytes);
+					if (err.empty()) {
+						AIM_INFO_TAG("Build", "Embedded icon: {}", iconPath.filename().string());
+					}
+					else {
+						AIM_WARN_TAG("Build", "Failed to embed icon: {}", err);
+					}
+				}
+			}
+		}
+#endif
+
+		ReportBuildProgress(0.95f, "Finalizing");
+		float elapsed = std::chrono::duration<float>(std::chrono::steady_clock::now() - m_BuildStartTime).count();
+		AIM_INFO_TAG("Build", "Build completed in {:.2f}s -> {}", elapsed, m_BuildOutputDir);
+		ReportBuildProgress(1.0f, "Build complete");
+
+#ifdef AIM_PLATFORM_WINDOWS
+		// ShellExecute opens an Explorer window — touches OS UI state
+		// that's safer to do from the editor's UI thread than the
+		// build worker. Skipped here; the explorer popup happens on
+		// the UI thread once the future resolves.
 #endif
 	}
 
@@ -853,6 +1522,12 @@ namespace Axiom {
 			ImGui::Unindent(8);
 		}
 
+		// Asset Browser + Auto-Save moved to the Project Settings panel
+		// (editor-side preferences). Keeping the Player Settings panel
+		// focused on runtime / shipped-game knobs so users don't have
+		// to scan past editor-experience toggles to find what ships in
+		// the build.
+
 		if (ImGui::CollapsingHeader("Executable", ImGuiTreeNodeFlags_DefaultOpen)) {
 			ImGui::Indent(8);
 			ImGui::TextUnformatted("Output Name:");
@@ -928,6 +1603,27 @@ namespace Axiom {
 				ImGui::Spacing();
 				ImGui::TextUnformatted("Image (optional, replaces default Axiom logo):");
 				if (project->SplashScreen.ImagePath.empty()) {
+					// Render the engine default logo as a placeholder so
+					// the user sees what'll ship. Same source the runtime
+					// splash falls back to (RuntimeSplashLayer's
+					// ResolveDefaultLogoPath uses
+					// `<AxiomAssets>/Textures/icon.png`).
+					const std::string root = Path::ResolveAxiomAssets("Textures");
+					std::string defaultLogoPath;
+					if (!root.empty()) {
+						const std::filesystem::path c = std::filesystem::path(root) / "icon.png";
+						if (std::filesystem::exists(c)) defaultLogoPath = c.string();
+					}
+					if (!defaultLogoPath.empty()) {
+						TextureHandle h = TextureManager::LoadTexture(defaultLogoPath);
+						Texture2D* tex = TextureManager::GetTexture(h);
+						if (tex && tex->IsValid()) {
+							ImGui::Image(
+								static_cast<ImTextureID>(static_cast<intptr_t>(tex->GetHandle())),
+								ImVec2(48, 48), ImVec2(0, 1), ImVec2(1, 0));
+							ImGui::SameLine();
+						}
+					}
 					ImGui::TextDisabled("(default Axiom logo)");
 				}
 				else {
@@ -938,10 +1634,71 @@ namespace Axiom {
 						ReferencePicker::CollectAssetsByKind(AssetKind::Texture),
 						ReferencePicker::Style::Thumbnails);
 				}
+				if (BrowseAcceptImageDrop(k_ImageExts, [&](const std::string& dropped) {
+					project->SplashScreen.ImagePath =
+						ToProjectRelativeAssetPath(dropped, project->AssetsDirectory);
+					changed = true;
+				})) {}
 				if (!project->SplashScreen.ImagePath.empty()) {
 					ImGui::SameLine();
 					if (ImGui::Button("Clear##SplashImage")) {
 						project->SplashScreen.ImagePath.clear();
+						changed = true;
+					}
+				}
+
+				ImGui::Spacing();
+				ImGui::TextUnformatted("Background Image (optional, painted full-screen behind logo):");
+				constexpr const char* k_SplashBgPickerKey = "ProjectSettings.SplashBackground";
+
+				// Apply a pending background-image picker selection — same
+				// path-normalisation flow as the foreground image so the
+				// stored value stays project-relative.
+				if (auto pending = ReferencePicker::ConsumeSelection(k_SplashBgPickerKey); pending) {
+					const std::string raw = *pending;
+					uint64_t pickedId = 0;
+					try { pickedId = std::stoull(raw); } catch (...) { pickedId = 0; }
+					if (pickedId == 0) {
+						project->SplashScreen.BackgroundImagePath.clear();
+						changed = true;
+					}
+					else {
+						std::string absPath = AssetRegistry::ResolvePath(pickedId);
+						if (!absPath.empty()) {
+							std::filesystem::path absFs(absPath);
+							std::filesystem::path assetsDir(project->AssetsDirectory);
+							if (absFs.string().find(assetsDir.string()) == 0) {
+								project->SplashScreen.BackgroundImagePath =
+									std::filesystem::relative(absFs, assetsDir.parent_path()).string();
+							}
+							else {
+								project->SplashScreen.BackgroundImagePath = absFs.filename().string();
+							}
+							changed = true;
+						}
+					}
+				}
+
+				if (project->SplashScreen.BackgroundImagePath.empty()) {
+					ImGui::TextDisabled("(no background image — solid colour fill above)");
+				}
+				else {
+					ImGuiUtils::TextDisabledEllipsis(project->SplashScreen.BackgroundImagePath);
+				}
+				if (ImGui::Button("Browse...##SplashBgImage")) {
+					ReferencePicker::OpenForFieldKey(k_SplashBgPickerKey, "Select Splash Background",
+						ReferencePicker::CollectAssetsByKind(AssetKind::Texture),
+						ReferencePicker::Style::Thumbnails);
+				}
+				if (BrowseAcceptImageDrop(k_ImageExts, [&](const std::string& dropped) {
+					project->SplashScreen.BackgroundImagePath =
+						ToProjectRelativeAssetPath(dropped, project->AssetsDirectory);
+					changed = true;
+				})) {}
+				if (!project->SplashScreen.BackgroundImagePath.empty()) {
+					ImGui::SameLine();
+					if (ImGui::Button("Clear##SplashBgImage")) {
+						project->SplashScreen.BackgroundImagePath.clear();
 						changed = true;
 					}
 				}
@@ -955,6 +1712,23 @@ namespace Axiom {
 					textBuf, sizeof(textBuf))) {
 					project->SplashScreen.CustomText = textBuf;
 					changed = true;
+				}
+
+				// Show preview — replays the splash sequence (fade-in,
+				// hold, fade-out) over the editor's main viewport so the
+				// user can sanity-check colours / images / text without
+				// running a full build. The actual layer push lives on
+				// ImGuiEditorLayer (we only set the request flag here);
+				// see RequestSplashPreview in the header.
+				ImGui::Spacing();
+				if (ImGui::Button("Show Preview")) {
+					m_SplashPreviewRequest = true;
+				}
+				if (ImGui::IsItemHovered()) {
+					ImGui::SetTooltip(
+						"Replay the splash screen using the current\n"
+						"settings, drawn on top of the editor for the\n"
+						"FadeIn + Duration + FadeOut window.");
 				}
 			}
 			ImGui::Unindent(8);
@@ -980,7 +1754,31 @@ namespace Axiom {
 				return (std::filesystem::path(project->RootDirectory) / p).string();
 			};
 
+			// Engine-shipped default icon — `<axiomBin>/AxiomAssets/Textures/icon.png`.
+			// Same payload the runtime's splash falls back to (see
+			// `RuntimeSplashLayer::ResolveDefaultLogoPath`) and what gets
+			// embedded into the runtime exe's RT_GROUP_ICON resource at
+			// compile time. Presented as a placeholder thumbnail when the
+			// project hasn't picked its own icon, so the user sees
+			// exactly what their build would ship without any
+			// configuration.
+			auto resolveDefaultEngineIcon = []() -> std::string {
+				const std::string root = Path::ResolveAxiomAssets("Textures");
+				if (root.empty()) return {};
+				const std::filesystem::path candidate = std::filesystem::path(root) / "icon.png";
+				if (!std::filesystem::exists(candidate)) return {};
+				return candidate.string();
+			};
+
 			// Apply a pending picker selection from a previous frame.
+			//
+			// AppIconPath is the SHIPPED game's window icon (and what the
+			// build pipeline embeds into the runtime .exe). It must not be
+			// applied to the editor's own window — the editor keeps its own
+			// embedded RT_ICON regardless of which project is open. The 64x64
+			// thumbnail rendered below is the in-panel preview; we don't
+			// need to push the texture into glfwSetWindowIcon to show what
+			// the user picked.
 			if (auto pending = ReferencePicker::ConsumeSelection(k_AppIconPickerKey); pending) {
 				const std::string raw = *pending;
 				uint64_t pickedId = 0;
@@ -988,7 +1786,6 @@ namespace Axiom {
 				if (pickedId == 0) {
 					project->AppIconPath.clear();
 					changed = true;
-					Application::GetInstance()->GetWindow()->SetWindowIconFromResource();
 				}
 				else {
 					std::string absPath = AssetRegistry::ResolvePath(pickedId);
@@ -1002,11 +1799,6 @@ namespace Axiom {
 							project->AppIconPath = absFs.filename().string();
 						}
 						changed = true;
-						TextureHandle icon = TextureManager::LoadTexture(resolveProjectRelative(project->AppIconPath));
-						Texture2D* tex = TextureManager::GetTexture(icon);
-						if (tex && tex->IsValid()) {
-							Application::GetInstance()->GetWindow()->SetWindowIcon(tex);
-						}
 					}
 				}
 			}
@@ -1031,11 +1823,15 @@ namespace Axiom {
 						ReferencePicker::CollectAssetsByKind(AssetKind::Texture),
 						ReferencePicker::Style::Thumbnails);
 				}
+				if (BrowseAcceptImageDrop(k_ImageExts, [&](const std::string& dropped) {
+					project->AppIconPath =
+						ToProjectRelativeAssetPath(dropped, project->AssetsDirectory);
+					changed = true;
+				})) {}
 				ImGui::SameLine();
 				if (ImGui::Button("Clear##AppIcon")) {
 					project->AppIconPath.clear();
 					changed = true;
-					Application::GetInstance()->GetWindow()->SetWindowIconFromResource();
 				}
 				ImGui::EndGroup();
 
@@ -1044,41 +1840,163 @@ namespace Axiom {
 				}
 			}
 			else {
-				ImGui::TextDisabled("No icon set");
+				// Render the engine default icon as the placeholder thumbnail
+				// so the user sees what'll ship by default. Falls through to
+				// the disabled "No icon set" text only if AxiomAssets isn't
+				// installed (development environment without `Setup.bat`).
+				const std::string defaultIconPath = resolveDefaultEngineIcon();
+				if (!defaultIconPath.empty()) {
+					TextureHandle defIconHandle = TextureManager::LoadTexture(defaultIconPath);
+					Texture2D* defIconTex = TextureManager::GetTexture(defIconHandle);
+					if (defIconTex && defIconTex->IsValid()) {
+						ImGui::Image(
+							static_cast<ImTextureID>(static_cast<intptr_t>(defIconTex->GetHandle())),
+							ImVec2(64, 64), ImVec2(0, 1), ImVec2(1, 0));
+						ImGui::SameLine();
+					}
+				}
+
+				ImGui::BeginGroup();
+				if (defaultIconPath.empty()) {
+					ImGui::TextDisabled("No icon set");
+				}
+				else {
+					ImGui::TextDisabled("(engine default — icon.png)");
+				}
 				if (ImGui::Button("Browse...##AppIcon")) {
 					ReferencePicker::OpenForFieldKey(k_AppIconPickerKey, "Select App Icon",
 						ReferencePicker::CollectAssetsByKind(AssetKind::Texture),
 						ReferencePicker::Style::Thumbnails);
 				}
+				// Drop target lives on the Browse button itself — keeps
+				// the affordance consistent with every other Browse... in
+				// this panel (Splash Image, Cursors). Previously the drop
+				// target wrapped the entire App Icon section's last item
+				// (the disabled-text hint), which made the drop hit-area
+				// inconsistent with the rest of the panel and confused
+				// users about WHERE to drop. Note: NOT calling
+				// SetWindowIcon — the AppIconPath is the SHIPPED game's
+				// icon, not the editor's window icon.
+				if (BrowseAcceptImageDrop(k_ImageExts, [&](const std::string& dropped) {
+					project->AppIconPath =
+						ToProjectRelativeAssetPath(dropped, project->AssetsDirectory);
+					changed = true;
+				})) {}
 				ImGui::SameLine();
-				ImGui::TextDisabled("or drag an image from the Asset Browser");
+				ImGui::TextDisabled("or drag an image onto the Browse button");
+				ImGui::EndGroup();
 			}
 
-			if (ImGui::BeginDragDropTarget()) {
-				if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ASSET_BROWSER_ITEM")) {
-					std::string droppedPath(static_cast<const char*>(payload->Data));
-					std::string ext = std::filesystem::path(droppedPath).extension().string();
-					std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+			ImGui::Unindent(8);
+		}
 
-					if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp") {
-						std::filesystem::path absPath(droppedPath);
-						std::filesystem::path assetsDir(project->AssetsDirectory);
-						if (absPath.string().find(assetsDir.string()) == 0) {
-							project->AppIconPath = std::filesystem::relative(absPath, assetsDir.parent_path()).string();
-						}
-						else {
-							project->AppIconPath = absPath.filename().string();
-						}
+		if (ImGui::CollapsingHeader("Cursors", ImGuiTreeNodeFlags_DefaultOpen)) {
+			ImGui::Indent(8);
+
+			auto resolveProjectRelativeCursor = [&](const std::string& rel) -> std::string {
+				std::filesystem::path p(rel);
+				if (p.is_absolute()) return rel;
+				return (std::filesystem::path(project->RootDirectory) / p).string();
+			};
+
+			// Apply a project-relative path to the live Window cursor so
+			// the change is visible immediately rather than requiring a
+			// restart. Empty path clears the slot back to the OS default.
+			auto applyCursorLive = [&](const std::string& path, void (Window::*setter)(const Texture2D*))
+			{
+				Window* win = Application::GetInstance() ? Application::GetInstance()->GetWindow() : nullptr;
+				if (!win) return;
+				if (path.empty()) {
+					(win->*setter)(nullptr);
+					return;
+				}
+				const std::string abs = resolveProjectRelativeCursor(path);
+				if (!std::filesystem::exists(abs)) {
+					AIM_WARN_TAG("Editor", "Cursor image not found: {}", abs);
+					return;
+				}
+				TextureHandle h = TextureManager::LoadTexture(abs);
+				if (Texture2D* tex = TextureManager::GetTexture(h); tex && tex->IsValid()) {
+					(win->*setter)(tex);
+				}
+			};
+
+			// Renders the picker / drag-drop / clear UI for one cursor
+			// slot. `slotName` is the persisted project field; the lambda
+			// rewrites it on selection. The "live apply" callback pushes
+			// the new cursor into the Window so the user sees the swap
+			// without re-launching.
+			auto renderCursorSlot = [&](const char* label,
+				const char* pickerKey, std::string& slotPath,
+				void (Window::*liveSetter)(const Texture2D*))
+			{
+				ImGui::PushID(label);
+				ImGui::TextUnformatted(label);
+
+				if (auto pending = ReferencePicker::ConsumeSelection(pickerKey); pending) {
+					const std::string raw = *pending;
+					uint64_t pickedId = 0;
+					try { pickedId = std::stoull(raw); } catch (...) { pickedId = 0; }
+					if (pickedId == 0) {
+						slotPath.clear();
 						changed = true;
-
-						TextureHandle icon = TextureManager::LoadTexture(resolveProjectRelative(project->AppIconPath));
-						Texture2D* tex = TextureManager::GetTexture(icon);
-						if (tex && tex->IsValid()) {
-							Application::GetInstance()->GetWindow()->SetWindowIcon(tex);
+						applyCursorLive("", liveSetter);
+					}
+					else {
+						std::string absPath = AssetRegistry::ResolvePath(pickedId);
+						if (!absPath.empty()) {
+							std::filesystem::path absFs(absPath);
+							std::filesystem::path assetsDir(project->AssetsDirectory);
+							if (absFs.string().find(assetsDir.string()) == 0) {
+								slotPath = std::filesystem::relative(absFs, assetsDir.parent_path()).string();
+							}
+							else {
+								slotPath = absFs.filename().string();
+							}
+							changed = true;
+							applyCursorLive(slotPath, liveSetter);
 						}
 					}
 				}
-				ImGui::EndDragDropTarget();
+
+				if (slotPath.empty()) {
+					ImGui::TextDisabled("(OS default)");
+				}
+				else {
+					ImGuiUtils::TextDisabledEllipsis(slotPath);
+				}
+
+				if (ImGui::Button("Browse...")) {
+					ReferencePicker::OpenForFieldKey(pickerKey, "Select Cursor Image",
+						ReferencePicker::CollectAssetsByKind(AssetKind::Texture),
+						ReferencePicker::Style::Thumbnails);
+				}
+				if (BrowseAcceptImageDrop(k_ImageExts, [&](const std::string& dropped) {
+					slotPath = ToProjectRelativeAssetPath(dropped, project->AssetsDirectory);
+					changed = true;
+					applyCursorLive(slotPath, liveSetter);
+				})) {}
+				if (!slotPath.empty()) {
+					ImGui::SameLine();
+					if (ImGui::Button("Clear")) {
+						slotPath.clear();
+						changed = true;
+						applyCursorLive("", liveSetter);
+					}
+				}
+				ImGui::PopID();
+			};
+
+			renderCursorSlot("Default cursor", "ProjectSettings.DefaultCursor",
+				project->CursorImagePath, &Window::SetCursorImage);
+			ImGui::Spacing();
+			renderCursorSlot("UI hover cursor", "ProjectSettings.UICursor",
+				project->UIInteractableCursorImagePath, &Window::SetUICursorImage);
+			if (ImGui::IsItemHovered()) {
+				ImGui::SetTooltip(
+					"Shown while the cursor sits over an Axiom UI element\n"
+					"with an Interactable component (Button / Slider / etc.).\n"
+					"Falls back to the default cursor when unset.");
 			}
 
 			ImGui::Unindent(8);
@@ -1162,6 +2080,239 @@ namespace Axiom {
 		ReferencePicker::RenderPopup();
 
 		ImGui::End();
+	}
+
+	// Project Settings — editor-side preferences scoped to this project.
+	// Distinct from Player Settings (which configures the shipped game's
+	// runtime). Anything here only affects the editor's UX while the
+	// project is open: how the asset browser renders names, when scenes
+	// auto-save, etc. Adding new editor-experience toggles? They belong
+	// in this panel, not Player Settings.
+	void ImGuiEditorLayer::RenderProjectSettingsPanel() {
+		if (!m_ShowProjectSettings) return;
+
+		ImGui::Begin("Project Settings", &m_ShowProjectSettings);
+		AxiomProject* project = ProjectManager::GetCurrentProject();
+		if (!project) {
+			ImGui::TextDisabled("No project loaded");
+			ImGui::End();
+			return;
+		}
+
+		bool changed = false;
+
+		if (ImGui::CollapsingHeader("Asset Browser", ImGuiTreeNodeFlags_DefaultOpen)) {
+			ImGui::Indent(8);
+			changed |= ImGui::Checkbox("Show file extensions", &project->ShowFileExtensions);
+			if (ImGui::IsItemHovered()) {
+				ImGui::SetTooltip(
+					"When off (default), asset names render without their\n"
+					"extension (\"MyScene\" instead of \"MyScene.scene\").\n"
+					"Renaming pre-fills only the stem and re-appends the\n"
+					"original extension on commit. When on, extensions are\n"
+					"shown and editable verbatim.");
+			}
+			ImGui::Unindent(8);
+		}
+
+		if (ImGui::CollapsingHeader("Auto-Save", ImGuiTreeNodeFlags_DefaultOpen)) {
+			ImGui::Indent(8);
+			changed |= ImGui::Checkbox("Auto-save scenes", &project->AutoSaveScenes);
+			if (ImGui::IsItemHovered()) {
+				ImGui::SetTooltip(
+					"Periodically save the active scene while editing.\n"
+					"Skipped during Play mode (Play-mode edits are discarded\n"
+					"on Stop, so saving them would clobber the pre-Play snapshot).");
+			}
+			if (project->AutoSaveScenes) {
+				ImGui::SetNextItemWidth(160.0f);
+				changed |= ImGui::InputFloat("Interval (seconds)", &project->AutoSaveIntervalSeconds, 5.0f, 30.0f, "%.0f");
+				if (project->AutoSaveIntervalSeconds < 5.0f) {
+					project->AutoSaveIntervalSeconds = 5.0f;
+				}
+			}
+			ImGui::Unindent(8);
+		}
+
+		if (changed) {
+			project->Save();
+		}
+
+		ImGui::End();
+	}
+
+	// Splash preview — replays the runtime's splash timeline as a
+	// foreground overlay over the editor. Triggered by the
+	// "Show Preview" button in Player Settings → Splash Screen.
+	// Self-completes after FadeIn + Duration + FadeOut seconds.
+	// Path resolution mirrors RuntimeSplashLayer's logic so the user
+	// sees exactly what the build will ship.
+	void ImGuiEditorLayer::TickSplashPreview() {
+		AxiomProject* project = ProjectManager::GetCurrentProject();
+		if (!project) {
+			m_SplashPreviewRequest = false;
+			m_SplashPreviewActive = false;
+			return;
+		}
+
+		if (m_SplashPreviewRequest) {
+			m_SplashPreviewRequest = false;
+			m_SplashPreviewActive = true;
+			m_SplashPreviewElapsed = 0.0f;
+
+			// Resolve foreground + background paths the same way the
+			// runtime splash does so the preview matches the shipped
+			// game's behaviour. AppIconPath / SplashScreen.ImagePath
+			// are stored project-relative; prepend RootDirectory.
+			auto resolveProjectRelative = [&](const std::string& rel) -> std::string {
+				if (rel.empty()) return {};
+				std::filesystem::path p(rel);
+				if (p.is_absolute() && std::filesystem::exists(p)) return p.string();
+				std::filesystem::path projectRel = std::filesystem::path(project->RootDirectory) / p;
+				if (std::filesystem::exists(projectRel)) return projectRel.string();
+				std::filesystem::path assetsRel = std::filesystem::path(project->AssetsDirectory) / p.filename();
+				if (std::filesystem::exists(assetsRel)) return assetsRel.string();
+				return rel;
+			};
+
+			// Logo
+			std::string logoPath = resolveProjectRelative(project->SplashScreen.ImagePath);
+			if (logoPath.empty()) {
+				const std::string axiomTexRoot = Path::ResolveAxiomAssets("Textures");
+				if (!axiomTexRoot.empty()) {
+					std::filesystem::path candidate = std::filesystem::path(axiomTexRoot) / "Axiom64.png";
+					if (std::filesystem::exists(candidate)) logoPath = candidate.string();
+				}
+			}
+			m_SplashPreviewLogo = logoPath.empty()
+				? TextureHandle::Invalid()
+				: TextureManager::LoadTexture(logoPath);
+
+			// Background
+			const std::string bgPath = resolveProjectRelative(project->SplashScreen.BackgroundImagePath);
+			m_SplashPreviewBackground = bgPath.empty()
+				? TextureHandle::Invalid()
+				: TextureManager::LoadTexture(bgPath);
+
+			// Keep both textures alive across PurgeUnreferenced for
+			// the preview lifetime; release in the completion path
+			// below.
+			if (m_SplashPreviewTexRefToken == 0) {
+				m_SplashPreviewTexRefToken = TextureManager::AddReferenceProvider(
+					[this](const TextureManager::ReferenceEmitter& emit) {
+						if (m_SplashPreviewLogo.IsValid()) emit(m_SplashPreviewLogo);
+						if (m_SplashPreviewBackground.IsValid()) emit(m_SplashPreviewBackground);
+					});
+			}
+		}
+
+		if (!m_SplashPreviewActive) return;
+
+		auto* app = Application::GetInstance();
+		const float dt = app ? app->GetTime().GetDeltaTimeUnscaled() : 0.0f;
+		m_SplashPreviewElapsed += dt;
+
+		const float fadeIn = std::max(0.0f, project->SplashScreen.FadeInSeconds);
+		const float hold   = std::max(0.0f, project->SplashScreen.DurationSeconds);
+		const float fadeOut = std::max(0.0f, project->SplashScreen.FadeOutSeconds);
+		const float total = fadeIn + hold + fadeOut;
+		if (m_SplashPreviewElapsed >= total) {
+			m_SplashPreviewActive = false;
+			if (m_SplashPreviewTexRefToken != 0) {
+				TextureManager::RemoveReferenceProvider(m_SplashPreviewTexRefToken);
+				m_SplashPreviewTexRefToken = 0;
+			}
+			m_SplashPreviewLogo = TextureHandle::Invalid();
+			m_SplashPreviewBackground = TextureHandle::Invalid();
+			return;
+		}
+
+		float alpha = 1.0f;
+		if (m_SplashPreviewElapsed < fadeIn && fadeIn > 0.0f) {
+			alpha = m_SplashPreviewElapsed / fadeIn;
+		}
+		else if (m_SplashPreviewElapsed > fadeIn + hold && fadeOut > 0.0f) {
+			alpha = 1.0f - (m_SplashPreviewElapsed - fadeIn - hold) / fadeOut;
+		}
+		alpha = std::clamp(alpha, 0.0f, 1.0f);
+
+		// Draw onto the OS-window foreground draw list so the preview
+		// floats above every dock / panel including the toolbar. Using
+		// the foreground list also dodges the InvisibleButton/scissor
+		// nesting issues the dockspace adds — the preview can't be
+		// docked or focused.
+		ImGuiViewport* vp = ImGui::GetMainViewport();
+		ImDrawList* draw = ImGui::GetForegroundDrawList(vp);
+		const ImVec2 wMin = vp->WorkPos;
+		const ImVec2 wMax(wMin.x + vp->WorkSize.x, wMin.y + vp->WorkSize.y);
+		const float width = vp->WorkSize.x;
+		const float height = vp->WorkSize.y;
+
+		auto packColor = [](float r, float g, float b, float a) {
+			r = std::clamp(r, 0.0f, 1.0f);
+			g = std::clamp(g, 0.0f, 1.0f);
+			b = std::clamp(b, 0.0f, 1.0f);
+			a = std::clamp(a, 0.0f, 1.0f);
+			return IM_COL32(int(r * 255), int(g * 255), int(b * 255), int(a * 255));
+		};
+
+		draw->AddRectFilled(wMin, wMax, packColor(
+			project->SplashScreen.BackgroundR,
+			project->SplashScreen.BackgroundG,
+			project->SplashScreen.BackgroundB,
+			alpha));
+
+		Texture2D* bg = TextureManager::GetTexture(m_SplashPreviewBackground);
+		if (bg && bg->IsValid()) {
+			const float bgW = static_cast<float>(bg->GetWidth());
+			const float bgH = static_cast<float>(bg->GetHeight());
+			if (bgW > 0.0f && bgH > 0.0f) {
+				const float canvasAspect = width / height;
+				const float bgAspect = bgW / bgH;
+				float drawW = width, drawH = height;
+				if (bgAspect > canvasAspect) drawW = drawH * bgAspect;
+				else                          drawH = drawW / bgAspect;
+				const ImVec2 bgMin(wMin.x + (width  - drawW) * 0.5f,
+				                   wMin.y + (height - drawH) * 0.5f);
+				const ImVec2 bgMax(bgMin.x + drawW, bgMin.y + drawH);
+				draw->AddImage(
+					static_cast<ImTextureID>(static_cast<intptr_t>(bg->GetHandle())),
+					bgMin, bgMax,
+					ImVec2(0, 1), ImVec2(1, 0),
+					packColor(1.0f, 1.0f, 1.0f, alpha));
+			}
+		}
+
+		const float centerX = wMin.x + width * 0.5f;
+		const float centerY = wMin.y + height * 0.5f;
+
+		Texture2D* logo = TextureManager::GetTexture(m_SplashPreviewLogo);
+		if (logo && logo->IsValid()) {
+			const float maxLogoSide = std::min(width, height) * 0.35f;
+			float logoW = static_cast<float>(logo->GetWidth());
+			float logoH = static_cast<float>(logo->GetHeight());
+			if (logoW > 0 && logoH > 0) {
+				const float scale = std::min(maxLogoSide / logoW, maxLogoSide / logoH);
+				logoW *= scale; logoH *= scale;
+				const ImVec2 imgMin(centerX - logoW * 0.5f, centerY - logoH * 0.65f);
+				const ImVec2 imgMax(imgMin.x + logoW, imgMin.y + logoH);
+				draw->AddImage(
+					static_cast<ImTextureID>(static_cast<intptr_t>(logo->GetHandle())),
+					imgMin, imgMax,
+					ImVec2(0, 1), ImVec2(1, 0),
+					packColor(1.0f, 1.0f, 1.0f, alpha));
+			}
+		}
+
+		const std::string subtitle = project->SplashScreen.CustomText.empty()
+			? std::string("Axiom ") + AIM_VERSION
+			: project->SplashScreen.CustomText;
+		if (!subtitle.empty()) {
+			const ImVec2 textSize = ImGui::CalcTextSize(subtitle.c_str());
+			const ImVec2 textPos(centerX - textSize.x * 0.5f,
+				centerY + std::min(width, height) * 0.18f);
+			draw->AddText(textPos, packColor(1.0f, 1.0f, 1.0f, alpha * 0.85f), subtitle.c_str());
+		}
 	}
 
 	void ImGuiEditorLayer::RenderAssetInspector() {

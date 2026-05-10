@@ -128,8 +128,8 @@ internal unsafe struct NativeBindingsStruct
     public delegate* unmanaged<ulong, int, void> TextRenderer_SetHAlign;
     public delegate* unmanaged<ulong, int> TextRenderer_GetWrapMode;
     public delegate* unmanaged<ulong, int, void> TextRenderer_SetWrapMode;
-    public delegate* unmanaged<ulong, float> TextRenderer_GetWrapWidth;
-    public delegate* unmanaged<ulong, float, void> TextRenderer_SetWrapWidth;
+    // WrapWidth slots removed — wrap area now comes from the host
+    // RectTransform2D's width minus the TextRenderer's Margin (.x + .z).
     public delegate* unmanaged<ulong, int> TextRenderer_GetSortingOrder;
     public delegate* unmanaged<ulong, int, void> TextRenderer_SetSortingOrder;
     public delegate* unmanaged<ulong, int> TextRenderer_GetSortingLayer;
@@ -242,6 +242,7 @@ internal unsafe struct NativeBindingsStruct
     public delegate* unmanaged<ulong, int> Texture_LoadAsset;
     public delegate* unmanaged<ulong, int> Texture_GetWidth;
     public delegate* unmanaged<ulong, int> Texture_GetHeight;
+    public delegate* unmanaged<byte, ulong> Texture_GetDefaultAssetUUID;
     public delegate* unmanaged<ulong, int> Audio_LoadAsset;
     public delegate* unmanaged<ulong, float, void> Audio_PlayOneShotAsset;
     public delegate* unmanaged<ulong, int> Font_LoadAsset;

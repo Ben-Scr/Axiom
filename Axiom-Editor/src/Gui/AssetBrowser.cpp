@@ -866,17 +866,32 @@ namespace Axiom {
 		}
 		else {
 			const float maxWidth = m_TileSize;
-			const std::string& name = entry.Name;
+			// Hide the file extension by default — most users care about
+			// the asset's name, not its extension (the icon already
+			// communicates the type). The project's ShowFileExtensions
+			// flip restores the verbatim filename for users who want it.
+			// The full filename is always shown in the hover tooltip so
+			// power users can confirm what they're looking at.
+			AxiomProject* project = ProjectManager::GetCurrentProject();
+			const bool showExt = project ? project->ShowFileExtensions : false;
+			const std::string& fullName = entry.Name;
+			std::string label = fullName;
+			if (!showExt && !entry.IsDirectory) {
+				const std::string stem = std::filesystem::path(fullName).stem().string();
+				if (!stem.empty()) label = stem;
+			}
 			bool truncated = false;
-			const std::string display = ImGuiUtils::Ellipsize(name, maxWidth, &truncated);
+			const std::string display = ImGuiUtils::Ellipsize(label, maxWidth, &truncated);
 			const float textWidth = ImGui::CalcTextSize(display.c_str()).x;
 			const float offsetX = (maxWidth - textWidth) * 0.5f;
 			if (offsetX > 0.0f) {
 				ImGui::SetCursorPosX(ImGui::GetCursorPosX() + offsetX);
 			}
 			ImGui::TextUnformatted(display.c_str());
-			if (truncated && ImGui::IsItemHovered()) {
-				ImGui::SetTooltip("%s", name.c_str());
+			if (ImGui::IsItemHovered()) {
+				if (truncated || label != fullName) {
+					ImGui::SetTooltip("%s", fullName.c_str());
+				}
 			}
 		}
 

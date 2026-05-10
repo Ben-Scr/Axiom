@@ -58,6 +58,15 @@ namespace Axiom {
 
 		GridLayoutConstraint Constraint = GridLayoutConstraint::Flexible;
 		int ConstraintCount = 1;
+
+		// When true, children are placed in reverse hierarchy order: the
+		// LAST child takes the first cell, the first child takes the last
+		// cell. Useful for stacking-from-the-end layouts (recent-message
+		// lists, undo histories, "newest at top") without rebuilding the
+		// hierarchy. Cell positions still flow from StartCorner along
+		// StartAxis exactly as before — only the children → cells mapping
+		// is reversed.
+		bool Reverse = false;
 	};
 
 }

@@ -160,7 +160,18 @@ namespace Axiom {
 					// PostPoll AFTER glfwPollEvents so derived state (axis) sees this
 					// frame's keys, not last frame's.
 					m_Input.PostPoll();
-					TryCompleteQuitRequest();
+					// Do NOT TryCompleteQuitRequest here — it must run AFTER
+					// BeginFrame's OnPreRender pass so layers (e.g. the
+					// editor's dirty-scene save-before-quit dialog) get to
+					// see Application::IsQuitRequested() and call CancelQuit
+					// before the request auto-completes. RequestQuit calls
+					// originating from a layer's previous-frame OnPreRender
+					// (Application > Quit menu, custom hotkeys, etc.) would
+					// otherwise be completed at the very top of the next
+					// frame — before the intercept has a chance to fire —
+					// because m_QuitRequestFrame < current frame count by
+					// then. The end-of-frame call at the bottom of the loop
+					// is sufficient.
 
 					// Scale at the accumulator input so TimeScale controls step *frequency*.
 					// The step quantum stays unscaled — Box2D's solver needs a constant dt
@@ -384,26 +395,76 @@ namespace Axiom {
 		AIM_INFO_TAG("SceneManager", "Initialization took " + StringHelper::ToString(timer));
 		ConfigureLayers();
 
+		// Preload-frame: render whatever layers ConfigureLayers pushed
+		// (typically a splash overlay in shipped builds) BEFORE the
+		// potentially seconds-long blocking InitializeStartupScenes call
+		// below. Without this, the user stares at a black window for the
+		// duration of every Awake/Start in the startup scene; the splash
+		// only appeared after scenes had finished loading. Render twice:
+		// the first frame initializes ImGui's context-bound resources and
+		// often draws nothing visible, the second actually paints.
+		RenderOnceForRefresh();
+		RenderOnceForRefresh();
+
+		// Apply the project's custom cursor images (always-on default
+		// + UI hover variant). UIEventSystem flips between the two each
+		// frame via Window::SetCursorOverUI; loading them here once
+		// avoids re-decoding the texture per swap. Cursor support runs
+		// in both editor and shipped runtime so authored projects get
+		// the same look in either host.
+		{
+			AxiomProject* project = ProjectManager::GetCurrentProject();
+			auto applyCursor = [&](const std::string& projectPath, void (Window::*setter)(const Texture2D*))
+			{
+				if (!project || projectPath.empty()) return;
+				std::filesystem::path absPath(projectPath);
+				if (!absPath.is_absolute()) {
+					absPath = std::filesystem::path(project->RootDirectory) / projectPath;
+				}
+				if (!std::filesystem::exists(absPath)) {
+					AIM_WARN_TAG("Application", "Cursor image not found: {}", absPath.string());
+					return;
+				}
+				TextureHandle h = TextureManager::LoadTexture(absPath.string());
+				if (Texture2D* tex = TextureManager::GetTexture(h); tex && tex->IsValid()) {
+					(m_Window.get()->*setter)(tex);
+				}
+			};
+			if (project) {
+				applyCursor(project->CursorImagePath, &Window::SetCursorImage);
+				applyCursor(project->UIInteractableCursorImagePath, &Window::SetUICursorImage);
+			}
+		}
+
 		if (m_Configuration.SetWindowIcon) {
 			m_Window->SetWindowIconFromResource();
 
-			AxiomProject* project = ProjectManager::GetCurrentProject();
-			if (project && !project->AppIconPath.empty()) {
-				// AppIconPath is stored project-relative (e.g.
-				// "Assets/icon.png"). TextureManager::ResolveTexturePath
-				// only checks CWD / engine AxiomAssets / <exe>/Assets/Textures,
-				// none of which equal "<project>/Assets/icon.png" once the
-				// editor or runtime is launched from anywhere other than
-				// the project dir. Prepend the project root explicitly so
-				// the load works regardless of the working directory.
-				std::filesystem::path iconPath(project->AppIconPath);
-				if (!iconPath.is_absolute()) {
-					iconPath = std::filesystem::path(project->RootDirectory) / project->AppIconPath;
-				}
-				TextureHandle h = TextureManager::LoadTexture(iconPath.string());
-				Texture2D* tex = TextureManager::GetTexture(h);
-				if (tex && tex->IsValid()) {
-					m_Window->SetWindowIcon(tex);
+			// AppIconPath is the icon for the SHIPPED game's window (and
+			// what the editor's build pipeline embeds into the runtime
+			// .exe). Applying it here in the editor would replace the
+			// editor's own window icon with the user's game icon, which
+			// isn't what the project setting promises — the editor should
+			// keep its embedded RT_ICON regardless of which project is
+			// open. Restrict the load to the runtime host.
+			if (!IsEditor()) {
+				AxiomProject* project = ProjectManager::GetCurrentProject();
+				if (project && !project->AppIconPath.empty()) {
+					// AppIconPath is stored project-relative (e.g.
+					// "Assets/icon.png"). TextureManager::ResolveTexturePath
+					// only checks CWD / engine AxiomAssets / <exe>/Assets/Textures,
+					// none of which equal "<project>/Assets/icon.png" once
+					// the runtime is launched from anywhere other than the
+					// project dir. Prepend the project root explicitly so
+					// the load works regardless of the working directory.
+					std::filesystem::path iconPath(project->AppIconPath);
+					if (!iconPath.is_absolute()) {
+						iconPath = std::filesystem::path(project->RootDirectory) / project->AppIconPath;
+					}
+					TextureHandle h = TextureManager::LoadTexture(iconPath.string());
+					Texture2D* tex = TextureManager::GetTexture(h);
+					if (tex && tex->IsValid()) {
+						m_Window->SetWindowIcon(tex);
+					}
 				}
 			}
 		}
@@ -413,15 +474,56 @@ namespace Axiom {
 			PackageHost::LoadAll();
 		}
 
-		m_SceneManager->InitializeStartupScenes();
+		// Splash-gated startup: when the splash overlay is currently
+		// attached (runtime hosts opt in via project.SplashScreen.Enabled
+		// and push the layer in ConfigureLayers), skip the heavy startup
+		// trio here and let TickDeferredStartupScenes drain it once the
+		// splash pops itself at the end of its timeline. The main loop
+		// will tick the splash's OnUpdate / OnPreRender each frame in
+		// the meantime, so the user sees the splash play through cleanly
+		// before any scene-load stutter. Hosts without a splash (editor,
+		// or runtime with SplashScreen disabled) load synchronously here
+		// — the m_DeferredStartupScenes flag stays false and the gate
+		// no-ops every frame.
+		if (m_SplashLayerActive) {
+			m_DeferredStartupScenes = true;
+			AIM_INFO_TAG("Application", "Startup scene load deferred until splash completes.");
+		}
+		else {
+			m_SceneManager->InitializeStartupScenes();
+			ScriptEngine::RaiseApplicationStart();
+			// Baseline for Time.TimeSinceStartup / Time.RealtimeSinceStartup —
+			// excludes window/GL/scene/package init from the "since game start" clock.
+			// In editor preview the editor calls MarkGameStart() again on play-mode
+			// entry so each play session starts at zero.
+			m_Time.MarkGameStart();
+		}
+	}
 
+	void Application::TickDeferredStartupScenes() {
+		// Splash hasn't fired yet — wait. The flag flips false in
+		// SignalSplashDetached, which the splash layer calls from its
+		// OnDetach (after RuntimeImGuiHost::Release).
+		if (!m_DeferredStartupScenes || m_SplashLayerActive) return;
+
+		m_DeferredStartupScenes = false;
+
+		if (m_SceneManager) {
+			AIM_INFO_TAG("Application", "Splash complete — loading startup scenes...");
+			m_SceneManager->InitializeStartupScenes();
+		}
 		ScriptEngine::RaiseApplicationStart();
-
-		// Baseline for Time.TimeSinceStartup / Time.RealtimeSinceStartup —
-		// excludes window/GL/scene/package init from the "since game start" clock.
-		// In editor preview the editor calls MarkGameStart() again on play-mode
-		// entry so each play session starts at zero.
+		// Reset t=0 here rather than at the bottom of Initialize: with
+		// the splash sitting in front of the user for several seconds,
+		// counting that time in Time.timeSinceStartup would make script
+		// timers (cooldowns, fade-ins) start mid-elapsed. Marking the
+		// start now means t=0 == "first frame the player actually sees".
 		m_Time.MarkGameStart();
+		// Drop the leftover dt-jump from the splash period: without this,
+		// the next BeginFrame would feed several seconds' worth of dt into
+		// every system at once, breaking Box2D stability and any unscaled-
+		// dt animation that tweened against actual elapsed time.
+		ResetTimePoints();
 	}
 
 	void Application::BeginFrame() {
@@ -455,6 +557,13 @@ namespace Axiom {
 					layer->OnUpdate(*this, m_Time.GetDeltaTime());
 				}
 			}
+
+			// Splash gate: when the splash layer just popped itself in
+			// the OnUpdate dispatch above, this drains the deferred
+			// startup-scene load so the very next render pass sees a
+			// loaded scene. Runs BEFORE UpdateScenes / OnPreRenderScenes
+			// because both depend on the active scene actually existing.
+			TickDeferredStartupScenes();
 
 			if (gameplayActive && m_SceneManager) m_SceneManager->UpdateScenes();
 

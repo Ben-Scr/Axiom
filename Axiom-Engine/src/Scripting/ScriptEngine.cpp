@@ -1,5 +1,6 @@
 #include "pch.hpp"
 #include "Scripting/ScriptEngine.hpp"
+#include "Scripting/InspectorEventDispatch.hpp"
 #include "Scripting/ScriptBindings.hpp"
 #include "Scene/Scene.hpp"
 #include "Core/Log.hpp"
@@ -169,6 +170,11 @@ namespace Axiom {
 		if (s_Callbacks.LoadUserAssembly)
 		{
 			ShutdownGlobalSystems();
+			// Stale (class, method) entries in the missing-method log refer
+			// to the previous load's class universe. Drop them so a method
+			// that's now valid after the user fixed it doesn't keep getting
+			// suppressed.
+			InspectorEvents::ResetMissingMethodLog();
 			int ok = s_Callbacks.LoadUserAssembly(s_UserAssemblyPath.c_str());
 			AIM_CORE_INFO_TAG("ScriptEngine", "LoadUserAssembly callback returned: {}", ok);
 			s_HasUserAssembly = (ok != 0);

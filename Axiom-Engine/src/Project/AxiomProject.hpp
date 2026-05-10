@@ -107,6 +107,38 @@ namespace Axiom {
 		// window stacks below the stats window so they don't overlap.
 		bool ShowRuntimeLogs = true;
 
+		// Editor-only: auto-save the active scene at a fixed cadence so
+		// an editor crash, BSOD, or accidental Alt+F4 doesn't lose
+		// work-in-progress. The autosave runs on the editor's main
+		// thread (no async writer; SceneSerializer is not thread-safe).
+		// Only fires when the scene is dirty AND not in Play mode — Play
+		// mode persists are deliberately discarded on Stop, and saving
+		// during Play would clobber the user's pre-Play snapshot. Disabled
+		// by default so it stays opt-in.
+		bool AutoSaveScenes = false;
+		float AutoSaveIntervalSeconds = 120.0f;
+
+		// Editor-only: show file extensions in the asset browser and the
+		// rename/create textbox. When false (default), an asset created
+		// from "Create > Scene" displays as "MyScene" rather than
+		// "MyScene.scene", and renaming an existing file pre-fills only
+		// the stem (the extension is preserved automatically on commit).
+		// Mirrors Windows Explorer's "Hide extensions for known file
+		// types" toggle. Power users who routinely retype extensions can
+		// flip this on.
+		bool ShowFileExtensions = false;
+
+		// Custom cursor images. Both are project-relative paths (same
+		// convention as AppIconPath), loaded via TextureManager into a
+		// `Window` cursor at init. Empty = use the OS default.
+		//   • CursorImagePath — applied as the default cursor (always-on).
+		//   • UIInteractableCursorImagePath — swapped in while the cursor
+		//     hovers an Axiom UI Interactable element (Buttons, Sliders,
+		//     etc.). When empty, the default cursor stays active over UI
+		//     too. UIEventSystem flips between the two each frame.
+		std::string CursorImagePath;
+		std::string UIInteractableCursorImagePath;
+
 		// Build profile — drives compile-time defines emitted to user
 		// scripts at build time:
 		//   • Development → AXIOM_BUILD_DEVELOPMENT (and toggle defaults
@@ -136,6 +168,14 @@ namespace Axiom {
 			float FadeInSeconds = 0.5f;
 			float FadeOutSeconds = 0.5f;
 			std::string ImagePath;
+			// Optional background image painted full-canvas behind the
+			// foreground logo. Same path convention as ImagePath /
+			// AppIconPath (relative to the project root, "Assets/foo.png"
+			// style). Empty = solid Background{R,G,B} fill (the original
+			// behaviour). The image is drawn first with the splash's fade
+			// alpha, then the logo + subtitle paint on top so the colour
+			// fields still act as a fallback if the image fails to load.
+			std::string BackgroundImagePath;
 			std::string CustomText;
 			float BackgroundR = 0.05f;
 			float BackgroundG = 0.05f;

@@ -190,9 +190,39 @@ namespace Axiom {
 	Vec2 Camera2DComponent::ScreenToWorld(Vec2 pos) const
 	{
 		if (!m_Viewport) return { 0.0f, 0.0f };
-		if (m_Viewport->GetWidth() == 0 || m_Viewport->GetHeight() == 0) return { 0.0f, 0.0f };
-		const float xNdc = (2.0f * pos.x / float(m_Viewport->GetWidth())) - 1.0f;
-		const float yNdc = 1.0f - (2.0f * pos.y / float(m_Viewport->GetHeight()));
+
+		// Editor: when the Game View panel is rendering into a sub-rect
+		// of the OS window, mouse coords come in OS-window-relative,
+		// but the camera renders to the panel's pixel rect. Without
+		// remapping here, ScreenToWorld would divide an OS-window
+		// coordinate by the OS-window dimensions and miss the panel's
+		// offset + size — handing back a world point that drifted by
+		// roughly the panel's top-left offset (in world units) and
+		// stretched by the OS-window/panel size ratio. Mirrors the
+		// UIRegion handling UIEventSystem does for hit-testing.
+		//
+		// Runtime: UIRegion stays unset (no editor panel publishing it),
+		// so we fall back to the OS-window viewport — which IS the
+		// camera's render target in shipped builds. Same math as
+		// before, no behavioural change.
+		const Window::UIRegion uiRegion = Window::GetUIRegion();
+		float vpW = 0.0f;
+		float vpH = 0.0f;
+		Vec2 local = pos;
+		if (uiRegion.IsActive()) {
+			local.x -= static_cast<float>(uiRegion.OffsetX);
+			local.y -= static_cast<float>(uiRegion.OffsetY);
+			vpW = static_cast<float>(uiRegion.Width);
+			vpH = static_cast<float>(uiRegion.Height);
+		}
+		else {
+			vpW = static_cast<float>(m_Viewport->GetWidth());
+			vpH = static_cast<float>(m_Viewport->GetHeight());
+		}
+		if (vpW <= 0.0f || vpH <= 0.0f) return { 0.0f, 0.0f };
+
+		const float xNdc = (2.0f * local.x / vpW) - 1.0f;
+		const float yNdc = 1.0f - (2.0f * local.y / vpH);
 
 		const float zNear = 0.0f, zFar = 100.0f;
 		const float zNdc = -(zFar + zNear) / (zFar - zNear);

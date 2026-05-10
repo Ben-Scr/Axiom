@@ -622,14 +622,28 @@ namespace Axiom {
 			const float bakedSize = font->GetPixelSize() > 0.0f ? font->GetPixelSize() : text.FontSize;
 			const float drawScale = (text.FontSize / bakedSize) * uniformScale;
 
-			float baselineY = bl.y + size.y * 0.5f - text.FontSize * 0.35f * uniformScale;
+			// Margin insets are authored in pixels; multiply by the rect's
+			// uniform scale so a margin grows visually with the rect (same
+			// treatment as font-height bias, edge padding).
+			const float marginLeftWorld   = text.Margin.x * uniformScale;
+			const float marginTopWorld    = text.Margin.y * uniformScale;
+			const float marginRightWorld  = text.Margin.z * uniformScale;
+			const float marginBottomWorld = text.Margin.w * uniformScale;
+			(void)marginBottomWorld; // bottom inset reserved for future v-align
+
+			// Baseline still sits near the rect's vertical centre, but the
+			// margin shifts it: positive top inset pushes the baseline DOWN
+			// (text starts further below the rect's top edge).
+			float baselineY = bl.y + size.y * 0.5f
+				- text.FontSize * 0.35f * uniformScale
+				- marginTopWorld;
 
 			float originX;
 			switch (text.HAlign) {
-			case TextAlignment::Center: originX = bl.x + size.x * 0.5f;       break;
-			case TextAlignment::Right:  originX = tr.x - 4.0f * uniformScale; break; // tiny right pad
+			case TextAlignment::Center: originX = bl.x + size.x * 0.5f;                      break;
+			case TextAlignment::Right:  originX = tr.x - 4.0f * uniformScale - marginRightWorld; break; // tiny right pad + margin
 			case TextAlignment::Left:
-			default:                    originX = bl.x + 4.0f * uniformScale; break; // tiny left pad
+			default:                    originX = bl.x + 4.0f * uniformScale + marginLeftWorld;  break; // tiny left pad + margin
 			}
 
 			TextDrawCmd cmd;
@@ -641,24 +655,27 @@ namespace Axiom {
 			cmd.LetterSpacing = text.LetterSpacing;
 			cmd.Tint = text.Color;
 			cmd.Align = text.HAlign;
-			// UI text inherits the host rect's width as the wrap area
-			// when WrapWidth is unset (the typical case). The renderer
-			// expects the wrap width in atlas-pixel units (the same
-			// domain glyph advances live in), but `size.x` is the rect's
-			// world-space width post-`uniformScale`; divide back out so
-			// the wrap test happens before `Scale` is reapplied inside
-			// EmitText. Trim ~8 px (4 px of left-pad + 4 px of right-pad)
-			// matching the alignment biases above so wrapped lines stay
-			// flush against the same insets the unwrapped path uses.
+			// UI text inherits the host rect's width as the wrap area.
+			// The renderer expects the wrap width in atlas-pixel units
+			// (the same domain glyph advances live in), but `size.x` is
+			// the rect's world-space width post-`uniformScale`; divide
+			// back out so the wrap test happens before `Scale` is
+			// reapplied inside EmitText. Trim ~8 px (4 px of left-pad +
+			// 4 px of right-pad) matching the alignment biases above
+			// so wrapped lines stay flush against the same insets the
+			// unwrapped path uses. The margin (left + right) further
+			// reduces the wrap area so authored insets actually narrow
+			// the line-break test. The historical explicit WrapWidth
+			// override was removed — Margin already exposes the same
+			// inset and the dual-source wrap area was confusing in the
+			// inspector.
 			cmd.Wrap = text.WrapMode;
 			if (text.WrapMode != TextWrapMode::None) {
 				const float padPixels = 8.0f * uniformScale;
-				const float fromRectPixels = uniformScale > 0.0f
-					? std::max(0.0f, (size.x - padPixels) / uniformScale)
+				const float marginPixels = marginLeftWorld + marginRightWorld;
+				cmd.WrapWidthPixels = uniformScale > 0.0f
+					? std::max(0.0f, (size.x - padPixels - marginPixels) / uniformScale)
 					: 0.0f;
-				cmd.WrapWidthPixels = text.WrapWidth > 0.0f
-					? text.WrapWidth
-					: fromRectPixels;
 			}
 			// Honour the component's authored sort fields so text and
 			// images compete in one z-stack. Default (0,0) ties an

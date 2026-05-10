@@ -394,8 +394,7 @@ internal static unsafe class InternalCalls
     internal static void TextRenderer_SetHAlign(ulong id, int alignment) => NativeCallbacks.Bindings.TextRenderer_SetHAlign(id, alignment);
     internal static int TextRenderer_GetWrapMode(ulong id) => NativeCallbacks.Bindings.TextRenderer_GetWrapMode(id);
     internal static void TextRenderer_SetWrapMode(ulong id, int mode) => NativeCallbacks.Bindings.TextRenderer_SetWrapMode(id, mode);
-    internal static float TextRenderer_GetWrapWidth(ulong id) => NativeCallbacks.Bindings.TextRenderer_GetWrapWidth(id);
-    internal static void TextRenderer_SetWrapWidth(ulong id, float width) => NativeCallbacks.Bindings.TextRenderer_SetWrapWidth(id, width);
+    // WrapWidth helpers removed alongside the field.
     internal static int TextRenderer_GetSortingOrder(ulong id) => NativeCallbacks.Bindings.TextRenderer_GetSortingOrder(id);
     internal static void TextRenderer_SetSortingOrder(ulong id, int order) => NativeCallbacks.Bindings.TextRenderer_SetSortingOrder(id, order);
     internal static int TextRenderer_GetSortingLayer(ulong id) => NativeCallbacks.Bindings.TextRenderer_GetSortingLayer(id);
@@ -607,6 +606,7 @@ internal static unsafe class InternalCalls
     internal static bool Texture_LoadAsset(ulong assetId) => assetId != 0 && NativeCallbacks.Bindings.Texture_LoadAsset(assetId) != 0;
     internal static int Texture_GetWidth(ulong assetId) => NativeCallbacks.Bindings.Texture_GetWidth(assetId);
     internal static int Texture_GetHeight(ulong assetId) => NativeCallbacks.Bindings.Texture_GetHeight(assetId);
+    internal static ulong Texture_GetDefaultAssetUUID(byte which) => NativeCallbacks.Bindings.Texture_GetDefaultAssetUUID(which);
 
     internal static bool Audio_LoadAsset(ulong assetId) => assetId != 0 && NativeCallbacks.Bindings.Audio_LoadAsset(assetId) != 0;
     internal static void Audio_PlayOneShotAsset(ulong assetId, float volume) => NativeCallbacks.Bindings.Audio_PlayOneShotAsset(assetId, volume);

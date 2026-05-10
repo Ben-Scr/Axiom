@@ -334,16 +334,48 @@ public class Entity : IEquatable<Entity>
             if (doc.RootElement.ValueKind != JsonValueKind.Object)
                 return;
 
+            const BindingFlags k_Flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
             Type type = component.GetType();
             foreach (JsonProperty property in doc.RootElement.EnumerateObject())
             {
-                FieldInfo? field = type.GetField(property.Name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                if (field == null)
-                    continue;
+                string raw = property.Value.GetString() ?? "";
 
-                object? value = ParseManagedFieldValue(field.FieldType, property.Value.GetString() ?? "");
-                if (value != null)
-                    field.SetValue(component, value);
+                // Field path first (matches the historical behaviour and
+                // is the cheap path).
+                FieldInfo? field = type.GetField(property.Name, k_Flags);
+                if (field != null)
+                {
+                    object? value = ParseManagedFieldValue(field.FieldType, raw);
+                    if (value != null)
+                        field.SetValue(component, value);
+                    continue;
+                }
+
+                // Fall back to a property if no field with that name —
+                // lets a managed component expose validated setters via
+                // public properties and still round-trip through the
+                // scene file. Honour the same setter-must-be-public
+                // contract the inspector applies; properties without an
+                // accessible setter can't accept the deserialized value.
+                PropertyInfo? prop = type.GetProperty(property.Name, k_Flags);
+                if (prop == null) continue;
+                if (!prop.CanWrite || prop.SetMethod == null || !prop.SetMethod.IsPublic) continue;
+
+                object? propValue = ParseManagedFieldValue(prop.PropertyType, raw);
+                if (propValue == null) continue;
+
+                try
+                {
+                    prop.SetValue(component, propValue);
+                }
+                catch
+                {
+                    // Validation in the user's setter rejected the
+                    // stored value (e.g. saved scene predates a tighter
+                    // invariant). Outer try-catch already swallows, but
+                    // keep this local so one bad property doesn't abort
+                    // the rest of the field bag.
+                }
             }
         }
         catch

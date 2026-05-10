@@ -3,6 +3,7 @@
 #include "Core/Application.hpp"
 #include "Core/Assert.hpp"
 #include "Core/Window.hpp"
+#include "Events/AxiomEvent.hpp"
 #include "Packages/PackageImGuiBridge.hpp"
 #include "Serialization/Path.hpp"
 
@@ -117,6 +118,37 @@ namespace Axiom {
 		ImGuiIO& io = ImGui::GetIO();
 		m_IniFilePath = ResolveEditorIniFilePath();
 		io.IniFilename = m_IniFilePath.c_str();
+		// Reduce ImGui's lazy-save timer from 5s → 1s. With the long
+		// timer a user who docked / resized / closed a window inside
+		// the last 5 seconds and then rage-quit (kill from Task
+		// Manager, BSOD, segfault during a hot-reload script,
+		// frame-loop exception, …) loses the layout because the
+		// auto-save timer never expired and the OnDetach explicit
+		// save never ran. 1s is short enough that the dirty window
+		// is small without thrashing the disk on every drag pixel
+		// (ImGui only re-evaluates layout state on widget completion,
+		// not on every mouse move).
+		io.IniSavingRate = 1.0f;
+		// Belt-and-suspenders load. ImGui's NewFrame would auto-load
+		// on the first frame anyway, but doing it explicitly here
+		// (a) makes it easy to confirm via the log whether the file
+		// was found at the resolved path and (b) means any code path
+		// that touches ImGui state BEFORE the first NewFrame (e.g.
+		// PackageImGuiBridge plumbing) operates against the loaded
+		// settings rather than ImGui's compiled-in defaults.
+		std::error_code loadEc;
+		const bool iniFileExists = std::filesystem::is_regular_file(m_IniFilePath, loadEc);
+		const std::uintmax_t iniFileSize = iniFileExists
+			? std::filesystem::file_size(m_IniFilePath, loadEc)
+			: 0u;
+		if (iniFileExists) {
+			ImGui::LoadIniSettingsFromDisk(m_IniFilePath.c_str());
+		}
+		AIM_CORE_INFO_TAG("ImGui",
+			"Editor layout file: {} ({}, {} bytes)",
+			m_IniFilePath,
+			iniFileExists ? "loaded" : "missing — defaults will be used",
+			iniFileSize);
 		io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
 		// Edge-resize left at default (true). Forcing it false combined with the
 		// transparent ResizeGrip colors below made undocked floating windows
@@ -170,6 +202,28 @@ namespace Axiom {
 			return;
 		}
 
+		// Flush pending layout changes to imgui.ini BEFORE DestroyContext.
+		// ImGui's auto-save is timer-driven (`g.SettingsDirtyTimer`
+		// decays at IniSavingRate, lowered to 1s in OnAttach above);
+		// a user who docks a panel and immediately closes the editor
+		// would otherwise lose that change because the timer never
+		// reached 0. Calling SaveIniSettingsToDisk explicitly drains
+		// the dirty flag regardless of timer state. Skipped when
+		// there's no IniFilename or the path is empty. We also
+		// confirm the file appeared on disk + log the path so a "I
+		// quit and the layout reset" report has actionable evidence
+		// (the path the editor wrote to + whether the write actually
+		// produced a file).
+		const ImGuiIO& io = ImGui::GetIO();
+		if (io.IniFilename != nullptr && *io.IniFilename != '\0') {
+			ImGui::SaveIniSettingsToDisk(io.IniFilename);
+			std::error_code ec;
+			const bool exists = std::filesystem::is_regular_file(io.IniFilename, ec);
+			AIM_CORE_INFO_TAG("ImGui", "Saved editor layout to {} ({})",
+				io.IniFilename,
+				exists ? "ok" : "WRITE FAILED — path not writable?");
+		}
+
 		ImGui_ImplOpenGL3_Shutdown();
 		ImGui_ImplGlfw_Shutdown();
 		PackageImGuiBridge::Clear();
@@ -196,6 +250,63 @@ namespace Axiom {
 		}
 		ImGui::Render();
 		ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+
+		// Belt-and-suspenders settings flush — runs after ImGui::Render
+		// has finalised the frame's settings state, so any dock split,
+		// window close, or layout mutation issued during this frame is
+		// guaranteed visible to SaveIniSettingsToDisk.
+		FlushSettingsIfDirtyOrPeriodic();
+	}
+
+	void ImGuiContextLayer::FlushSettingsIfDirtyOrPeriodic() {
+		// 5 second cap between forced saves. Tight enough that a hard
+		// quit (process kill, BSOD) loses at most a few seconds of
+		// layout work; slow enough that the editor isn't writing the
+		// same bytes hundreds of times per session under steady-state
+		// (no layout edits happening).
+		constexpr float k_PeriodicSaveSeconds = 5.0f;
+
+		if (!m_IsInitialized) return;
+		ImGuiIO& io = ImGui::GetIO();
+		if (io.IniFilename == nullptr || *io.IniFilename == '\0') return;
+
+		const auto now = std::chrono::steady_clock::now();
+		const float secondsSinceSave = std::chrono::duration<float>(
+			now - m_LastSaveTime).count();
+
+		// `WantSaveIniSettings` flips true when ImGui has a dirty
+		// settings state that its internal auto-save couldn't flush
+		// for some reason (e.g. a late-frame mutation past the timer
+		// expiry). The periodic save catches the rest — anything
+		// that ImGui's MarkSettingsDirty path missed because the
+		// caller didn't trip a known-dirty hook.
+		const bool shouldSave = io.WantSaveIniSettings
+			|| secondsSinceSave >= k_PeriodicSaveSeconds;
+		if (!shouldSave) return;
+
+		ImGui::SaveIniSettingsToDisk(io.IniFilename);
+		io.WantSaveIniSettings = false;
+		m_LastSaveTime = now;
+	}
+
+	void ImGuiContextLayer::OnEvent(Application& app, AxiomEvent& event) {
+		(void)app;
+		if (!m_IsInitialized) return;
+		// Save on focus loss (Alt-Tab away, click into a different
+		// app). The user typically iterates layout → switch to docs /
+		// IDE / Photoshop → back, and a session that crashes or is
+		// killed in that "background" interval would lose the most
+		// recent layout work without this. Triggered via the event
+		// system (registered as a Layer::OnEvent) so we don't have to
+		// poll glfwGetWindowAttrib(GLFW_FOCUSED) every frame.
+		if (event.GetEventType() == EventType::WindowLostFocus) {
+			ImGuiIO& io = ImGui::GetIO();
+			if (io.IniFilename != nullptr && *io.IniFilename != '\0') {
+				ImGui::SaveIniSettingsToDisk(io.IniFilename);
+				io.WantSaveIniSettings = false;
+				m_LastSaveTime = std::chrono::steady_clock::now();
+			}
+		}
 	}
 
 	void ImGuiContextLayer::ApplyAxiomTheme() {

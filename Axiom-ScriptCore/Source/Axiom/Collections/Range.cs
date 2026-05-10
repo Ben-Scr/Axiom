@@ -50,4 +50,14 @@ public struct Range
         if (value > Max) return Max;
         return value;
     }
+
+    public bool OutOfBounds(float value)
+    {
+        return value < Min || value > Max;
+    }
+
+     public override string ToString()
+    {
+        return $"Range({Min}, {Max})";
+    }
 }

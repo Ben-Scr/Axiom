@@ -42,7 +42,21 @@ namespace Axiom {
 
 		std::string m_Subtitle;
 		TextureHandle m_Logo;
+		// Optional full-screen background image. Loaded from
+		// project->SplashScreen.BackgroundImagePath the first frame
+		// of the splash; same lifetime + reference-token rules as
+		// m_Logo so the texture survives PurgeUnreferenced.
+		TextureHandle m_Background;
 		bool m_LogoLoadAttempted = false;
+		// PurgeUnreferenced (called from SceneManager::LoadScene → UnloadAllScenes
+		// during InitializeStartupScenes) frees every TextureManager slot that
+		// no live Scene's component still references. The splash's m_Logo isn't
+		// in any ECS, so without an explicit reference provider it gets
+		// unloaded the moment the startup scene loads — and the very next
+		// frame's GetTexture(m_Logo) prints "Invalid texture generation" once
+		// the slot is recycled. We register a provider in OnAttach to opt the
+		// splash logo into the purge sweep as a kept reference.
+		std::uint32_t m_TextureRefToken = 0;
 
 		bool m_RequestPop = false;
 	};
