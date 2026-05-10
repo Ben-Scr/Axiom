@@ -1,71 +1,31 @@
 #include "pch.hpp"
-#include "OpenGL.hpp"
-#include <glad/glad.h>
-#include <GLFW/glfw3.h>
+#include "Graphics/OpenGL.hpp"
+
+#include "Graphics/RenderApi.hpp"
+
+// Thin back-compat shim — see OpenGL.hpp for the migration story. Every
+// method here forwards directly to `RenderApi`.
 
 namespace Axiom {
-	bool OpenGL::s_IsInitialized = false;
-	std::string OpenGL::s_VersionString;
-	std::string OpenGL::s_VendorString;
-	std::string OpenGL::s_RendererString;
-
-	static std::string GLStringOrEmpty(GLenum name) {
-		const GLubyte* s = glGetString(name);
-		return s ? std::string(reinterpret_cast<const char*>(s)) : std::string{};
-	}
 
 	bool OpenGL::Initialize(const GLInitSpecifications& glInitSpecs) {
-		if (s_IsInitialized) return false;
-
-		AIM_ASSERT(gladLoadGLLoader((GLADloadproc)glfwGetProcAddress), AxiomErrorCode::Undefined, "Failed to initialize OpenGL");
-		SetClearColor(glInitSpecs.ClearColor);
-
-		Enable(GL_BLEND);
-		BlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-		CullFace(glInitSpecs.CullingMode);
-
-		s_VersionString  = GLStringOrEmpty(GL_VERSION);
-		s_VendorString   = GLStringOrEmpty(GL_VENDOR);
-		s_RendererString = GLStringOrEmpty(GL_RENDERER);
-
-		s_IsInitialized = true;
-		return true;
+		return RenderApi::Init(glInitSpecs);
 	}
 
-	const std::string& OpenGL::GetVersionString()  { return s_VersionString; }
-	const std::string& OpenGL::GetVendorString()   { return s_VendorString; }
-	const std::string& OpenGL::GetRendererString() { return s_RendererString; }
-	void OpenGL::BlendFunc(GLenum sFactor, GLenum dFactor) {
-		glBlendFunc(sFactor, dFactor);
-	}
-
-	void OpenGL::Enable(GLenum glEnum){
-		glEnable(glEnum);
-	}
-	void OpenGL::Disable(GLenum glEnum) {
-		glDisable(glEnum);
-	}
-
-	void OpenGL::CullFace(GLCullingMode cullingMode) {
-		// Scoped enum: explicit cast to GLenum is required since the underlying
-		// integer is no longer implicitly convertible.
-		if (cullingMode == GLCullingMode::None) {
-			glDisable(GL_CULL_FACE);
-		}
-		else {
-			glEnable(GL_CULL_FACE);
-			glCullFace(static_cast<GLenum>(cullingMode));
-		}
+	bool OpenGL::IsInitialized() {
+		return RenderApi::IsInitialized();
 	}
 
 	void OpenGL::SetClearColor(const Color& clearColor) {
-		glClearColor(clearColor.r, clearColor.g, clearColor.b, clearColor.a);
+		RenderApi::SetClearColor(clearColor);
 	}
 
-	Color OpenGL::GetClearColor()
-	{
-		GLfloat c[4] = {};
-		glGetFloatv(GL_COLOR_CLEAR_VALUE, c);
-		return Color{ c[0], c[1], c[2], c[3] };
+	Color OpenGL::GetClearColor() {
+		return RenderApi::GetClearColor();
 	}
-}
+
+	const std::string& OpenGL::GetVersionString()  { return RenderApi::GetVersionString(); }
+	const std::string& OpenGL::GetVendorString()   { return RenderApi::GetVendorString(); }
+	const std::string& OpenGL::GetRendererString() { return RenderApi::GetRendererString(); }
+
+} // namespace Axiom

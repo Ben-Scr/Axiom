@@ -3,10 +3,21 @@
 #include "Core/Application.hpp"
 #include "Core/Assert.hpp"
 #include "Core/Window.hpp"
+#include "Packages/PackageImGuiBridge.hpp"
 
 #include <imgui.h>
 #include <backends/imgui_impl_glfw.h>
+#if defined(AIM_RHI_BGFX)
+// Backend now lives inside Axiom-Engine.dll (Axiom-Engine/src/Gui/ImGuiImplBgfx.{hpp,cpp}).
+// We previously static-linked the .cpp into each consumer .exe but bgfx's renderer
+// state is process-global static — having two copies of bgfx (one in engine.dll,
+// one in the .exe) meant the launcher saw `RendererType::Noop` even after
+// engine.dll's bgfx::init brought up D3D11. The header is reached via the engine
+// include path; the four entry points are exported through AXIOM_API.
+#include "Gui/ImGuiImplBgfx.hpp"
+#else
 #include <backends/imgui_impl_opengl3.h>
+#endif
 
 #include <algorithm>
 
@@ -24,6 +35,23 @@ namespace Axiom {
 
 		IMGUI_CHECKVERSION();
 		ImGui::CreateContext();
+
+		// Engine.dll has its own static-linked copy of ImGui under --rhi=bgfx
+		// (so it can host ImGuiImplBgfx alongside bgfx::init). Publish our
+		// context + allocators here so engine.dll's ImGui state can sync to
+		// our context on every backend entry point. See Axiom-Engine/src/
+		// Gui/ImGuiImplBgfx.cpp `SyncImGuiContextFromBridge`.
+		{
+			ImGuiMemAllocFunc allocFn = nullptr;
+			ImGuiMemFreeFunc  freeFn  = nullptr;
+			void*             userData = nullptr;
+			ImGui::GetAllocatorFunctions(&allocFn, &freeFn, &userData);
+			PackageImGuiBridge::Publish(
+				reinterpret_cast<void*>(ImGui::GetCurrentContext()),
+				reinterpret_cast<void*>(allocFn),
+				reinterpret_cast<void*>(freeFn),
+				userData);
+		}
 
 		ImGuiIO& io = ImGui::GetIO();
 		io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
@@ -43,8 +71,15 @@ namespace Axiom {
 		fontCfg.SizePixels = 13.0f * dpiScale;
 		io.Fonts->AddFontDefault(&fontCfg);
 
+#if defined(AIM_RHI_BGFX)
+		AIM_VERIFY(ImGui_ImplGlfw_InitForOther(glfwWindow, true),
+			"Failed to init glfw for imgui (bgfx backend)!");
+		AIM_VERIFY(ImGuiImplBgfx::Init(),
+			"Failed to init bgfx imgui backend (shader binaries missing?)");
+#else
 		AIM_VERIFY(ImGui_ImplGlfw_InitForOpenGL(glfwWindow, true), "Failed to init glfw for imgui!");
 		AIM_VERIFY(ImGui_ImplOpenGL3_Init("#version 330 core"), "Failed to init openGL3 for imgui!");
+#endif
 
 		ApplyAxiomTheme();
 		// Must run after the theme — ScaleAllSizes is multiplicative on the
@@ -60,8 +95,13 @@ namespace Axiom {
 			return;
 		}
 
+#if defined(AIM_RHI_BGFX)
+		ImGuiImplBgfx::Shutdown();
+#else
 		ImGui_ImplOpenGL3_Shutdown();
+#endif
 		ImGui_ImplGlfw_Shutdown();
+		PackageImGuiBridge::Clear();
 		ImGui::DestroyContext();
 
 		m_IsInitialized = false;
@@ -72,7 +112,11 @@ namespace Axiom {
 		if (!m_IsInitialized) {
 			return;
 		}
+#if defined(AIM_RHI_BGFX)
+		ImGuiImplBgfx::NewFrame();
+#else
 		ImGui_ImplOpenGL3_NewFrame();
+#endif
 		ImGui_ImplGlfw_NewFrame();
 		ImGui::NewFrame();
 	}
@@ -83,7 +127,14 @@ namespace Axiom {
 			return;
 		}
 		ImGui::Render();
+#if defined(AIM_RHI_BGFX)
+		// View 255: ImGui overlays everything else (bgfx flushes views in
+		// numeric order; the launcher only uses view 0 for its window
+		// clear so 255 is comfortably above any other submission).
+		ImGuiImplBgfx::RenderDrawData(ImGui::GetDrawData(), 255);
+#else
 		ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+#endif
 	}
 
 	void ImGuiContextLayer::ApplyAxiomTheme() {

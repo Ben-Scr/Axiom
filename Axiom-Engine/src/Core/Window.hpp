@@ -132,7 +132,11 @@ namespace Axiom {
 		void Create(const WindowSpecification& props);
 		void SyncViewportFromFramebuffer();
 		void UpdateViewport();
-		void SwapBuffers() const { glfwSwapBuffers(m_GLFWwindow); }
+		// Present the rendered frame to the OS window. Implementation lives
+		// in Window.cpp because the bgfx backend (--rhi=bgfx) presents via
+		// `bgfx::frame()` rather than `glfwSwapBuffers` — see the
+		// implementation for the per-backend branch.
+		void SwapBuffers() const;
 
 		bool ShouldClose() const { return glfwWindowShouldClose(m_GLFWwindow); }
 		Vec2Int GetScreenCenter() const;

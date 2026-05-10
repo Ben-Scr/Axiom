@@ -9,7 +9,11 @@
 
 #include <imgui.h>
 #include <backends/imgui_impl_glfw.h>
+#if defined(AIM_RHI_BGFX)
+#include "Gui/ImGuiImplBgfx.hpp"
+#else
 #include <backends/imgui_impl_opengl3.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -185,8 +189,18 @@ namespace Axiom {
 				13.0f * dpiScale, &latinCfg, latin1Range);
 		}
 
+#if defined(AIM_RHI_BGFX)
+		// Under bgfx the GLFW window has no GL context (GLFW_NO_API), so
+		// the OpenGL-flavoured initializer would assert; use ImGui's
+		// "Other" GLFW init that doesn't bind a GL context.
+		AIM_VERIFY(ImGui_ImplGlfw_InitForOther(glfwWindow, true),
+			"Failed to init glfw for imgui (bgfx backend)!");
+		AIM_VERIFY(ImGuiImplBgfx::Init(),
+			"Failed to init bgfx imgui backend (shader binaries missing?)");
+#else
 		AIM_VERIFY(ImGui_ImplGlfw_InitForOpenGL(glfwWindow, true), "Failed to init glfw for imgui!");
 		AIM_VERIFY(ImGui_ImplOpenGL3_Init("#version 330 core"), "Failed to init openGL3 for imgui!");
+#endif
 
 		ApplyAxiomTheme();
 		// Must run after the theme — ScaleAllSizes is multiplicative on the
@@ -224,7 +238,11 @@ namespace Axiom {
 				exists ? "ok" : "WRITE FAILED — path not writable?");
 		}
 
+#if defined(AIM_RHI_BGFX)
+		ImGuiImplBgfx::Shutdown();
+#else
 		ImGui_ImplOpenGL3_Shutdown();
+#endif
 		ImGui_ImplGlfw_Shutdown();
 		PackageImGuiBridge::Clear();
 		ImGui::DestroyContext();
@@ -238,7 +256,11 @@ namespace Axiom {
 		if (!m_IsInitialized) {
 			return;
 		}
+#if defined(AIM_RHI_BGFX)
+		ImGuiImplBgfx::NewFrame();
+#else
 		ImGui_ImplOpenGL3_NewFrame();
+#endif
 		ImGui_ImplGlfw_NewFrame();
 		ImGui::NewFrame();
 	}
@@ -249,7 +271,16 @@ namespace Axiom {
 			return;
 		}
 		ImGui::Render();
+#if defined(AIM_RHI_BGFX)
+		// View 255 is the conventional "UI overlay last" view-id in bgfx
+		// — submission order is sequential per view, and bgfx::frame
+		// flushes all views in numeric order. Putting ImGui at the top
+		// guarantees it overlays whatever the editor's per-panel views
+		// drew first.
+		ImGuiImplBgfx::RenderDrawData(ImGui::GetDrawData(), 255);
+#else
 		ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+#endif
 
 		// Belt-and-suspenders settings flush — runs after ImGui::Render
 		// has finalised the frame's settings state, so any dock split,

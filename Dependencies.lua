@@ -79,7 +79,11 @@ end
 Dependency = {}
 Dependency["ImGui"] =
 {
-    IncludeDirs = { "%{IncludeDir.ImGui}", "%{IncludeDir.ImGui}/backends", "%{IncludeDir.GLFW}", "%{IncludeDir.Glad}" },
+    -- Glad include dropped along with the legacy direct-OpenGL path on
+    -- 2026-05; ImGui's own backends compile from imgui_impl_glfw + the
+    -- engine-side Gui/ImGuiImplBgfx.cpp under bgfx, neither of which
+    -- needs glad.
+    IncludeDirs = { "%{IncludeDir.ImGui}", "%{IncludeDir.ImGui}/backends", "%{IncludeDir.GLFW}" },
     BuildProject = true
 }
 
@@ -101,7 +105,6 @@ Dependency["ExternalIncludes"] =
         "%{IncludeDir.MagicEnum}",
         "%{IncludeDir.MiniAudio}",
         "%{IncludeDir.Cereal}",
-        "%{IncludeDir.Glad}",
         "%{IncludeDir.AxiomPhysics}"
     }
 }
@@ -140,36 +143,45 @@ Dependency["EngineCore"] =
     Links = {}
 }
 
+-- Render-API backend dispatch. The legacy direct-OpenGL path was retired
+-- on 2026-05; the engine renders exclusively through bgfx, with the
+-- runtime backend (D3D11/D3D12/Vulkan/OpenGL/Metal) selected per-project
+-- via the BgfxBackend setting at bgfx::init time. Engine code talks to
+-- the GPU through Graphics::RenderApi, so consumers don't care which
+-- bgfx backend is active.
 Dependency["EngineCoreRender"] =
 {
     IncludeDirs =
     {
         "%{IncludeDir.GLFW}",
-        "%{IncludeDir.Glad}"
+        "External/bgfx/include",
+        "External/bx/include",
+        "External/bimg/include",
     },
 
     LibDirs = {},
 
-    -- GLFW + Glad are SharedLibs to avoid duplicating their global state across
-    -- engine.dll and each consumer .exe. Consumers must define the import-side
-    -- macros (the libs themselves define the *_BUILD variants in their own premake).
     Defines =
     {
         "GLFW_DLL",
-        "GLAD_GLAPI_EXPORT"
+        -- Match the bgfx-side define so headers compiled in the engine see
+        -- the same renderer-config decisions as the bgfx static lib.
+        "BGFX_CONFIG_MULTITHREADED=0",
+        -- Consumer-side mirror of the engine's AIM_RHI_BGFX define. Kept
+        -- (rather than dropped) so the rare TU still reaching for the
+        -- macro doesn't have to update in lockstep with the cleanup —
+        -- AIM_RHI_BGFX simply means "always true" now.
+        "AIM_RHI_BGFX",
     },
 
-    DependsOn =
-    {
-        "Glad",
-        "GLFW"
-    },
+    DependsOn = { "GLFW", "bgfx", "bimg", "bx" },
 
     Links =
     {
-        "Glad",
         "GLFW",
-        "%{Library.OpenGL}"
+        "bgfx",
+        "bimg",
+        "bx",
     }
 }
 

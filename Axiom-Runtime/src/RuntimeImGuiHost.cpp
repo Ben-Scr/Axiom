@@ -1,12 +1,23 @@
 #include "RuntimeImGuiHost.hpp"
 
 #include "Core/Window.hpp"
+#include "Packages/PackageImGuiBridge.hpp"
 #include "Serialization/Path.hpp"
 
 #include <filesystem>
 #include <imgui.h>
 #include <backends/imgui_impl_glfw.h>
+#if defined(AIM_RHI_BGFX)
+// Backend now lives inside Axiom-Engine.dll (Axiom-Engine/src/Gui/ImGuiImplBgfx.{hpp,cpp}).
+// Runtime previously static-linked the .cpp into its own binary, but bgfx's renderer
+// state is process-global static — duplicating bgfx into engine.dll *and* the runtime
+// .exe meant the runtime's bgfx state was uninitialised even after engine.dll's
+// bgfx::init ran. Reaching into engine.dll via the AXIOM_API exports keeps both
+// running against the same bgfx state.
+#include "Gui/ImGuiImplBgfx.hpp"
+#else
 #include <backends/imgui_impl_opengl3.h>
+#endif
 
 namespace Axiom {
 
@@ -28,6 +39,23 @@ namespace Axiom {
 		IMGUI_CHECKVERSION();
 		ImGui::CreateContext();
 
+		// Engine.dll has its own static-linked copy of ImGui under --rhi=bgfx
+		// (so it can host ImGuiImplBgfx alongside bgfx::init). Publish our
+		// context + allocators here so engine.dll's ImGui state can sync to
+		// our context on every backend entry point. See Axiom-Engine/src/
+		// Gui/ImGuiImplBgfx.cpp `SyncImGuiContextFromBridge`.
+		{
+			ImGuiMemAllocFunc allocFn = nullptr;
+			ImGuiMemFreeFunc  freeFn  = nullptr;
+			void*             userData = nullptr;
+			ImGui::GetAllocatorFunctions(&allocFn, &freeFn, &userData);
+			PackageImGuiBridge::Publish(
+				reinterpret_cast<void*>(ImGui::GetCurrentContext()),
+				reinterpret_cast<void*>(allocFn),
+				reinterpret_cast<void*>(freeFn),
+				userData);
+		}
+
 		ImGuiIO& io = ImGui::GetIO();
 		io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
 
@@ -47,6 +75,17 @@ namespace Axiom {
 			io.Fonts->AddFontFromFileTTF(notoPath.c_str(), 13.0f, &latinCfg, latin1Range);
 		}
 
+#if defined(AIM_RHI_BGFX)
+		if (!ImGui_ImplGlfw_InitForOther(glfwWindow, true)) {
+			ImGui::DestroyContext();
+			return false;
+		}
+		if (!ImGuiImplBgfx::Init()) {
+			ImGui_ImplGlfw_Shutdown();
+			ImGui::DestroyContext();
+			return false;
+		}
+#else
 		if (!ImGui_ImplGlfw_InitForOpenGL(glfwWindow, true)) {
 			ImGui::DestroyContext();
 			return false;
@@ -56,6 +95,7 @@ namespace Axiom {
 			ImGui::DestroyContext();
 			return false;
 		}
+#endif
 
 		s_Initialized = true;
 		++s_RefCount;
@@ -68,8 +108,13 @@ namespace Axiom {
 		if (s_RefCount > 0) return;
 		if (!s_Initialized) return;
 
+#if defined(AIM_RHI_BGFX)
+		ImGuiImplBgfx::Shutdown();
+#else
 		ImGui_ImplOpenGL3_Shutdown();
+#endif
 		ImGui_ImplGlfw_Shutdown();
+		PackageImGuiBridge::Clear();
 		ImGui::DestroyContext();
 		s_Initialized = false;
 		s_FrameOpenCount = 0;
@@ -82,7 +127,11 @@ namespace Axiom {
 	void RuntimeImGuiHost::BeginFrame() {
 		if (!s_Initialized) return;
 		if (s_FrameOpenCount == 0) {
+#if defined(AIM_RHI_BGFX)
+			ImGuiImplBgfx::NewFrame();
+#else
 			ImGui_ImplOpenGL3_NewFrame();
+#endif
 			ImGui_ImplGlfw_NewFrame();
 			ImGui::NewFrame();
 		}
@@ -95,7 +144,11 @@ namespace Axiom {
 		--s_FrameOpenCount;
 		if (s_FrameOpenCount == 0) {
 			ImGui::Render();
+#if defined(AIM_RHI_BGFX)
+			ImGuiImplBgfx::RenderDrawData(ImGui::GetDrawData(), 255);
+#else
 			ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+#endif
 		}
 	}
 

@@ -15,6 +15,7 @@
 #include "Gui/ProfilerPanel.hpp"
 #include "Packages/PackageManager.hpp"
 #include "Editor/EditorCamera.hpp"
+#include "Graphics/Framebuffer.hpp"
 #include "Graphics/Texture2D.hpp"
 #include "Graphics/TextureHandle.hpp"
 
@@ -70,16 +71,11 @@ namespace Axiom {
 			std::uint64_t LastTouchTick = 0;
 		};
 
-		struct ViewportFBO {
-			unsigned int FramebufferId = 0;
-			unsigned int ColorTextureId = 0;
-			unsigned int DepthRenderbufferId = 0;
-			Viewport ViewportSize{ 1, 1 };
-		};
-
-		void EnsureFBO(ViewportFBO& fbo, int width, int height);
-		void DestroyFBO(ViewportFBO& fbo);
-
+		// Per-panel render targets are RAII-managed Framebuffers — see
+		// `Graphics/Framebuffer.hpp`. Resize is `m_*FBO.Recreate(w, h)`,
+		// destruction is automatic on layer teardown. The historical
+		// `EnsureFBO`/`DestroyFBO` helpers were carved out as part of Stage 0
+		// of the bgfx port so the editor doesn't include glad anywhere.
 		void EnsureViewportFramebuffer(int width, int height);
 		void DestroyViewportFramebuffer();
 
@@ -95,6 +91,16 @@ namespace Axiom {
 		void RenderBuildPanel();
 		void RenderPlayerSettingsPanel();
 		void RenderProjectSettingsPanel();
+		// Triggered by the Graphics tab's "Apply & Restart Editor" button.
+		// Writes a one-shot helper script next to the editor exe that waits
+		// for the editor process to exit, regenerates premake with the new
+		// `--rhi=<flag>` value, MSBuild-rebuilds Axiom.sln, and re-launches
+		// the editor. Spawns the script detached, then calls
+		// `Application::Quit()` so MSBuild can replace Axiom-Engine.dll
+		// (which the editor process holds locked while running). On failure
+		// (no premake, no MSBuild, write error) populates
+		// `m_RenderingApiRestartError` and leaves the editor running.
+		void RequestRenderingApiRestart();
 		// Splash preview overlay. Drawn on top of the dockspace with an
 		// ImGui foreground draw list so the editor stays interactive
 		// underneath; the preview self-completes after FadeIn +
@@ -199,7 +205,7 @@ namespace Axiom {
 		// Used by the Editor View so UI rects pan/zoom with the editor
 		// camera (and selection gizmos line up); the Game View leaves
 		// it false because runtime UI is screen-locked by design.
-		void RenderSceneIntoFBO(ViewportFBO& fbo, Scene& scene,
+		void RenderSceneIntoFBO(Framebuffer& fbo, Scene& scene,
 			const glm::mat4& vp, const AABB& viewportAABB,
 			bool withGizmos, bool sharedGizmosOnly = false,
 			const Color& clearColor = Color::Background(),
@@ -281,7 +287,7 @@ namespace Axiom {
 		char m_EntityRenameBuffer[256]{};
 		int m_EntityRenameFrameCounter = 0;
 
-		ViewportFBO m_EditorViewFBO;
+		Framebuffer m_EditorViewFBO;
 		EditorCamera m_EditorCamera;
 		bool m_IsEditorViewHovered = false;
 		bool m_IsEditorViewFocused = false;
@@ -292,7 +298,7 @@ namespace Axiom {
 		bool m_IsEntitiesPanelFocused = false;
 		bool m_IsInspectorPanelFocused = false;
 
-		ViewportFBO m_GameViewFBO;
+		Framebuffer m_GameViewFBO;
 		bool m_IsGameViewHovered = false;
 		bool m_IsGameViewFocused = false;
 		int m_GameViewAspectPresetIndex = 0;
@@ -373,6 +379,11 @@ namespace Axiom {
 		std::vector<std::string> m_BuildSceneList;
 		int m_DraggedSceneIndex = -1;
 		bool m_ShowProjectSettings = false;
+		// Last failure message from RequestRenderingApiRestart() (e.g.
+		// premake binary not found, helper script failed to write).
+		// Empty when the last attempt succeeded or no attempt has run.
+		// Surfaced in the Graphics tab below the Apply & Restart button.
+		std::string m_RenderingApiRestartError;
 		bool m_PackageManagerInitialized = false;
 		// Splash preview state. Set by the Show Preview button in the
 		// Player Settings panel; consumed by the editor's chrome update

@@ -84,6 +84,17 @@ project "Axiom-Engine"
         }
     )
 
+    -- ── Render-API backend ─────────────────────────────────────────
+    -- The engine renders exclusively through bgfx. The legacy direct-
+    -- OpenGL path (Backend/OpenGLApi.cpp + Renderer2D.cpp + ... + the
+    -- Shader/*.glsl tree) was retired on 2026-05; the per-resource
+    -- `_Bgfx.cpp` siblings are now the canonical implementations and
+    -- the OpenGL files have been deleted from the tree. The runtime
+    -- backend (D3D11 / D3D12 / Vulkan / OpenGL / Metal) is still
+    -- selectable via the project's BgfxBackend setting at bgfx::init
+    -- time — that's a runtime choice, no rebuild required.
+    defines { "AIM_RHI_BGFX" }
+
     RemoveFilesIfModuleDisabled(AxiomModules.Audio,
         {
             "src/Audio/**",
@@ -135,10 +146,11 @@ project "Axiom-Engine"
         filter {}
     end
 
-    local renderIncludes =
-    {
+    local renderIncludes = {
         "../External/glfw/include",
-        "../External/glad/include"
+        "../External/bgfx/include",
+        "../External/bx/include",
+        "../External/bimg/include",
     }
 
     local audioIncludes =

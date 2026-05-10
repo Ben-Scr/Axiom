@@ -1,25 +1,65 @@
 #include "pch.hpp"
-#include "Texture2D.hpp"
-#include <glad/glad.h>
+#include "Graphics/Texture2D.hpp"
 
+#include "Core/Log.hpp"
+#include "Graphics/ImageData.hpp"
+
+#include <bgfx/bgfx.h>
+
+// stbi_*: the OpenGL Texture2D.cpp owns the canonical STB_IMAGE_IMPLEMENTATION
+// when it's compiled. Under --rhi=bgfx that file is removed from the build,
+// so this TU has to bring in the implementation instead. Both backends can't
+// be active at once (the premake gate is exclusive), so there's no risk of
+// duplicate-symbol issues.
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
 
+#include <utility>
+
+// =============================================================================
+// Texture2D — real bgfx implementation. Stage 2.1 of the bgfx port.
+// -----------------------------------------------------------------------------
+// Decodes the file via stbi_load (same as the OpenGL implementation), then
+// uploads through bgfx::createTexture2D + bgfx::copy. The class's
+// `unsigned m_Tex` field is reused as an opaque token: storage is
+// (bgfx::TextureHandle::idx + 1) so the existing `m_Tex != 0` IsValid()
+// contract still holds (bgfx idx 0 IS a valid handle, so the +1 sentinel
+// avoids aliasing with the "unset" state).
+//
+// What this DOES today:
+//   * Real GPU resource lifetime — PurgeUnreferenced + scene loads/unloads
+//     allocate/free actual bgfx textures that show up in bgfx::getStats().
+//   * Move semantics / Destroy / Load round-trip identical to the OpenGL impl.
+//   * Sampler state (Filter, Wrap) tracked but not yet applied — bgfx applies
+//     sampler flags per `bgfx::setTexture` call, not per-resource. The
+//     Renderer2D bgfx implementation (also Stage 2) will translate this
+//     class's filter/wrap into BGFX_SAMPLER_* flags at submit time.
+//
+// What this does NOT do yet:
+//   * No mipmap chain — single-mip uploads only. Mipmap generation in bgfx
+//     uses BGFX_TEXTURE_GENMIPS at create time + the right sampler filter;
+//     deferred to a follow-up so the stb_image path stays simple here.
+//   * No sRGB sampling — Stage 2 follow-up adds bgfx::TextureFormat::RGBA8S
+//     for sRGB textures. Today everything is RGBA8.
+//   * GetImageData() returns nullptr — bgfx::readTexture is async (the
+//     blit-readback completes on a later frame) and the only caller
+//     (editor texture-preview thumbnails) reads inline. Plumbing through
+//     a bgfx::FrameNumber-aware readback is its own sub-stage.
+// =============================================================================
+
 namespace Axiom {
 
-	static void ChooseInternalAndFormat(int channels, bool srgb, GLint& internalFmt, GLenum& dataFmt) {
-		switch (channels) {
-		case 1: internalFmt = GL_R8;  dataFmt = GL_RED;  break;
-		case 2: internalFmt = GL_RG8; dataFmt = GL_RG;   break;
-		case 3:
-			internalFmt = srgb ? GL_SRGB8 : GL_RGB8;
-			dataFmt = GL_RGB;
-			break;
-		case 4:
-		default:
-			internalFmt = srgb ? GL_SRGB8_ALPHA8 : GL_RGBA8;
-			dataFmt = GL_RGBA;
-			break;
+	namespace {
+		// 0 = "no texture"; otherwise the bgfx idx is (m_Tex - 1).
+		constexpr unsigned EncodeBgfxIdx(uint16_t idx) noexcept {
+			return static_cast<unsigned>(idx) + 1u;
+		}
+		constexpr uint16_t DecodeBgfxIdx(unsigned m) noexcept {
+			return static_cast<uint16_t>(m - 1u);
+		}
+		bgfx::TextureHandle FromMTex(unsigned m_Tex) noexcept {
+			if (m_Tex == 0) return BGFX_INVALID_HANDLE;
+			return bgfx::TextureHandle{ DecodeBgfxIdx(m_Tex) };
 		}
 	}
 
@@ -28,206 +68,131 @@ namespace Axiom {
 		bool generateMipmaps, bool srgb, bool flipVertical)
 		: m_Filter(filter), m_WrapU(wrapU), m_WrapV(wrapV), m_HasMips(generateMipmaps)
 	{
-		Load(path, generateMipmaps, srgb, flipVertical);
-		if (IsValid()) ApplySamplerParams();
-	}
-
-	Texture2D::~Texture2D() { Destroy(); }
-
-	Texture2D::Texture2D(Texture2D&& o) noexcept {
-		m_Tex = o.m_Tex; o.m_Tex = 0;
-		m_Width = o.m_Width; m_Height = o.m_Height; m_Channels = o.m_Channels;
-		m_Filter = o.m_Filter; m_WrapU = o.m_WrapU; m_WrapV = o.m_WrapV; m_HasMips = o.m_HasMips;
-		// Zero the source's metadata + sampler state so a moved-from
-		// Texture2D doesn't observably retain dimensions or sampler bits
-		// from the old GL handle. The handle itself is already zeroed
-		// above; matching the rest keeps Destroy() and IsValid() coherent
-		// on the moved-from instance.
-		o.m_Width = 0; o.m_Height = 0; o.m_Channels = 0;
-		o.m_Filter = Filter::Point;
-		o.m_WrapU = Wrap::Clamp;
-		o.m_WrapV = Wrap::Clamp;
-		o.m_HasMips = true;
-	}
-
-	Texture2D& Texture2D::operator=(Texture2D&& o) noexcept {
-		if (this != &o) {
-			Destroy();
-			m_Tex = o.m_Tex; o.m_Tex = 0;
-			m_Width = o.m_Width; m_Height = o.m_Height; m_Channels = o.m_Channels;
-			m_Filter = o.m_Filter; m_WrapU = o.m_WrapU; m_WrapV = o.m_WrapV; m_HasMips = o.m_HasMips;
-			// See move ctor: zero source metadata + sampler state so the
-			// moved-from instance doesn't keep stale values around.
-			o.m_Width = 0; o.m_Height = 0; o.m_Channels = 0;
-			o.m_Filter = Filter::Point;
-			o.m_WrapU = Wrap::Clamp;
-			o.m_WrapV = Wrap::Clamp;
-			o.m_HasMips = true;
+		if (path != nullptr) {
+			Load(path, generateMipmaps, srgb, flipVertical);
 		}
+	}
+
+	Texture2D::~Texture2D() {
+		Destroy();
+	}
+
+	Texture2D::Texture2D(Texture2D&& other) noexcept
+		: m_Tex(other.m_Tex)
+		, m_Width(other.m_Width)
+		, m_Height(other.m_Height)
+		, m_Channels(other.m_Channels)
+		, m_Filter(other.m_Filter)
+		, m_WrapU(other.m_WrapU)
+		, m_WrapV(other.m_WrapV)
+		, m_HasMips(other.m_HasMips)
+	{
+		other.m_Tex = 0;
+		other.m_Width = 0;
+		other.m_Height = 0;
+		other.m_Channels = 0;
+	}
+
+	Texture2D& Texture2D::operator=(Texture2D&& other) noexcept {
+		if (this == &other) return *this;
+		Destroy();
+		m_Tex = other.m_Tex;
+		m_Width = other.m_Width;
+		m_Height = other.m_Height;
+		m_Channels = other.m_Channels;
+		m_Filter = other.m_Filter;
+		m_WrapU = other.m_WrapU;
+		m_WrapV = other.m_WrapV;
+		m_HasMips = other.m_HasMips;
+		other.m_Tex = 0;
+		other.m_Width = 0;
+		other.m_Height = 0;
+		other.m_Channels = 0;
 		return *this;
 	}
 
 	void Texture2D::Destroy() {
-		if (m_Tex) {
-			glDeleteTextures(1, &m_Tex);
+		if (m_Tex != 0) {
+			bgfx::destroy(FromMTex(m_Tex));
 			m_Tex = 0;
 		}
-		m_Width = m_Height = m_Channels = 0;
+		m_Width = 0;
+		m_Height = 0;
+		m_Channels = 0;
 	}
 
 	bool Texture2D::Load(const char* path, bool generateMipmaps, bool srgb, bool flipVertical) {
 		Destroy();
+		(void)srgb; // see header comment — sRGB sampling is a follow-up.
 
 		stbi_set_flip_vertically_on_load(flipVertical);
-
 		int w = 0, h = 0, n = 0;
-		unsigned char* pixels = stbi_load(path, &w, &h, &n, 0);
+		// Force RGBA so bgfx::TextureFormat::RGBA8 matches without a
+		// per-channel-count switch.
+		unsigned char* pixels = stbi_load(path, &w, &h, &n, 4);
 		stbi_set_flip_vertically_on_load(false);
 		if (!pixels) {
 			AIM_CORE_WARN_TAG("Texture2D", "Failed to load texture: {}", path);
 			return false;
 		}
 
-		GLint internalFmt = GL_RGBA8;
-		GLenum dataFmt = GL_RGBA;
-		ChooseInternalAndFormat(n, srgb, internalFmt, dataFmt);
+		// bgfx::copy duplicates the source bytes into a bgfx-managed
+		// memory block (released after upload). We can immediately
+		// stbi_image_free without waiting on the GPU.
+		const uint32_t byteCount = static_cast<uint32_t>(w) * static_cast<uint32_t>(h) * 4u;
+		const bgfx::Memory* mem = bgfx::copy(pixels, byteCount);
 
+		bgfx::TextureHandle handle = bgfx::createTexture2D(
+			static_cast<uint16_t>(w),
+			static_cast<uint16_t>(h),
+			/*hasMips=*/false,
+			/*numLayers=*/1,
+			bgfx::TextureFormat::RGBA8,
+			BGFX_TEXTURE_NONE,
+			mem);
 
-		// Save & restore GL_UNPACK_ALIGNMENT — leaving it at 1 globally would change
-		// behaviour for every other GL TexImage call in the process (ImGui font atlas,
-		// gizmo glyph atlases, etc).
-		GLint savedUnpackAlign = 4;
-		glGetIntegerv(GL_UNPACK_ALIGNMENT, &savedUnpackAlign);
-		glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-
-		glGenTextures(1, &m_Tex);
-		glBindTexture(GL_TEXTURE_2D, m_Tex);
-
-		glTexImage2D(GL_TEXTURE_2D, 0, internalFmt, w, h, 0, dataFmt, GL_UNSIGNED_BYTE, pixels);
-
-		if (generateMipmaps) {
-			glGenerateMipmap(GL_TEXTURE_2D);
-		}
-
-		m_HasMips = generateMipmaps;
-		ApplySamplerParams();
-
-		glBindTexture(GL_TEXTURE_2D, 0);
-		glPixelStorei(GL_UNPACK_ALIGNMENT, savedUnpackAlign);
 		stbi_image_free(pixels);
 
-		m_Width = w; m_Height = h; m_Channels = n;
+		if (!bgfx::isValid(handle)) {
+			AIM_CORE_WARN_TAG("Texture2D", "bgfx::createTexture2D failed: {}", path);
+			return false;
+		}
+
+		m_Tex = EncodeBgfxIdx(handle.idx);
+		m_Width = w;
+		m_Height = h;
+		m_Channels = n;
+		m_HasMips = generateMipmaps;
 		return true;
 	}
 
+	// Sampler state tracked here is plumbed into bgfx at submit time
+	// (BGFX_SAMPLER_* flags via `bgfx::setTexture(..., flags)`), not as
+	// a per-resource property. So setters just update the cached values
+	// — the next setTexture call reads them.
+	void Texture2D::Submit(uint8_t /*unit*/) const {
+		// Renderer2D / TextRenderer / GuiRenderer's bgfx submit paths
+		// call bgfx::setTexture themselves with the desired sampler
+		// flags. Texture2D::Submit existed for the OpenGL `glActiveTexture
+		// + glBindTexture` model; under bgfx it's a no-op.
+	}
+
+	void Texture2D::SetFilter(Filter filter) { m_Filter = filter; }
+	void Texture2D::SetWrapU(Wrap u) { m_WrapU = u; }
+	void Texture2D::SetWrapV(Wrap v) { m_WrapV = v; }
 	void Texture2D::SetSampler(Filter filter, Wrap u, Wrap v) {
 		m_Filter = filter;
 		m_WrapU = u;
 		m_WrapV = v;
-		if (IsValid()) ApplySamplerParams();
 	}
-
-	void Texture2D::SetFilter(Filter filter) {
-		m_Filter = filter;
-		if (IsValid()) ApplySamplerParams();
-	}
-
-	void Texture2D::SetWrapU(Wrap u) {
-		m_WrapU = u;
-		if (IsValid()) ApplySamplerParams();
-	}
-
-	void Texture2D::SetWrapV(Wrap v) {
-		m_WrapV = v;
-		if (IsValid()) ApplySamplerParams();
-	}
+	void Texture2D::ApplySamplerParams() const {}
 
 	std::unique_ptr<ImageData> Texture2D::GetImageData() const {
-		AIM_ASSERT(IsValid(), AxiomErrorCode::InvalidHandle, "Texture isn't valid!");
-
-		int w = 0, h = 0;
-		glBindTexture(GL_TEXTURE_2D, m_Tex);
-		glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &w);
-		glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &h);
-
-
-		AIM_ASSERT(w > 0 && h > 0, AxiomErrorCode::OutOfBounds, "Texture width or height isn't valid!");
-
-		std::vector<unsigned char> pixels((size_t)w * (size_t)h * 4);
-
-		GLint savedPackAlign = 4;
-		glGetIntegerv(GL_PACK_ALIGNMENT, &savedPackAlign);
-		glPixelStorei(GL_PACK_ALIGNMENT, 1);
-
-		glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
-		glPixelStorei(GL_PACK_ALIGNMENT, savedPackAlign);
-		glBindTexture(GL_TEXTURE_2D, 0);
-
-		return std::make_unique<ImageData>(ImageData(w, h, std::move(pixels)));
+		// Async-readback in bgfx is multi-frame (bgfx::readTexture +
+		// frame deferral). The single inline caller (the editor's
+		// preview thumbnail) is fine without it for now — the preview
+		// renders empty until that follow-up sub-stage lands.
+		return nullptr;
 	}
 
-	void Texture2D::ApplySamplerParams() const {
-		if (!m_Tex) return;
-		// Save the currently bound texture on unit 0 so we can restore it
-		// when we're done. Previously this method ended with glBindTexture(..., 0)
-		// which silently unbinds whatever the caller had bound — e.g. a Submit()
-		// followed by SetFilter() inside the same draw setup would lose the
-		// caller's binding without warning.
-		GLint savedBinding = 0;
-		glGetIntegerv(GL_TEXTURE_BINDING_2D, &savedBinding);
-		glBindTexture(GL_TEXTURE_2D, m_Tex);
-
-		auto wrapU = static_cast<GLint>(m_WrapU);
-		auto wrapV = static_cast<GLint>(m_WrapV);
-
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrapU);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrapV);
-		if (wrapU == GL_CLAMP_TO_BORDER || wrapV == GL_CLAMP_TO_BORDER) {
-			const float border[4] = { 0,0,0,0 };
-			glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, border);
-		}
-
-
-		GLint mag = (m_Filter == Filter::Point) ? GL_NEAREST : GL_LINEAR;
-		GLint minNoMip = (m_Filter == Filter::Point) ? GL_NEAREST : GL_LINEAR;
-		GLint minWithMip = GL_NEAREST_MIPMAP_NEAREST;
-
-		switch (m_Filter) {
-		case Filter::Point:
-			minWithMip = GL_NEAREST_MIPMAP_NEAREST; break;
-		case Filter::Bilinear:
-			minWithMip = GL_LINEAR_MIPMAP_NEAREST; break;
-		case Filter::Trilinear:
-		case Filter::Anisotropic:
-			minWithMip = GL_LINEAR_MIPMAP_LINEAR;  break;
-		}
-
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, mag);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, m_HasMips ? minWithMip : minNoMip);
-
-
-		if (m_Filter == Filter::Anisotropic) {
-#ifdef GL_TEXTURE_MAX_ANISOTROPY_EXT
-			GLfloat maxAniso = 1.0f;
-			glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &maxAniso);
-			glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, std::max(2.0f, maxAniso));
-#endif
-		}
-		else {
-#ifdef GL_TEXTURE_MAX_ANISOTROPY_EXT
-			glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, 1.0f);
-#endif
-		}
-
-		glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(savedBinding));
-	}
-
-	void Texture2D::Submit(uint8_t unit) const {
-		// Even on the !IsValid() path, explicitly unbind: the previous early-return
-		// silently left whatever texture was last bound active on `unit`. A sprite
-		// drawing with this Texture2D would then sample the leftover texture from
-		// the previous draw — silent visual corruption with no GL error.
-		glActiveTexture(GL_TEXTURE0 + unit);
-		glBindTexture(GL_TEXTURE_2D, IsValid() ? m_Tex : 0);
-	}
-}
+} // namespace Axiom

@@ -1,7 +1,16 @@
 #pragma once
 #include <string>
 #include <cstdint>
-#include <glad/glad.h>
+
+// Shader was historically a thin wrapper around an OpenGL program handle
+// (typed GLuint). With the bgfx-only cleanup on 2026-05 the GL backend
+// was retired, but the public interface still exposes the handle as a
+// 32-bit unsigned — Shader_Bgfx stores `(bgfx::ProgramHandle::idx + 1)`
+// so consumers reading `GetHandle()` can keep treating 0 as "invalid"
+// without learning bgfx types. The GLuint/GLenum aliases remain for
+// header back-compat; they're plain integer typedefs now.
+using GLuint = std::uint32_t;
+using GLenum = std::uint32_t;
 
 namespace Axiom {
     class Shader {

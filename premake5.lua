@@ -55,6 +55,18 @@ newoption
     description = "Strip the Axiom profiler entirely from the build. Without this flag, Tracy is compiled into the engine, AXIOM_PROFILER_ENABLED is defined for engine/editor/runtime, and the in-engine ImGui Profiler panel is available. Pass --no-profiler for shipped runtime builds with strict size budgets."
 }
 
+-- Engine renders exclusively through bgfx. The runtime backend (D3D11 /
+-- D3D12 / Vulkan / OpenGL / Metal) is selected by the project's BgfxBackend
+-- setting at bgfx::init time — no premake regen required to switch among
+-- those. The legacy direct-OpenGL path (Glad + GLFW GL context) was retired
+-- on 2026-05; AxiomRhi is kept as a permanent `IsBgfx = true` so the rest
+-- of the build script doesn't have to be rewritten in lockstep, but every
+-- branch that consults it now resolves to the bgfx side.
+AxiomRhi = {}
+AxiomRhi.Backend = "bgfx"
+AxiomRhi.IsBgfx = true
+AxiomRhi.IsOpenGL = false
+
 -- Resolved early so subsequent dep-set wiring can branch on it. Default ON;
 -- explicit --no-profiler turns it off. The single boolean drives:
 --   - whether AXIOM_PROFILER_ENABLED is defined
@@ -121,13 +133,22 @@ AxiomModules = ResolveAxiomModules()
 -- The engine itself no longer depends on ImGui (the editor application owns its own
 -- ImGui context as a Layer). EngineCoreEditor is therefore consumed only by the
 -- editor and launcher executables, not by the engine static library.
+--
+-- Exception: under --rhi=bgfx, the engine DLL hosts the bgfx-imgui backend
+-- (Gui/ImGuiImplBgfx.cpp). bgfx's renderer state is a per-DLL static, so the
+-- backend has to live in the same module as bgfx::init — which is engine.dll.
+-- That TU calls into ImGui (`ImGui::GetIO()`, `io.Fonts->...`) and so requires
+-- the ImGui headers + lib to be reachable here; we sync the consumer's
+-- ImGuiContext into engine.dll via PackageImGuiBridge at every backend entry
+-- point (same pattern packages already use).
 Dependency.EngineSelectedModules = MergeDependencySets(
     Dependency.EngineCore,
     AxiomModules.Render and Dependency.EngineCoreRender or nil,
     AxiomModules.Audio and Dependency.EngineCoreAudio or nil,
     AxiomModules.Physics and Dependency.EngineCorePhysics or nil,
     AxiomModules.Scripting and Dependency.EngineCoreScripting or nil,
-    AxiomProfiler.Enabled and Dependency.Profiler or nil
+    AxiomProfiler.Enabled and Dependency.Profiler or nil,
+    AxiomRhi.IsBgfx and Dependency.EngineCoreEditor or nil
 )
 
 Dependency.EditorRuntimeCommon = MergeDependencySets(
@@ -167,7 +188,16 @@ function UseAxiomEngineModuleDependencies()
     UseDependencySet(Dependency.EngineSelectedModules)
 end
 
--- Shared postbuild command: copy AxiomAssets into each target output directory.
+-- Shared postbuild command: copy AxiomAssets into each target output
+-- directory. The single source tree is `Axiom-Runtime/AxiomAssets/` —
+-- it holds both the OpenGL `Shader/` (singular, .glsl) and bgfx
+-- `Shaders/` (plural, .sc + compiled bin/<profile>/*.bin) trees so one
+-- {COPYDIR} stages every render-backend's runtime payload next to the
+-- consumer exe. Earlier layouts split the bgfx shaders into a
+-- repo-root AxiomAssets/ alongside Axiom-Runtime/AxiomAssets/, which
+-- meant a `--rhi=bgfx` build silently shipped without its shader
+-- binaries; consolidating fixes that without needing a second copy
+-- step.
 CopyAxiomAssets = '{COPYDIR} "' .. path.join(ROOT_DIR, "Axiom-Runtime/AxiomAssets") .. '" "%{cfg.targetdir}/AxiomAssets"'
 
 -- Shared postbuild command: copy the engine SharedLib next to each consumer executable
@@ -182,9 +212,11 @@ CopyGlfwDll = '{COPYFILE} "' ..
     path.join(ROOT_DIR, "bin/" .. outputdir, "GLFW", "GLFW.dll") ..
     '" "%{cfg.targetdir}/GLFW.dll"'
 
-CopyGladDll = '{COPYFILE} "' ..
-    path.join(ROOT_DIR, "bin/" .. outputdir, "Glad", "Glad.dll") ..
-    '" "%{cfg.targetdir}/Glad.dll"'
+-- Glad has been removed from the engine build (bgfx handles its own GL
+-- context). CopyGladDll stays defined as a no-op so consumer postbuild
+-- lists referencing it don't have to be edited in lockstep — the bgfx-
+-- only cleanup (2026-05) leaves it as harmless noise.
+CopyGladDll = ""
 
 -- Tracy is a SharedLib too (one client per process). Consumers ship the DLL.
 -- When --no-profiler is set this expands to a no-op string the postbuild
@@ -329,7 +361,10 @@ end
 
 if AxiomModules.Render then
     include "premake/dependencies/glfw.lua"
-    include "premake/dependencies/glad.lua"
+    -- bgfx talks to the GPU through its own context layer
+    -- (wgl/egl/d3d/metal/vk/...) so Glad is no longer in the build —
+    -- the legacy direct-OpenGL path was retired on 2026-05.
+    include "premake/dependencies/bgfx.lua"
 end
 
 if AxiomModules.Physics then

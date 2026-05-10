@@ -1,15 +1,15 @@
 #include "pch.hpp"
+#include <bgfx/bgfx.h>
 #include "Window.hpp"
 #include "Application.hpp"
 #include "Graphics/Texture2D.hpp"
 #include "Graphics/OpenGL.hpp"
+#include "Graphics/RenderApi.hpp"
 #include "Events/WindowEvents.hpp"
 #include "Events/KeyEvents.hpp"
 #include "Events/MouseEvents.hpp"
 #include "Scripting/ScriptEngine.hpp"
 #include <Utils/StringHelper.hpp>
-
-#include <glad/glad.h>
 
 #ifdef AIM_PLATFORM_WINDOWS
 #define WIN32_LEAN_AND_MEAN
@@ -126,16 +126,25 @@ namespace Axiom {
 	void Window::Create(const WindowSpecification& props) {
 		AIM_ASSERT(s_IsInitialized, AxiomErrorCode::NotInitialized, "The Window isn't initialized");
 
-		glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
-		glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+		// bgfx owns the GPU context (D3D11 / Vulkan / Metal / its own GL
+		// loader, picked at bgfx::init time). Telling GLFW to skip the
+		// OpenGL context creation is mandatory — otherwise GLFW would
+		// pick a GL context for us that bgfx then can't talk to.
+		glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
 		glfwWindowHint(GLFW_SAMPLES, 8);
-		glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 
 
 		s_MainViewport = std::make_unique<Viewport>(
 			props.Fullscreen ? k_Videomode->width : props.Width,
 			props.Fullscreen ? k_Videomode->height : props.Height
 		);
+
+		AIM_INFO_TAG("Window",
+			"Create: spec={}x{}, fullscreen={}, videomode={}x{} -> viewport={}x{}",
+			props.Width, props.Height, props.Fullscreen,
+			k_Videomode ? k_Videomode->width : 0,
+			k_Videomode ? k_Videomode->height : 0,
+			s_MainViewport->GetWidth(), s_MainViewport->GetHeight());
 
 		m_GLFWwindow = glfwCreateWindow(s_MainViewport->GetWidth(), s_MainViewport->GetHeight(), props.Title.c_str(), nullptr, nullptr);
 		AIM_ASSERT(m_GLFWwindow, AxiomErrorCode::Undefined, "Failed to create window!");
@@ -148,7 +157,21 @@ namespace Axiom {
 		else
 			CenterWindow();
 
-		glfwMakeContextCurrent(m_GLFWwindow);
+		// Log the post-fullscreen / post-center size so a divergence
+		// between viewport (the size we *want*) and GLFW's reported
+		// framebuffer (the size we *got*) is visible immediately. This
+		// surfaces the failure mode where SetFullScreen silently bails
+		// out (e.g. monitor query returns nullptr) and leaves the window
+		// at GLFW's default 480x270 — which is what showed up as the
+		// "editor only renders into the top-left corner" bug.
+		{
+			int fbW = 0, fbH = 0;
+			glfwGetFramebufferSize(m_GLFWwindow, &fbW, &fbH);
+			AIM_INFO_TAG("Window",
+				"After fullscreen/center: GLFW framebuffer={}x{}", fbW, fbH);
+		}
+
+		// No GL context to make current — bgfx handles the device.
 		glfwSetWindowUserPointer(m_GLFWwindow, this);
 
 		glfwSetKeyCallback(m_GLFWwindow, SetKeyCallback);
@@ -173,7 +196,7 @@ namespace Axiom {
 		// shouldClose=true and the loop exits with no warning.
 		glfwSetWindowCloseCallback(m_GLFWwindow, &Window::CloseCallback);
 
-		glfwSwapInterval(s_IsVsync ? 1 : 0);
+		// Vsync is handled by bgfx via BGFX_RESET_VSYNC at bgfx::init time.
 		SyncViewportFromFramebuffer();
 
 		s_ActiveWindow = this;
@@ -203,6 +226,16 @@ namespace Axiom {
 		if (s_ActiveWindow == this) {
 			s_ActiveWindow = nullptr;
 		}
+	}
+
+	void Window::SwapBuffers() const {
+		// Presenting the rendered frame is `bgfx::frame()` — it advances
+		// bgfx's internal frame index, flushes the render-thread command
+		// buffer (or executes inline when single-threaded), and presents
+		// the swap-chain. GLFW's glfwSwapBuffers needs a current GL
+		// context, which doesn't exist (GLFW was created with
+		// GLFW_NO_API).
+		bgfx::frame();
 	}
 
 	void Window::CenterWindow() {
@@ -602,10 +635,22 @@ namespace Axiom {
 	}
 
 	void Window::UpdateViewport() {
-		if (OpenGL::IsInitialized())
-		{
-			glViewport(0, 0, s_MainViewport->GetWidth(), s_MainViewport->GetHeight());
+		if (!RenderApi::IsInitialized() || !s_MainViewport) {
+			return;
 		}
+		const int w = s_MainViewport->GetWidth();
+		const int h = s_MainViewport->GetHeight();
+		// Drives BOTH the swap-chain reset (bgfx::reset on the GLFW
+		// framebuffer's new size) AND the default view's rect. Without
+		// the explicit OnWindowResize call, SetViewport-only would miss
+		// the reset whenever it was called with an FBO currently bound
+		// — the editor's FBO render keeps view 1+ bound between scene
+		// passes, so a window resize landing mid-frame would set the
+		// per-FBO viewport but leave the swap chain at bgfx::init's
+		// resolution (visible as "editor renders only into the top-
+		// left corner of the OS window").
+		RenderApi::OnWindowResize(w, h);
+		RenderApi::SetViewport(0, 0, w, h);
 	}
 
 	void Window::SyncViewportFromFramebuffer() {

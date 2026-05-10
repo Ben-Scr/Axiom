@@ -1,312 +1,238 @@
 #include "pch.hpp"
-#include "GizmoRenderer.hpp"
-#include "Shader.hpp"
-#include "Gizmo.hpp"
-#include "Serialization/Path.hpp"
+#include "Graphics/GizmoRenderer.hpp"
 
-#include <glad/glad.h>
+#include "Core/Log.hpp"
+#include "Graphics/Shader.hpp"
+
+#include <bgfx/bgfx.h>
 #include <glm/gtc/type_ptr.hpp>
 
+#include <cmath>
+#include <cstdint>
+#include <cstring>
+
+namespace Axiom::BgfxBackend {
+	bgfx::ViewId CurrentViewId();
+}
+
+// =============================================================================
+// GizmoRenderer2D — bgfx implementation. Stage 2.4 of the bgfx port.
+// -----------------------------------------------------------------------------
+// Emits Gizmo::s_Squares / s_Circles / s_Lines as a single line-list submit
+// through the gizmo program (vs_gizmo + fs_gizmo). Each Square fans into 4
+// edges, Circles into N segments (caller-supplied), Lines stay as one. The
+// CPU build pass writes into a transient vertex buffer; bgfx::submit with
+// BGFX_STATE_PT_LINES + BGFX_STATE_BLEND_ALPHA renders the batch as a single
+// line draw.
+//
+// Vertex layout matches PosColorVertex (12 + 4 = 16 bytes) — pos.xyz + rgba8
+// — so we can reuse the m_GizmoVertices static member as our staging buffer
+// without inventing a new scratch container.
+//
+// View routing: the caller (editor's RenderSceneIntoFBO) has already set
+// `BgfxBackend::CurrentViewId()` to the active panel FBO's view, and we
+// inherit the view's setViewTransform that was configured by Renderer2D
+// earlier in the same frame. Each submit lands on whatever framebuffer
+// that view targets, so editor gizmos compose on top of the world sprites
+// the same way the OpenGL impl did.
+// =============================================================================
+
 namespace Axiom {
-	namespace {
-		constexpr GLsizei GizmoVertexStride = static_cast<GLsizei>(sizeof(GizmoUploadVertex));
 
-		static void ConvertVertices(const std::vector<PosColorVertex>& src, std::vector<GizmoUploadVertex>& dst) {
-			dst.clear();
-			dst.reserve(src.size());
-			for (const auto& v : src) {
-				Color c = Color::FromABGR32(v.color);
-				dst.push_back({ v.x, v.y, v.z, c.r, c.g, c.b, c.a });
-			}
-		}
-
-		static Vec2 RotateGizmoPoint(const Vec2& v, float radians) {
-			// Standard CCW rotation matrix: [c,-s; s, c]. The previous
-			// formulation `(v.x*c + v.y*s, -v.x*s + v.y*c)` was the
-			// transpose / CW rotation, so the editor's selection box,
-			// camera frustum, and collider outlines all rotated in the
-			// OPPOSITE direction from the entity itself — most visible
-			// when dragging the rotation handle and watching the gizmo
-			// counter-rotate against the sprite.
-			const float c = Cos(radians);
-			const float s = Sin(radians);
-			return Vec2(v.x * c - v.y * s, v.x * s + v.y * c);
-		}
-	}
-
-	bool GizmoRenderer2D::m_IsInitialized = false;
-	std::unique_ptr<Shader> GizmoRenderer2D::m_GizmoShader;
-	std::vector<PosColorVertex> GizmoRenderer2D::m_GizmoVertices;
-	std::vector<uint32_t> GizmoRenderer2D::m_GizmoIndices;
-	std::vector<GizmoUploadVertex> GizmoRenderer2D::s_UploadBuffer;
-	uint16_t GizmoRenderer2D::m_GizmoViewId = 1;
-	unsigned int GizmoRenderer2D::m_VAO = 0;
-	unsigned int GizmoRenderer2D::m_VBO = 0;
-	unsigned int GizmoRenderer2D::m_EBO = 0;
-	// Grow-only via glBufferData; per-frame uploads use glBufferSubData (no realloc on steady state).
-	std::size_t GizmoRenderer2D::m_VBOCapacityBytes = 0;
-	std::size_t GizmoRenderer2D::m_EBOCapacityBytes = 0;
-	int GizmoRenderer2D::m_uMVP = -1;
+	// Static class members. m_VAO / m_VBO / m_EBO / m_VBOCapacityBytes /
+	// m_EBOCapacityBytes / m_uMVP linger from the OpenGL header for ABI
+	// compatibility (the header is shared) — they're unused here and
+	// zero-initialised so debug-fill doesn't trigger false 'uninitialised
+	// member' lint hits.
+	bool                                  GizmoRenderer2D::m_IsInitialized = false;
+	std::unique_ptr<Shader>               GizmoRenderer2D::m_GizmoShader;
+	std::vector<PosColorVertex>           GizmoRenderer2D::m_GizmoVertices;
+	std::vector<uint32_t>                 GizmoRenderer2D::m_GizmoIndices;
+	std::vector<GizmoUploadVertex>        GizmoRenderer2D::s_UploadBuffer;
+	uint16_t                              GizmoRenderer2D::m_GizmoViewId = 1;
+	unsigned int                          GizmoRenderer2D::m_VAO = 0;
+	unsigned int                          GizmoRenderer2D::m_VBO = 0;
+	unsigned int                          GizmoRenderer2D::m_EBO = 0;
+	std::size_t                           GizmoRenderer2D::m_VBOCapacityBytes = 0;
+	std::size_t                           GizmoRenderer2D::m_EBOCapacityBytes = 0;
+	int                                   GizmoRenderer2D::m_uMVP = -1;
 
 	namespace {
-		// Power-of-two grow helper; mirrors QuadMesh::NextInstanceCapacity.
-		std::size_t NextBufferCapacityBytes(std::size_t requiredBytes, std::size_t initialBytes) {
-			std::size_t capacity = initialBytes;
-			while (capacity < requiredBytes) {
-				capacity *= 2;
-			}
-			return capacity;
+		bgfx::ProgramHandle  g_Program     = BGFX_INVALID_HANDLE;
+		bgfx::VertexLayout   g_Layout;
+		bool                 g_LayoutBuilt = false;
+
+		uint32_t PackRgba(const Color& c) {
+			auto u8 = [](float v) {
+				v = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+				return static_cast<uint32_t>(v * 255.0f + 0.5f);
+			};
+			// bgfx's rgba8 vertex attribute reads bytes in the order
+			// (r, g, b, a) into vec4. Little-endian uint32 packed as
+			// `r | (g<<8) | (b<<16) | (a<<24)` produces that byte order.
+			return u8(c.r)
+				| (u8(c.g) << 8)
+				| (u8(c.b) << 16)
+				| (u8(c.a) << 24);
+		}
+
+		// Emit one line as two vertices into m_GizmoVertices. Both
+		// endpoints share the same packed color (gizmo lines are flat —
+		// no gradient).
+		void EmitLine(std::vector<PosColorVertex>& out,
+			float x0, float y0, float x1, float y1, uint32_t rgba)
+		{
+			out.push_back(PosColorVertex{ x0, y0, 0.0f, rgba });
+			out.push_back(PosColorVertex{ x1, y1, 0.0f, rgba });
 		}
 	}
 
 	bool GizmoRenderer2D::Initialize() {
-		if (m_IsInitialized)
+		if (m_IsInitialized) {
 			return true;
-
-		std::string shaderDir = Path::ResolveAxiomAssets("Shader");
-		if (shaderDir.empty()) {
-			AIM_CORE_ERROR("AxiomAssets/Shader not found");
-			shaderDir = Path::Combine(Path::ExecutableDir(), "AxiomAssets", "Shader");
 		}
-		m_GizmoShader = std::make_unique<Shader>(Path::Combine(shaderDir, "gizmo.vert.glsl"), Path::Combine(shaderDir, "gizmo.frag.glsl"));
-		AIM_ASSERT(m_GizmoShader && m_GizmoShader->IsValid(), AxiomErrorCode::Undefined, "Failed to load gizmo shader");
-
-		GLuint program = m_GizmoShader->GetHandle();
-		m_uMVP = glGetUniformLocation(program, "uMVP");
-
-		glGenVertexArrays(1, &m_VAO);
-		glGenBuffers(1, &m_VBO);
-		glGenBuffers(1, &m_EBO);
-
-		glBindVertexArray(m_VAO);
-		glBindBuffer(GL_ARRAY_BUFFER, m_VBO);
-		// Initial capacity sized so first frame's glBufferSubData runs without a realloc.
-		m_VBOCapacityBytes = 4096 * sizeof(GizmoUploadVertex);
-		glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(m_VBOCapacityBytes), nullptr, GL_DYNAMIC_DRAW);
-
-		glEnableVertexAttribArray(0);
-		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, GizmoVertexStride, reinterpret_cast<void*>(0));
-
-		glEnableVertexAttribArray(1);
-		glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, GizmoVertexStride, reinterpret_cast<void*>(sizeof(float) * 3));
-
-		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_EBO);
-		m_EBOCapacityBytes = 8192 * sizeof(uint32_t);
-		glBufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr>(m_EBOCapacityBytes), nullptr, GL_DYNAMIC_DRAW);
-
-		glBindVertexArray(0);
-		glBindBuffer(GL_ARRAY_BUFFER, 0);
-		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
-
-		m_GizmoVertices.reserve(4096);
-		m_GizmoIndices.reserve(8192);
+		if (!g_LayoutBuilt) {
+			g_Layout
+				.begin()
+				.add(bgfx::Attrib::Position, 3, bgfx::AttribType::Float)
+				.add(bgfx::Attrib::Color0,   4, bgfx::AttribType::Uint8, /*normalized=*/true)
+				.end();
+			g_LayoutBuilt = true;
+		}
+		m_GizmoShader = std::make_unique<Shader>(
+			std::string("AxiomAssets/Shaders/GizmoShader.vs"),
+			std::string("AxiomAssets/Shaders/GizmoShader.fs"));
+		if (!m_GizmoShader || !m_GizmoShader->IsValid()) {
+			AIM_CORE_ERROR_TAG("GizmoRenderer",
+				"Gizmo program failed to load (vs_gizmo/fs_gizmo.bin missing?) — gizmos disabled");
+			m_GizmoShader.reset();
+			return false;
+		}
+		const uint16_t raw = static_cast<uint16_t>(m_GizmoShader->GetHandle() - 1u);
+		g_Program = bgfx::ProgramHandle{ raw };
 
 		m_IsInitialized = true;
 		return true;
 	}
 
 	void GizmoRenderer2D::Shutdown() {
-		if (!m_IsInitialized)
+		if (!m_IsInitialized) {
 			return;
-
-		if (m_EBO) {
-			glDeleteBuffers(1, &m_EBO);
-			m_EBO = 0;
 		}
-		if (m_VBO) {
-			glDeleteBuffers(1, &m_VBO);
-			m_VBO = 0;
-		}
-		if (m_VAO) {
-			glDeleteVertexArrays(1, &m_VAO);
-			m_VAO = 0;
-		}
-		// Reset so a future Initialize re-seeds correctly.
-		m_VBOCapacityBytes = 0;
-		m_EBOCapacityBytes = 0;
-
 		m_GizmoShader.reset();
+		g_Program = BGFX_INVALID_HANDLE;
 		m_GizmoVertices.clear();
+		m_GizmoVertices.shrink_to_fit();
 		m_GizmoIndices.clear();
+		m_GizmoIndices.shrink_to_fit();
 		s_UploadBuffer.clear();
-
+		s_UploadBuffer.shrink_to_fit();
 		m_IsInitialized = false;
 	}
 
-	void GizmoRenderer2D::OnResize(int /*w*/, int /*h*/) {
-
-	}
+	void GizmoRenderer2D::OnResize(int /*w*/, int /*h*/) {}
 
 	void GizmoRenderer2D::BeginFrame(uint16_t viewId) {
-		if (!m_IsInitialized)
-			return;
-
 		m_GizmoViewId = viewId;
-		m_GizmoVertices.clear();
-		m_GizmoIndices.clear();
+	}
+
+	void GizmoRenderer2D::EndFrame() {}
+
+	void GizmoRenderer2D::RenderWithVP(const glm::mat4& vp, GizmoLayerMask layerMask) {
+		if (!m_IsInitialized || !bgfx::isValid(g_Program)) return;
+		BuildGeometry(layerMask);
+		FlushGizmosImpl(vp);
+		Gizmo::Clear();
 	}
 
 	void GizmoRenderer2D::BuildGeometry(GizmoLayerMask layerMask) {
+		// Translate Gizmo's accumulated primitives into a flat list of
+		// line-list vertices. Capacity persists between frames (we only
+		// clear the size).
 		m_GizmoVertices.clear();
-		m_GizmoIndices.clear();
 
-		for (const auto& square : Gizmo::s_Squares) {
-			if (!HasAnyLayer(square.Layer, layerMask)) {
-				continue;
-			}
-
-			uint32_t color = square.Color.ABGR32();
-			uint32_t baseIndex = static_cast<uint32_t>(m_GizmoVertices.size());
-
-			Vec2 corners[4] = {
-					Vec2(-square.HalfExtents.x, -square.HalfExtents.y),
-					Vec2(square.HalfExtents.x, -square.HalfExtents.y),
-					Vec2(square.HalfExtents.x,  square.HalfExtents.y),
-					Vec2(-square.HalfExtents.x,  square.HalfExtents.y)
+		// Squares — 4 edges around the rotated rect. HalfExtents is
+		// already half-the-rect-size from Gizmo::DrawSquare.
+		for (const Square& sq : Gizmo::s_Squares) {
+			if (!HasAnyLayer(sq.Layer, layerMask)) continue;
+			const uint32_t rgba = PackRgba(sq.Color);
+			const float cx = sq.Center.x;
+			const float cy = sq.Center.y;
+			const float hx = sq.HalfExtents.x;
+			const float hy = sq.HalfExtents.y;
+			const float c  = std::cos(sq.Radiant);
+			const float s  = std::sin(sq.Radiant);
+			auto corner = [&](float lx, float ly) {
+				return std::pair<float, float>{
+					cx + lx * c - ly * s,
+					cy + lx * s + ly * c
+				};
 			};
-
-			for (int i = 0; i < 4; ++i) {
-				Vec2 rotated = RotateGizmoPoint(corners[i], square.Radiant);
-				Vec2 final = square.Center + rotated;
-				m_GizmoVertices.push_back({ final.x, final.y, 0.0f, color });
-			}
-
-			m_GizmoIndices.push_back(baseIndex + 0);
-			m_GizmoIndices.push_back(baseIndex + 1);
-			m_GizmoIndices.push_back(baseIndex + 1);
-			m_GizmoIndices.push_back(baseIndex + 2);
-			m_GizmoIndices.push_back(baseIndex + 2);
-			m_GizmoIndices.push_back(baseIndex + 3);
-			m_GizmoIndices.push_back(baseIndex + 3);
-			m_GizmoIndices.push_back(baseIndex + 0);
+			const auto [x0, y0] = corner(-hx, -hy);
+			const auto [x1, y1] = corner(+hx, -hy);
+			const auto [x2, y2] = corner(+hx, +hy);
+			const auto [x3, y3] = corner(-hx, +hy);
+			EmitLine(m_GizmoVertices, x0, y0, x1, y1, rgba);
+			EmitLine(m_GizmoVertices, x1, y1, x2, y2, rgba);
+			EmitLine(m_GizmoVertices, x2, y2, x3, y3, rgba);
+			EmitLine(m_GizmoVertices, x3, y3, x0, y0, rgba);
 		}
 
-		for (const auto& line : Gizmo::s_Lines) {
-			if (!HasAnyLayer(line.Layer, layerMask)) {
-				continue;
-			}
-
-			uint32_t color = line.Color.ABGR32();
-			uint32_t baseIndex = static_cast<uint32_t>(m_GizmoVertices.size());
-
-			m_GizmoVertices.push_back({ line.Start.x, line.Start.y, 0.0f, color });
-			m_GizmoVertices.push_back({ line.End.x, line.End.y, 0.0f, color });
-
-			m_GizmoIndices.push_back(baseIndex);
-			m_GizmoIndices.push_back(baseIndex + 1);
+		// Lines — pass-through, one segment each.
+		for (const Line& ln : Gizmo::s_Lines) {
+			if (!HasAnyLayer(ln.Layer, layerMask)) continue;
+			EmitLine(m_GizmoVertices, ln.Start.x, ln.Start.y, ln.End.x, ln.End.y, PackRgba(ln.Color));
 		}
 
-		for (const auto& circle : Gizmo::s_Circles) {
-			if (!HasAnyLayer(circle.Layer, layerMask) || circle.Segments <= 0) {
-				continue;
-			}
-
-			uint32_t color = circle.Color.ABGR32();
-			uint32_t baseIndex = static_cast<uint32_t>(m_GizmoVertices.size());
-
-			float angleStep = TwoPi<float>() / static_cast<float>(circle.Segments);
-			for (int i = 0; i < circle.Segments; ++i) {
-				float angle = i * angleStep;
-				float x = circle.Center.x + circle.Radius * Cos(angle);
-				float y = circle.Center.y + circle.Radius * Sin(angle);
-				m_GizmoVertices.push_back({ x, y, 0.0f, color });
-			}
-
-			for (int i = 0; i < circle.Segments; ++i) {
-				m_GizmoIndices.push_back(baseIndex + static_cast<uint32_t>(i));
-				m_GizmoIndices.push_back(baseIndex + static_cast<uint32_t>((i + 1) % circle.Segments));
+		// Circles — N segments around the center, looped back to start.
+		for (const Circle& ci : Gizmo::s_Circles) {
+			if (!HasAnyLayer(ci.Layer, layerMask)) continue;
+			if (ci.Segments < 3) continue;
+			const uint32_t rgba = PackRgba(ci.Color);
+			const float step = 6.28318530717958647692f / static_cast<float>(ci.Segments);
+			float prevX = ci.Center.x + ci.Radius;
+			float prevY = ci.Center.y;
+			for (int i = 1; i <= ci.Segments; ++i) {
+				const float a = static_cast<float>(i) * step;
+				const float nx = ci.Center.x + std::cos(a) * ci.Radius;
+				const float ny = ci.Center.y + std::sin(a) * ci.Radius;
+				EmitLine(m_GizmoVertices, prevX, prevY, nx, ny, rgba);
+				prevX = nx;
+				prevY = ny;
 			}
 		}
 	}
 
-	void GizmoRenderer2D::RenderWithVP(const glm::mat4& vp, GizmoLayerMask layerMask) {
-		if (!m_IsInitialized || !Gizmo::s_IsEnabled)
-			return;
-
-		BuildGeometry(layerMask);
-		FlushGizmosImpl(vp);
-	}
-
-	// glBufferSubData against grow-only persistent buffer; previously orphan-realloced every frame.
 	void GizmoRenderer2D::FlushGizmosImpl(const glm::mat4& vp) {
-		if (!m_IsInitialized || m_GizmoVertices.empty() || !m_GizmoShader || !m_GizmoShader->IsValid())
+		if (m_GizmoVertices.empty()) return;
+
+		const uint32_t numVerts = static_cast<uint32_t>(m_GizmoVertices.size());
+		if (bgfx::getAvailTransientVertexBuffer(numVerts, g_Layout) < numVerts) {
+			AIM_CORE_WARN_TAG("GizmoRenderer",
+				"Transient vertex buffer exhausted; dropped {} gizmo verts", numVerts);
 			return;
-
-		// Save GL state we mutate so the caller's pipeline is preserved
-		// across the gizmo draw. Mirrors TextRenderer::RenderInstances'
-		// save/restore discipline — without these, the next pass inherits
-		// whatever blend / depth / scissor / line-width we last set.
-		GLfloat savedLineWidth = 1.0f;
-		glGetFloatv(GL_LINE_WIDTH, &savedLineWidth);
-
-		const GLboolean savedBlend = glIsEnabled(GL_BLEND);
-		GLint savedBlendSrcRgb = GL_ONE;
-		GLint savedBlendDstRgb = GL_ZERO;
-		GLint savedBlendSrcAlpha = GL_ONE;
-		GLint savedBlendDstAlpha = GL_ZERO;
-		GLint savedBlendEquationRgb = GL_FUNC_ADD;
-		GLint savedBlendEquationAlpha = GL_FUNC_ADD;
-		glGetIntegerv(GL_BLEND_SRC_RGB, &savedBlendSrcRgb);
-		glGetIntegerv(GL_BLEND_DST_RGB, &savedBlendDstRgb);
-		glGetIntegerv(GL_BLEND_SRC_ALPHA, &savedBlendSrcAlpha);
-		glGetIntegerv(GL_BLEND_DST_ALPHA, &savedBlendDstAlpha);
-		glGetIntegerv(GL_BLEND_EQUATION_RGB, &savedBlendEquationRgb);
-		glGetIntegerv(GL_BLEND_EQUATION_ALPHA, &savedBlendEquationAlpha);
-
-		const GLboolean savedDepth = glIsEnabled(GL_DEPTH_TEST);
-		const GLboolean savedScissor = glIsEnabled(GL_SCISSOR_TEST);
-
-		ConvertVertices(m_GizmoVertices, s_UploadBuffer);
-
-		const std::size_t vboBytes = s_UploadBuffer.size() * sizeof(GizmoUploadVertex);
-		const std::size_t eboBytes = m_GizmoIndices.size() * sizeof(uint32_t);
-
-		glBindVertexArray(m_VAO);
-
-		glBindBuffer(GL_ARRAY_BUFFER, m_VBO);
-		if (vboBytes > m_VBOCapacityBytes) {
-			m_VBOCapacityBytes = NextBufferCapacityBytes(vboBytes, m_VBOCapacityBytes ? m_VBOCapacityBytes : 4096 * sizeof(GizmoUploadVertex));
-			glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(m_VBOCapacityBytes), nullptr, GL_DYNAMIC_DRAW);
 		}
-		glBufferSubData(GL_ARRAY_BUFFER, 0, static_cast<GLsizeiptr>(vboBytes), s_UploadBuffer.data());
+		bgfx::TransientVertexBuffer tvb{};
+		bgfx::allocTransientVertexBuffer(&tvb, numVerts, g_Layout);
+		std::memcpy(tvb.data, m_GizmoVertices.data(), numVerts * sizeof(PosColorVertex));
 
-		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_EBO);
-		if (eboBytes > m_EBOCapacityBytes) {
-			m_EBOCapacityBytes = NextBufferCapacityBytes(eboBytes, m_EBOCapacityBytes ? m_EBOCapacityBytes : 8192 * sizeof(uint32_t));
-			glBufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr>(m_EBOCapacityBytes), nullptr, GL_DYNAMIC_DRAW);
-		}
-		glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, static_cast<GLsizeiptr>(eboBytes), m_GizmoIndices.data());
+		// Submit through the currently-bound view (set by RenderSceneIntoFBO
+		// before this call). Renderer2D already configured that view's
+		// transform with the same vp, so we'd be re-setting it to the same
+		// value — but do it explicitly anyway so callers that drive
+		// gizmos without a prior Renderer2D pass also get the right
+		// projection.
+		const bgfx::ViewId vid = BgfxBackend::CurrentViewId();
+		bgfx::setViewTransform(vid, nullptr, glm::value_ptr(vp));
 
-		m_GizmoShader->Submit();
-
-		if (m_uMVP >= 0) {
-			glUniformMatrix4fv(m_uMVP, 1, GL_FALSE, glm::value_ptr(vp));
-		}
-
-		glLineWidth(Gizmo::s_LineWidth);
-		glDrawElements(GL_LINES, static_cast<GLsizei>(m_GizmoIndices.size()), GL_UNSIGNED_INT, nullptr);
-
-		glBindVertexArray(0);
-		glUseProgram(0);
-
-		// Restore everything we touched. Order matches TextRenderer's
-		// pattern — equation before func, then enable/disable bits.
-		glLineWidth(savedLineWidth);
-		glBlendEquationSeparate(savedBlendEquationRgb, savedBlendEquationAlpha);
-		glBlendFuncSeparate(savedBlendSrcRgb, savedBlendDstRgb, savedBlendSrcAlpha, savedBlendDstAlpha);
-		if (savedBlend)   glEnable(GL_BLEND);   else glDisable(GL_BLEND);
-		if (savedDepth)   glEnable(GL_DEPTH_TEST);   else glDisable(GL_DEPTH_TEST);
-		if (savedScissor) glEnable(GL_SCISSOR_TEST); else glDisable(GL_SCISSOR_TEST);
+		bgfx::setVertexBuffer(0, &tvb, 0, numVerts);
+		bgfx::setState(0
+			| BGFX_STATE_WRITE_RGB
+			| BGFX_STATE_WRITE_A
+			| BGFX_STATE_PT_LINES
+			| BGFX_STATE_BLEND_ALPHA
+			| BGFX_STATE_MSAA);
+		bgfx::submit(vid, g_Program);
 	}
 
-	void GizmoRenderer2D::EndFrame() {
-		// Explicit-pass invariant: GizmoRenderer2D::EndFrame is cleanup only.
-		// Drawing is done by an explicit caller via Render() / RenderWithVP() —
-		// per Axiom's render-graph design, every draw must be declared in a named
-		// pass, not slipped in from a lifecycle hook. The runtime "always-show
-		// shared gizmos" behavior moves to Application::RenderPipelineOnly which
-		// owns the pass list. Apps that want runtime gizmos call Render() there;
-		// EndFrame just clears the per-frame buffers.
-		Gizmo::Clear();
-	}
-}
+} // namespace Axiom

@@ -3,7 +3,8 @@
 
 #include <imgui.h>
 #include <imgui_internal.h>
-#include <glad/glad.h>
+// glad include retired with the legacy GL backend (2026-05); the editor
+// no longer makes raw GL calls, all drawing routes through engine renderers.
 
 #include <cstdio>
 
@@ -343,8 +344,11 @@ namespace Axiom {
 		ReferencePicker::Shutdown();
 		ScriptComponentInspector::Shutdown();
 		EditorIcons::Shutdown();
-		DestroyFBO(m_EditorViewFBO);
-		DestroyFBO(m_GameViewFBO);
+		// Framebuffers are RAII-managed; explicit destruction here mirrors
+		// the historical OnDetach order (drop GPU resources before any
+		// later teardown that might re-enter the renderer).
+		m_EditorViewFBO.Destroy();
+		m_GameViewFBO.Destroy();
 	}
 
 	void ImGuiEditorLayer::OnUpdate(Application& app, float dt) {

@@ -23,6 +23,20 @@ project "Axiom-Launcher"
     defines(GetAxiomModuleDefines())
     defines { "AIM_IMPORT_DLL" }
     includedirs { "src" }
+
+    -- ImGuiImplBgfx now lives inside Axiom-Engine.dll (was previously
+    -- statically pulled into every consumer .exe). bgfx's renderer
+    -- state is held in process-global statics; if multiple binaries
+    -- in one process each static-link bgfx, each gets its own
+    -- uninitialised copy. The launcher's bgfx state was reading as
+    -- `RendererType::Noop` even though engine.dll's `bgfx::init` had
+    -- already brought up D3D11 — `ImGuiImplBgfx::ResolveImguiBin`
+    -- then hit the `default:` switch arm and returned an empty
+    -- shader path. Letting engine.dll own the imgui-bgfx backend
+    -- (same TU as `bgfx::init`) keeps both running against the same
+    -- bgfx state. The launcher just `#includes` the engine header
+    -- which exports the API via AXIOM_API.
+
     postbuildcommands { CopyAxiomAssets, CopyAxiomEngineDll, CopyGlfwDll, CopyGladDll }
     if AxiomProfiler.Enabled then postbuildcommands { CopyTracyDll } end
 

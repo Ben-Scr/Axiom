@@ -118,7 +118,27 @@ namespace Axiom {
         // (layer, order, atlas) and emits them with the same shader /
         // VAO pipeline as the entity-driven path. UIRenderer calls this
         // for screen-space widget labels + dropdown popups.
-        void RenderInstances(std::span<const TextDrawCmd> commands, const glm::mat4& mvp);
+        //
+        // `viewId` is forwarded to the bgfx backend so a caller hosting
+        // its own bgfx view (GuiRenderer's per-instance UI view) can
+        // route text submits onto the same view it draws sprites with —
+        // otherwise text would land on whatever framebuffer was last
+        // bound, which is rarely what the caller wants. The OpenGL impl
+        // ignores the parameter (GL has no view concept). The default
+        // 0xFFFF means "fall back to BgfxBackend::CurrentViewId()" so
+        // legacy callers (Renderer2D's text-on-Transform2D path) keep
+        // working unchanged.
+        //
+        // `scissorCache` is a bgfx scissor-cache index (the value
+        // returned by `bgfx::setScissor(x, y, w, h)`). The bgfx backend
+        // re-applies it before every submit so multi-atlas runs inside
+        // one Mask-clipped UI span all stay clipped — bgfx clears
+        // scissor state on each submit, which would otherwise leave the
+        // second-and-later atlas runs unclipped. 0xFFFF means "no
+        // scissor" (default). Ignored by the OpenGL impl.
+        void RenderInstances(std::span<const TextDrawCmd> commands, const glm::mat4& mvp,
+            unsigned short viewId = 0xFFFFu,
+            unsigned short scissorCache = 0xFFFFu);
 
         // Resolve a TextRendererComponent's runtime FontHandle through
         // FontManager, caching into ResolvedFont so subsequent frames

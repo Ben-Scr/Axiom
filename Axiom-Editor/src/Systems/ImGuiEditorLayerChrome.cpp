@@ -2,14 +2,13 @@
 #include "Systems/ImGuiEditorLayer.hpp"
 
 #include <imgui.h>
-#include <glad/glad.h>
 
 #include <cstdio>
 
 #include "Components/Components.hpp"
 #include "Core/Application.hpp"
 #include "Core/Window.hpp"
-#include "Graphics/OpenGL.hpp"
+#include "Graphics/Framebuffer.hpp"
 #include "Graphics/Renderer2D.hpp"
 #include "Graphics/GizmoRenderer.hpp"
 #include "Graphics/Gizmo.hpp"
@@ -36,57 +35,20 @@
 #include <unordered_set>
 
 namespace Axiom {
-	void ImGuiEditorLayer::EnsureFBO(ViewportFBO& fbo, int width, int height) {
-		if (width <= 0 || height <= 0) return;
-
-		const bool sizeChanged = fbo.ViewportSize.GetWidth() != width || fbo.ViewportSize.GetHeight() != height;
-		if (fbo.FramebufferId != 0 && !sizeChanged) return;
-
-		DestroyFBO(fbo);
-		fbo.ViewportSize.SetSize(width, height);
-
-		glGenFramebuffers(1, &fbo.FramebufferId);
-		glBindFramebuffer(GL_FRAMEBUFFER, fbo.FramebufferId);
-
-		glGenTextures(1, &fbo.ColorTextureId);
-		glBindTexture(GL_TEXTURE_2D, fbo.ColorTextureId);
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, fbo.ColorTextureId, 0);
-
-		glGenRenderbuffers(1, &fbo.DepthRenderbufferId);
-		glBindRenderbuffer(GL_RENDERBUFFER, fbo.DepthRenderbufferId);
-		glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, width, height);
-		glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, fbo.DepthRenderbufferId);
-
-		AIM_ASSERT(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE, AxiomErrorCode::InvalidHandle,
-			"Viewport framebuffer is incomplete");
-
-		glBindFramebuffer(GL_FRAMEBUFFER, 0);
-	}
-
-	void ImGuiEditorLayer::DestroyFBO(ViewportFBO& fbo) {
-		if (fbo.DepthRenderbufferId != 0) {
-			glDeleteRenderbuffers(1, &fbo.DepthRenderbufferId);
-			fbo.DepthRenderbufferId = 0;
-		}
-		if (fbo.ColorTextureId != 0) {
-			glDeleteTextures(1, &fbo.ColorTextureId);
-			fbo.ColorTextureId = 0;
-		}
-		if (fbo.FramebufferId != 0) {
-			glDeleteFramebuffers(1, &fbo.FramebufferId);
-			fbo.FramebufferId = 0;
-		}
-	}
-
+	// Per-panel render target lifecycle. The actual OpenGL handle juggling
+	// (glGenFramebuffers, glTexImage2D, depth-stencil renderbuffer attach,
+	// completeness check) lives behind `Framebuffer::Recreate` in
+	// `Graphics/Framebuffer.cpp` — Stage 0 of the bgfx port carved that
+	// out so this file no longer touches GL directly. The two helpers
+	// below are kept so existing call sites (RenderSceneIntoFBO, layer
+	// teardown) read the same as before; they're just one-line wrappers
+	// over the RAII Framebuffer API now.
 	void ImGuiEditorLayer::EnsureViewportFramebuffer(int width, int height) {
-		EnsureFBO(m_EditorViewFBO, width, height);
+		m_EditorViewFBO.Recreate(width, height);
 	}
 
 	void ImGuiEditorLayer::DestroyViewportFramebuffer() {
-		DestroyFBO(m_EditorViewFBO);
+		m_EditorViewFBO.Destroy();
 	}
 
 	void ImGuiEditorLayer::OnPreRender(Application& app) {

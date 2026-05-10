@@ -1,32 +1,45 @@
 #pragma once
+
 #include "Collections/Color.hpp"
 #include "Core/Export.hpp"
 #include "Graphics/GLInitSpecifications.hpp"
 
-#include <glad/glad.h>
+// =============================================================================
+// DEPRECATED: thin shim over `RenderApi`.
+// -----------------------------------------------------------------------------
+// Stage 0 of the bgfx port introduced `Graphics/RenderApi.hpp` as the
+// backend-neutral interface every renderer should call. This file forwards
+// the historical `OpenGL::Foo` static methods to the equivalent
+// `RenderApi::Foo` so existing callers (Application::Initialize,
+// ScriptBindingsScene's GPU-info accessors, ImGuiDebugSystem's clear-color
+// editor, Window::IsInitialized check) keep compiling.
+//
+// New code should use `RenderApi` directly. This shim will be deleted once
+// the bgfx backend lands and the OpenGL backend becomes one implementation
+// among several.
+//
+// Notably, the previous header leaked `<glad/glad.h>` and `GLenum` in its
+// public surface (BlendFunc/Enable/Disable). Those are gone — the shim only
+// exposes the calls that were actually used outside the renderer (init, GPU
+// info, clear color), and the rest moved into `RenderApi`'s neutral enum
+// surface (BlendMode / CullMode / etc.).
+// =============================================================================
 
 namespace Axiom {
+
 	class AXIOM_API OpenGL {
 	public:
 		OpenGL() = delete;
 
 		static bool Initialize(const GLInitSpecifications& glInitSpecs);
-		static bool IsInitialized() { return s_IsInitialized; }
-		static void BlendFunc(GLenum sFactor, GLenum dFactor);
-		static void Enable(GLenum glEnum);
-		static void Disable(GLenum glEnum);
-		static void CullFace(GLCullingMode cullingMode);
+		static bool IsInitialized();
+
 		static void SetClearColor(const Color& clearColor);
 		static Color GetClearColor();
 
-		// GPU caps (cached after Initialize). Empty strings before init.
 		static const std::string& GetVersionString();
 		static const std::string& GetVendorString();
 		static const std::string& GetRendererString();
-	private:
-		static bool s_IsInitialized;
-		static std::string s_VersionString;
-		static std::string s_VendorString;
-		static std::string s_RendererString;
 	};
-}
+
+} // namespace Axiom

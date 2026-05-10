@@ -1,282 +1,205 @@
 #include "pch.hpp"
-#include "Shader.hpp"
+#include "Graphics/Shader.hpp"
 
-#include <vector>
-#include <cstdio>
-#include <cstdlib>
-#include <fstream>
-#include <sstream>
+#include "Core/Log.hpp"
+#include "Serialization/File.hpp"
+#include "Serialization/Path.hpp"
+
+#include <bgfx/bgfx.h>
+
 #include <filesystem>
+#include <utility>
+
+// =============================================================================
+// Shader / Shader-binary loading — bgfx (Stage 2.2 of the bgfx port).
+// -----------------------------------------------------------------------------
+// Real `bgfx::createProgram` from compiled shader binaries on disk. The
+// loader maps `<vsPath, fsPath>` (the legacy Shader.hpp ctor's interface
+// designed around `vs.glsl` / `fs.glsl` source files for the OpenGL backend)
+// to a per-renderer-profile lookup under
+// `AxiomAssets/Shaders/bgfx/bin/<profile>/<vs|fs>_<name>.bin` — the suffix
+// of `vsPath` is stripped, only the *name* matters.
+//
+// `m_Program` stores (bgfx::ProgramHandle::idx + 1) with 0 = invalid, same
+// `IsValid()` contract the OpenGL impl had. SpriteShaderProgram_Bgfx +
+// Renderer2D_Bgfx use this to bind the sprite shader and submit instanced
+// quads.
+// =============================================================================
 
 namespace Axiom {
-    namespace {
-        constexpr uint32_t kAxiomShaderMagic   = 0x42534842; // "BSHB"
-        constexpr uint32_t kAxiomShaderVersion = 1;
 
-        struct BinaryHeader {
-            uint32_t magic;
-            uint32_t version;
-            GLenum   binaryFormat;
-            GLsizei  dataLength;
-        };
-        static_assert(sizeof(BinaryHeader) == 16);
-    }
+	namespace {
+		constexpr unsigned EncodeProgram(uint16_t idx) noexcept {
+			return static_cast<unsigned>(idx) + 1u;
+		}
+		constexpr uint16_t DecodeProgram(unsigned m) noexcept {
+			return static_cast<uint16_t>(m - 1u);
+		}
+		bgfx::ProgramHandle FromMProgram(unsigned m) noexcept {
+			if (m == 0) return BGFX_INVALID_HANDLE;
+			return bgfx::ProgramHandle{ DecodeProgram(m) };
+		}
 
-    static bool ReadFileToString(const std::string& path, std::string& out) {
-        std::ifstream input(path, std::ios::binary);
-        if (!input.is_open()) {
-            return false;
-        }
+		// Map bgfx's runtime renderer to the on-disk shader-binary subdir.
+		// Layout matches the per-platform compile in compile.bat /
+		// AxiomAssets/Shaders/bgfx/bin/{dx11,glsl,spirv,...}.
+		const char* ProfileDir() {
+			switch (bgfx::getRendererType()) {
+			case bgfx::RendererType::Direct3D11: return "dx11";
+			case bgfx::RendererType::Direct3D12: return "dx11"; // d3d12 reads the same DXBC blob
+			case bgfx::RendererType::OpenGL:     return "glsl";
+			case bgfx::RendererType::OpenGLES:   return "glsl";
+			case bgfx::RendererType::Vulkan:     return "spirv";
+			case bgfx::RendererType::Metal:      return "metal";
+			case bgfx::RendererType::Noop:       return nullptr;
+			default:                              return nullptr;
+			}
+		}
 
-        std::ostringstream buffer;
-        buffer << input.rdbuf();
-        out = buffer.str();
-        return !out.empty();
-    }
+		// Strip directory + ext, return the bare shader name. The legacy
+		// Shader.hpp ctor takes `(vsPath, fsPath)`; under bgfx the meaningful
+		// part is the shared base name (e.g. "sprite" from
+		// "AxiomAssets/Shaders/SpriteShader.vs").
+		std::string ExtractName(const std::string& path) {
+			std::filesystem::path p(path);
+			std::string stem = p.stem().string();
+			// Drop the SpriteShader / TextShader / etc. "Shader" suffix
+			// where present so the on-disk name is just the pipeline.
+			static const std::string suffix = "Shader";
+			if (stem.size() > suffix.size()
+				&& stem.compare(stem.size() - suffix.size(), suffix.size(), suffix) == 0)
+			{
+				stem.erase(stem.size() - suffix.size());
+			}
+			// Lowercase to match the on-disk convention (vs_sprite.bin not vs_Sprite.bin).
+			for (char& c : stem) {
+				if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+			}
+			return stem;
+		}
 
-    GLuint Shader::LoadAndCompile(GLenum type, const std::string& path) {
-        std::string src;
+		std::string ResolveBinPath(const std::string& stage, const std::string& name) {
+			const char* profile = ProfileDir();
+			if (!profile) return std::string();
+			// Look in the project's runtime asset dir first (works at
+			// runtime when the editor copies AxiomAssets next to the exe),
+			// fall back to the source tree's AxiomAssets for editor use.
+			const std::string rel = std::string("AxiomAssets/Shaders/bgfx/bin/")
+				+ profile + "/" + stage + "_" + name + ".bin";
+			std::string exeRel = Path::Combine(Path::ExecutableDir(), rel);
+			if (std::filesystem::exists(exeRel)) return exeRel;
+			return rel;
+		}
 
-        if (!ReadFileToString(path, src)) {
-            AIM_ERROR_TAG("Shader", "Failed to read shader file: " + path);
-            return 0;
-        }
+		bgfx::ShaderHandle LoadStage(const std::string& path) {
+			if (!std::filesystem::exists(path)) {
+				AIM_CORE_WARN_TAG("Shader", "shader binary not found: {}", path);
+				return BGFX_INVALID_HANDLE;
+			}
+			std::vector<uint8_t> bytes = File::ReadAllBytes(path);
+			if (bytes.empty()) {
+				AIM_CORE_WARN_TAG("Shader", "shader binary empty: {}", path);
+				return BGFX_INVALID_HANDLE;
+			}
+			const bgfx::Memory* mem = bgfx::copy(bytes.data(),
+				static_cast<uint32_t>(bytes.size()));
+			bgfx::ShaderHandle h = bgfx::createShader(mem);
+			if (!bgfx::isValid(h)) {
+				AIM_CORE_ERROR_TAG("Shader", "bgfx::createShader failed: {}", path);
+			}
+			return h;
+		}
 
-        GLuint shader = glCreateShader(type);
-        if (shader == 0) {
-           AIM_ERROR_TAG("Shader", "Failed to create shader object for file: " + path);
-            return 0;
-        }
-        const char* csrc = src.c_str();
-        glShaderSource(shader, 1, &csrc, nullptr);
-        glCompileShader(shader);
+		bgfx::ProgramHandle LoadProgram(const std::string& vsPath, const std::string& fsPath) {
+			const std::string name = ExtractName(vsPath);
+			const std::string vsBin = ResolveBinPath("vs", name);
+			const std::string fsBin = ResolveBinPath("fs", name);
 
-        GLint ok = GL_FALSE;
-        glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
+			bgfx::ShaderHandle vs = LoadStage(vsBin);
+			if (!bgfx::isValid(vs)) return BGFX_INVALID_HANDLE;
+			bgfx::ShaderHandle fs = LoadStage(fsBin);
+			if (!bgfx::isValid(fs)) {
+				bgfx::destroy(vs);
+				return BGFX_INVALID_HANDLE;
+			}
+			// destroyShaders=true so destroy(program) takes the shader
+			// handles with it — matches the OpenGL impl's lifetime.
+			return bgfx::createProgram(vs, fs, /*destroyShaders=*/true);
+		}
+	}
 
-        if (ok != GL_TRUE) {
-            GLint logLen = 0;
-            glGetShaderiv(shader, GL_INFO_LOG_LENGTH, &logLen);
-            std::vector<GLchar> log(std::max(1, logLen));
-            glGetShaderInfoLog(shader, logLen, nullptr, log.data());
+	Shader::Shader(const std::string& vsPath, const std::string& fsPath) {
+		bgfx::ProgramHandle h = LoadProgram(vsPath, fsPath);
+		if (bgfx::isValid(h)) {
+			m_Program = EncodeProgram(h.idx);
+			m_IsValid = true;
+		}
+		(void)fsPath; // captured by LoadProgram via vsPath stem.
+	}
 
-            const char* typeStr = (type == GL_VERTEX_SHADER) ? "vertex" :
-                (type == GL_FRAGMENT_SHADER) ? "fragment" : "unknown";
-            AIM_ERROR_TAG("Shader", std::string("Compile failed (") + typeStr + "): " + path + "\n" + log.data());
+	Shader::Shader(GLuint /*program*/) {}
 
-            glDeleteShader(shader);
-            return 0;
-        }
+	Shader::~Shader() {
+		if (m_Program != 0) {
+			bgfx::destroy(FromMProgram(m_Program));
+			m_Program = 0;
+			m_IsValid = false;
+		}
+	}
 
-        return shader;
-    }
+	Shader::Shader(Shader&& other) noexcept
+		: m_Program(other.m_Program)
+		, m_IsValid(other.m_IsValid)
+	{
+		other.m_Program = 0;
+		other.m_IsValid = false;
+	}
 
-    Shader::Shader(const std::string& vsPath, const std::string& fsPath) {
-        GLuint vs = LoadAndCompile(GL_VERTEX_SHADER, vsPath);
-        if (vs == 0) return;
+	Shader& Shader::operator=(Shader&& other) noexcept {
+		if (this != &other) {
+			if (m_Program != 0) bgfx::destroy(FromMProgram(m_Program));
+			m_Program = other.m_Program;
+			m_IsValid = other.m_IsValid;
+			other.m_Program = 0;
+			other.m_IsValid = false;
+		}
+		return *this;
+	}
 
-        GLuint fs = LoadAndCompile(GL_FRAGMENT_SHADER, fsPath);
-        if (fs == 0) { glDeleteShader(vs); return; }
+	Shader Shader::FromBinary(const std::string& binaryPath) {
+		// Treat `binaryPath` as the vsPath stem (caller convention is
+		// "<name>.bin", we re-derive vs/fs from the stem).
+		Shader s{ 0u };
+		bgfx::ProgramHandle h = LoadProgram(binaryPath, binaryPath);
+		if (bgfx::isValid(h)) {
+			s.m_Program = EncodeProgram(h.idx);
+			s.m_IsValid = true;
+		}
+		return s;
+	}
 
-        m_Program = glCreateProgram();
-        if (m_Program == 0) {
-            AIM_ERROR_TAG("Shader", "Failed to create shader program for files: " + vsPath + " + " + fsPath);
-            glDeleteShader(vs);
-            glDeleteShader(fs);
-            return;
-        }
-        glAttachShader(m_Program, vs);
-        glAttachShader(m_Program, fs);
-        glLinkProgram(m_Program);
+	bool Shader::ExportBinary(const std::string& /*outputPath*/) const {
+		// bgfx programs are immutable handles — there's no readback path.
+		// Shader binaries are produced by the offline shaderc step in
+		// AxiomAssets/Shaders/bgfx/compile.bat.
+		return false;
+	}
 
-        glDeleteShader(vs);
-        glDeleteShader(fs);
+	Shader Shader::LoadWithBinaryCache(const std::string& binaryPath,
+		const std::string& vsPath, const std::string& fsPath)
+	{
+		// Cache step is a no-op under bgfx — the .bin files ARE the cache.
+		(void)binaryPath;
+		return Shader{ vsPath, fsPath };
+	}
 
-        GLint linked = GL_FALSE;
-        glGetProgramiv(m_Program, GL_LINK_STATUS, &linked);
-        if (linked != GL_TRUE) {
-            GLint logLen = 0;
-            glGetProgramiv(m_Program, GL_INFO_LOG_LENGTH, &logLen);
-            std::vector<GLchar> log(std::max(1, logLen));
-            glGetProgramInfoLog(m_Program, logLen, nullptr, log.data());
+	void Shader::Submit() const {
+		// bgfx submits programs per-draw via bgfx::submit(view, program).
+		// The actual submit happens in Renderer2D_Bgfx, not here.
+	}
 
-            AIM_ERROR_TAG("Shader", std::string("Program link failed : ") + vsPath + " + " + fsPath + "\n" + log.data());
+	GLuint Shader::LoadAndCompile(GLenum /*type*/, const std::string& /*path*/) {
+		return 0;
+	}
 
-            glDeleteProgram(m_Program);
-            m_Program = 0;
-            return;
-        }
-
-        m_IsValid = true;
-    }
-
-    Shader::~Shader() {
-        if (m_Program != 0) {
-            glDeleteProgram(m_Program);
-            m_Program = 0;
-        }
-    }
-
-    Shader::Shader(Shader&& o) noexcept {
-        m_Program = o.m_Program;
-        m_IsValid = o.m_IsValid;
-        o.m_Program = 0;
-        o.m_IsValid = false;
-    }
-
-    Shader& Shader::operator=(Shader&& o) noexcept {
-        if (this != &o) {
-            if (m_Program != 0) {
-                glDeleteProgram(m_Program);
-            }
-            m_Program = o.m_Program;
-            m_IsValid = o.m_IsValid;
-            o.m_Program = 0;
-            o.m_IsValid = false;
-        }
-        return *this;
-    }
-
-    void Shader::Submit() const {
-        if (IsValid()) {
-            glUseProgram(m_Program);
-        }
-        else {
-            glUseProgram(0);
-        }
-    }
-
-    Shader::Shader(GLuint program)
-        : m_Program(program)
-        , m_IsValid(program != 0)
-    {
-    }
-
-    Shader Shader::FromBinary(const std::string& binaryPath) {
-        // Hard cap on the data we'll allocate for a header-claimed payload.
-        // Real shader binaries are well under this; the cap is a defence
-        // against a corrupted header that asks us to allocate gigabytes.
-        constexpr GLsizei k_MaxShaderBinaryBytes = 16 * 1024 * 1024; // 16 MB
-
-        std::ifstream file(binaryPath, std::ios::binary);
-        if (!file.is_open()) {
-            return Shader(static_cast<GLuint>(0));
-        }
-
-        BinaryHeader header{};
-        file.read(reinterpret_cast<char*>(&header), sizeof(header));
-        if (!file || header.magic != kAxiomShaderMagic || header.version != kAxiomShaderVersion || header.dataLength <= 0) {
-            AIM_CORE_WARN_TAG("Shader", "Invalid binary shader header: " + binaryPath);
-            return Shader(static_cast<GLuint>(0));
-        }
-
-        // Cross-check the header's claimed payload size against the actual
-        // remaining file size and our hard cap. A torn/forged header could
-        // otherwise drive an arbitrary allocation before std::ifstream ever
-        // notices the truncation.
-        std::error_code fsEc;
-        const auto onDiskSize = std::filesystem::file_size(binaryPath, fsEc);
-        const std::uintmax_t bytesAfterHeader = (!fsEc && onDiskSize >= sizeof(header))
-            ? (onDiskSize - sizeof(header)) : 0;
-        if (header.dataLength > k_MaxShaderBinaryBytes
-            || (!fsEc && static_cast<std::uintmax_t>(header.dataLength) > bytesAfterHeader))
-        {
-            AIM_CORE_ERROR_TAG("Shader",
-                "Binary shader header reports implausible dataLength ({} bytes) for file '{}' (cap {}, on-disk after-header {}). Refusing to load.",
-                static_cast<long long>(header.dataLength),
-                binaryPath,
-                static_cast<long long>(k_MaxShaderBinaryBytes),
-                static_cast<long long>(bytesAfterHeader));
-            return Shader(static_cast<GLuint>(0));
-        }
-
-        std::vector<uint8_t> data(header.dataLength);
-        file.read(reinterpret_cast<char*>(data.data()), header.dataLength);
-        if (!file) {
-            AIM_CORE_WARN_TAG("Shader", "Truncated binary shader file: " + binaryPath);
-            return Shader(static_cast<GLuint>(0));
-        }
-
-        GLuint program = glCreateProgram();
-        if (program == 0) {
-            AIM_ERROR_TAG("Shader", "Failed to create program for binary shader: " + binaryPath);
-            return Shader(static_cast<GLuint>(0));
-        }
-
-        glProgramBinary(program, header.binaryFormat, data.data(), header.dataLength);
-
-        GLint linked = GL_FALSE;
-        glGetProgramiv(program, GL_LINK_STATUS, &linked);
-        if (linked != GL_TRUE) {
-            AIM_CORE_WARN_TAG("Shader", "Binary shader validation failed (driver/GPU change?): " + binaryPath);
-            glDeleteProgram(program);
-            return Shader(static_cast<GLuint>(0));
-        }
-
-        return Shader(program);
-    }
-
-    bool Shader::ExportBinary(const std::string& outputPath) const {
-        if (!IsValid()) {
-            AIM_ERROR_TAG("Shader", "Cannot export invalid shader program");
-            return false;
-        }
-
-        GLint binaryLength = 0;
-        glGetProgramiv(m_Program, GL_PROGRAM_BINARY_LENGTH, &binaryLength);
-        if (binaryLength <= 0) {
-            AIM_CORE_WARN_TAG("Shader", "Driver does not support program binary retrieval");
-            return false;
-        }
-
-        std::vector<uint8_t> data(binaryLength);
-        GLenum binaryFormat = 0;
-        GLsizei actualLength = 0;
-        glGetProgramBinary(m_Program, binaryLength, &actualLength, &binaryFormat, data.data());
-
-        if (actualLength <= 0) {
-            AIM_CORE_WARN_TAG("Shader", "glGetProgramBinary returned no data");
-            return false;
-        }
-
-        BinaryHeader header{};
-        header.magic = kAxiomShaderMagic;
-        header.version = kAxiomShaderVersion;
-        header.binaryFormat = binaryFormat;
-        header.dataLength = actualLength;
-
-        std::ofstream file(outputPath, std::ios::binary);
-        if (!file.is_open()) {
-            AIM_CORE_WARN_TAG("Shader", "Cannot write binary shader to: " + outputPath);
-            return false;
-        }
-
-        file.write(reinterpret_cast<const char*>(&header), sizeof(header));
-        file.write(reinterpret_cast<const char*>(data.data()), actualLength);
-        return file.good();
-    }
-
-    Shader Shader::LoadWithBinaryCache(
-        const std::string& binaryPath,
-        const std::string& vsPath,
-        const std::string& fsPath)
-    {
-        if (std::filesystem::exists(binaryPath)) {
-            Shader cached = FromBinary(binaryPath);
-            if (cached.IsValid()) {
-                AIM_INFO_TAG("Shader", "Loaded precompiled shader: " + binaryPath);
-                return cached;
-            }
-            AIM_CORE_WARN_TAG("Shader", "Stale binary shader, recompiling from source");
-        }
-
-        Shader shader(vsPath, fsPath);
-        if (shader.IsValid()) {
-            if (shader.ExportBinary(binaryPath)) {
-                AIM_INFO_TAG("Shader", "Cached compiled shader: " + binaryPath);
-            }
-        }
-        return shader;
-    }
-
-}
+} // namespace Axiom

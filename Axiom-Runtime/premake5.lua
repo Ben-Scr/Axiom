@@ -35,6 +35,15 @@ project "Axiom-Runtime"
     -- runtime exe so the F6/F7 toggle layers can drive them.
     files { path.join(ROOT_DIR, "Axiom-Engine/src/Diagnostics/**.cpp") }
 
+    -- ImGuiImplBgfx now lives inside Axiom-Engine.dll (was previously
+    -- statically pulled into every consumer .exe). bgfx's renderer
+    -- state is held in process-global statics; static-linking bgfx
+    -- into both engine.dll and the runtime .exe meant the runtime's
+    -- bgfx state was uninitialised even after engine.dll's bgfx::init
+    -- ran. Centralising the imgui-bgfx backend in engine.dll fixes
+    -- that — RuntimeImGuiHost.cpp now `#includes "Gui/ImGuiImplBgfx.hpp"`
+    -- from the engine include path and links the AXIOM_API exports.
+
     UseDependencySet(Dependency.EditorRuntimeCommon)
     defines(GetAxiomModuleDefines())
     defines { "AIM_IMPORT_DLL" }

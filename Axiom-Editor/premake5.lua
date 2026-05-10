@@ -25,6 +25,15 @@ project "Axiom-Editor"
     -- into the editor binary so the Game View toolbar can drive them.
     files { path.join(ROOT_DIR, "Axiom-Engine/src/Diagnostics/**.cpp") }
 
+    -- ImGuiImplBgfx now lives inside Axiom-Engine.dll. The editor used
+    -- to compile its own copy from src/Gui/ImGuiImplBgfx.cpp here, but
+    -- that gave the editor binary its own static-linked copy of bgfx
+    -- — meaning the editor's `bgfx::getRendererType()` returned `Noop`
+    -- even though engine.dll had brought up D3D11. Source moved into
+    -- Axiom-Engine/src/Gui/ImGuiImplBgfx.cpp; the editor's
+    -- ImGuiContextLayer.cpp now `#includes "Gui/ImGuiImplBgfx.hpp"`
+    -- via the engine include path and links the AXIOM_API exports.
+
     UseDependencySet(Dependency.EditorRuntimeCommon)
     defines(GetAxiomModuleDefines())
     defines { "AIM_IMPORT_DLL" }

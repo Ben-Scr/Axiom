@@ -2,15 +2,16 @@
 #include "Systems/ImGuiEditorLayer.hpp"
 
 #include <imgui.h>
-#include <glad/glad.h>
 
 #include "Components/Components.hpp"
 #include "Core/Application.hpp"
 #include "Core/Window.hpp"
 #include "Diagnostics/StatsOverlay.hpp"
 #include "Editor/ApplicationEditorAccess.hpp"
+#include "Graphics/Framebuffer.hpp"
 #include "Graphics/GizmoRenderer.hpp"
 #include "Graphics/Gizmo.hpp"
+#include "Graphics/RenderApi.hpp"
 #include "Graphics/Renderer2D.hpp"
 #include "Graphics/TextureManager.hpp"
 #include "Gui/GuiRenderer.hpp"
@@ -45,7 +46,7 @@ namespace Axiom {
 		}};
 	}
 
-	void ImGuiEditorLayer::RenderSceneIntoFBO(ViewportFBO& fbo, Scene& scene,
+	void ImGuiEditorLayer::RenderSceneIntoFBO(Framebuffer& fbo, Scene& scene,
 		const glm::mat4& vp, const AABB& viewportAABB,
 		bool withGizmos, bool sharedGizmosOnly, const Color& clearColor,
 		bool onlyPassedScene, bool uiInWorldSpace,
@@ -56,13 +57,16 @@ namespace Axiom {
 		auto* renderer = app->GetRenderer2D();
 		if (!renderer) return;
 
-		int w = fbo.ViewportSize.GetWidth();
-		int h = fbo.ViewportSize.GetHeight();
+		const int w = fbo.GetWidth();
+		const int h = fbo.GetHeight();
 
-		glBindFramebuffer(GL_FRAMEBUFFER, fbo.FramebufferId);
-		glViewport(0, 0, w, h);
-		glClearColor(clearColor.r, clearColor.g, clearColor.b, clearColor.a);
-		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+		// All immediate-mode state goes through RenderApi after Stage 0 of
+		// the bgfx port — no glXxx calls in editor code anymore. Backend
+		// translation lives in `Graphics/Backend/OpenGLApi.cpp`.
+		RenderApi::BindFramebuffer(fbo);
+		RenderApi::SetViewport(0, 0, w, h);
+		RenderApi::SetClearColor(clearColor);
+		RenderApi::Clear(ClearFlags::Color | ClearFlags::Depth);
 
 		// Sprites + UI + (optional) gizmos extracted into a callable so
 		// the Mixed draw mode can run the scene twice — once filled and
@@ -123,25 +127,23 @@ namespace Axiom {
 			}
 		};
 
-		// Wireframe pass uses glColorLogicOp(GL_CLEAR) instead of relying
-		// on each shader to honour a debug uniform. GL_CLEAR forces every
-		// touched pixel's RGB to 0 *after* the fragment shader runs, and
-		// the alpha mask keeps the FBO opaque. The net effect is "every
-		// triangle edge becomes solid black, regardless of what the
-		// entity's shader/texture/colour would normally output." Logic op
-		// also overrides blending, so semi-transparent quads still emit
-		// an opaque black edge — which is what the user wants in this
-		// debug view.
+		// Wireframe pass uses RenderApi::BeginColorLogicOpClear (GL_CLEAR
+		// under the hood) instead of relying on each shader to honour a
+		// debug uniform. The logic-op forces every touched pixel's RGB
+		// to 0 *after* the fragment shader runs, and the alpha mask
+		// keeps the FBO opaque. The net effect is "every triangle edge
+		// becomes solid black, regardless of what the entity's shader/
+		// texture/colour would normally output." Logic op also overrides
+		// blending, so semi-transparent quads still emit an opaque black
+		// edge — which is what the user wants in this debug view.
 		auto runWireframePass = [&]() {
-			glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
-			glEnable(GL_COLOR_LOGIC_OP);
-			glLogicOp(GL_CLEAR);
-			glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_FALSE);
+			RenderApi::SetPolygonMode(PolygonMode::Wireframe);
+			RenderApi::BeginColorLogicOpClear();
+			RenderApi::SetColorMask(true, true, true, false);
 			runSceneRender();
-			glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-			glLogicOp(GL_COPY);
-			glDisable(GL_COLOR_LOGIC_OP);
-			glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+			RenderApi::SetColorMask(true, true, true, true);
+			RenderApi::EndColorLogicOpClear();
+			RenderApi::SetPolygonMode(PolygonMode::Filled);
 		};
 
 		switch (drawMode) {
@@ -158,11 +160,11 @@ namespace Axiom {
 			break;
 		}
 
-		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+		RenderApi::BindDefaultFramebuffer();
 
 		auto* window = Application::GetWindow();
 		if (window) {
-			glViewport(0, 0, window->GetWidth(), window->GetHeight());
+			RenderApi::SetViewport(0, 0, window->GetWidth(), window->GetHeight());
 		}
 	}
 
@@ -389,7 +391,7 @@ namespace Axiom {
 				// constant regardless of zoom — matches what users expect
 				// from a manipulator handle.
 				const AABB camAABB = m_EditorCamera.GetViewportAABB();
-				const float worldPerScreenPx = camAABB.Scale().x / std::max(1.0f, static_cast<float>(m_EditorViewFBO.ViewportSize.GetWidth()));
+				const float worldPerScreenPx = camAABB.Scale().x / std::max(1.0f, static_cast<float>(m_EditorViewFBO.GetWidth()));
 				const float handleHalf = 5.0f * worldPerScreenPx;
 				const Vec2 handleSize{ handleHalf * 2.0f, handleHalf * 2.0f };
 				const float rectRotDeg = Degrees(rect.Rotation);
@@ -492,10 +494,10 @@ namespace Axiom {
 
 		if (fbW > 0 && fbH > 0) {
 
-			EnsureFBO(m_EditorViewFBO, fbW, fbH);
+			m_EditorViewFBO.Recreate(fbW, fbH);
 			m_EditorCamera.SetViewportSize(fbW, fbH);
 
-			if (m_EditorViewFBO.FramebufferId != 0) {
+			if (m_EditorViewFBO.IsValid()) {
 
 				auto* app = Application::GetInstance();
 				if (app) {
@@ -526,7 +528,7 @@ namespace Axiom {
 				Gizmo::ClearViewportAABBOverride();
 
 				ImGui::Image(
-					static_cast<ImTextureID>(static_cast<intptr_t>(m_EditorViewFBO.ColorTextureId)),
+					static_cast<ImTextureID>(static_cast<intptr_t>(m_EditorViewFBO.GetColorTextureBackendId())),
 					viewportSize,
 					ImVec2(0.0f, 1.0f),
 					ImVec2(1.0f, 0.0f));
@@ -691,12 +693,16 @@ namespace Axiom {
 							case 2: text.Margin.w += pixDy; break; // Bottom → drag up grows bottom margin
 							case 3: text.Margin.y -= pixDy; break; // Top    → drag up SHRINKS top margin
 							}
-							// Clamp to non-negative; a negative margin would
-							// place the inner rect outside the outer rect.
-							if (text.Margin.x < 0.0f) text.Margin.x = 0.0f;
-							if (text.Margin.y < 0.0f) text.Margin.y = 0.0f;
-							if (text.Margin.z < 0.0f) text.Margin.z = 0.0f;
-							if (text.Margin.w < 0.0f) text.Margin.w = 0.0f;
+							// Margins are free to go negative — that lets a
+							// designer push the inner text rect OUTSIDE the
+							// host RectTransform2D's bounds (e.g. a label
+							// whose visible text spills past the panel it
+							// reads from). The previous non-negative clamp
+							// was a defensive cap that vetoed that valid
+							// authoring intent. The renderer still floors
+							// the resulting wrap width at 0 so an over-
+							// shot margin can't generate negative-width
+							// wrap rects.
 							if (renderScene) renderScene->MarkDirty();
 						}
 					}
@@ -831,10 +837,10 @@ namespace Axiom {
 		const int fbH = std::max(1, static_cast<int>(std::round(renderSize.y)));
 
 		if (viewportSize.x > 0.0f && viewportSize.y > 0.0f) {
-			EnsureFBO(m_GameViewFBO, fbW, fbH);
+			m_GameViewFBO.Recreate(fbW, fbH);
 
 			Camera2DComponent* gameCam = Camera2DComponent::Main();
-			if (m_GameViewFBO.FramebufferId != 0 && gameCam && gameCam->IsValid()) {
+			if (m_GameViewFBO.IsValid() && gameCam && gameCam->IsValid()) {
 				Viewport* savedViewport = gameCam->GetViewport();
 				if (!savedViewport) {
 					ImGui::TextDisabled("Main camera has no viewport");
@@ -943,7 +949,7 @@ namespace Axiom {
 				drawList->AddRectFilled(canvasMin, canvasMax, IM_COL32(0, 0, 0, 255));
 
 				drawList->AddImage(
-					static_cast<ImTextureID>(static_cast<intptr_t>(m_GameViewFBO.ColorTextureId)),
+					static_cast<ImTextureID>(static_cast<intptr_t>(m_GameViewFBO.GetColorTextureBackendId())),
 					imageMin,
 					imageMax,
 					ImVec2(0.0f, 1.0f),
