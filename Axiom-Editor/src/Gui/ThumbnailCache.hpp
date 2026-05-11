@@ -4,6 +4,7 @@
 
 #include <imgui.h>
 
+#include <cstdint>
 #include <list>
 #include <memory>
 #include <string>
@@ -20,10 +21,12 @@ namespace Axiom {
 		void Initialize();
 		void Shutdown();
 
-		// Returns the OpenGL texture ID for the given asset, or 0 if none.
+		// Returns the backend texture handle for the given asset, or 0 if none.
+		// Under WebGPU this is the raw WGPUTextureView pointer (cast to uint64_t)
+		// so the value can be passed straight to ImGui::Image as an ImTextureID.
 		// For image files, loads and caches the actual image as a thumbnail.
 		// For other types, returns 0 (caller should use DrawAssetIcon instead).
-		unsigned int GetThumbnail(const std::string& absolutePath);
+		uint64_t GetThumbnail(const std::string& absolutePath);
 
 		// Returns the cached Texture2D for an already-loaded thumbnail, or nullptr.
 		Texture2D* GetCacheEntry(const std::string& absolutePath);
@@ -50,7 +53,10 @@ namespace Axiom {
 		// touching an entry on lookup is O(1) (splice to front + map lookup).
 		struct CachedThumbnail {
 			std::unique_ptr<Texture2D> Texture;
-			unsigned int GlHandle = 0;
+			// Backend handle returned by Texture2D::GetHandle(). Under WebGPU
+			// this is the raw WGPUTextureView pointer (cast to uint64_t); the
+			// field name predates the OpenGL → WebGPU port.
+			uint64_t GlHandle = 0;
 			std::list<std::string>::iterator LruIt;
 		};
 

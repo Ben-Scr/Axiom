@@ -289,6 +289,54 @@ internal static unsafe class InternalCalls
         fixed (byte* ptr = buf) return NativeCallbacks.Bindings.Entity_RemoveComponent(entityID, ptr) != 0;
     }
 
+    // Returns the raw void* into the entity's component slot, or null when the
+    // entity / component is missing. Caller is responsible for casting to the
+    // matching blittable struct mirror — the layout-size guard in ScriptHostBridge
+    // (via Entity_GetComponentSize at startup) is what stops a stale C# mirror
+    // from silently corrupting memory.
+    internal static void* Entity_GetComponentPtr(ulong entityID, string componentName)
+    {
+        byte[] buf = EncodeUtf8Z(componentName);
+        fixed (byte* ptr = buf) return NativeCallbacks.Bindings.Entity_GetComponentPtr(entityID, ptr);
+    }
+
+    internal static int Entity_GetComponentSize(string componentName)
+    {
+        byte[] buf = EncodeUtf8Z(componentName);
+        fixed (byte* ptr = buf) return NativeCallbacks.Bindings.Entity_GetComponentSize(ptr);
+    }
+
+    // Native query that returns one row of raw component pointers per matching
+    // entity. `outPointers` is sized `maxRows × poolCount` (caller-managed).
+    // Returns the actual matched row count; if > maxRows, the caller resizes
+    // and retries — same convention as the existing Scene_QueryEntities path.
+    // The string arguments are pipe-separated component display/serialized
+    // names; empty / null is allowed for any of them.
+    internal static int Scene_OpenQueryView(
+        string? sceneName,
+        string? writeNames,
+        string? readonlyNames,
+        string? mustHaveNames,
+        string? withoutNames,
+        int enableFilter,
+        void** outPointers,
+        int maxRows)
+    {
+        byte[] sceneBuf = EncodeUtf8Z(sceneName ?? "");
+        byte[] writeBuf = EncodeUtf8Z(writeNames ?? "");
+        byte[] roBuf    = EncodeUtf8Z(readonlyNames ?? "");
+        byte[] mustBuf  = EncodeUtf8Z(mustHaveNames ?? "");
+        byte[] withoutBuf = EncodeUtf8Z(withoutNames ?? "");
+        fixed (byte* sc = sceneBuf)
+        fixed (byte* w  = writeBuf)
+        fixed (byte* ro = roBuf)
+        fixed (byte* mh = mustBuf)
+        fixed (byte* wo = withoutBuf)
+        {
+            return NativeCallbacks.Bindings.Scene_OpenQueryView(sc, w, ro, mh, wo, enableFilter, outPointers, maxRows);
+        }
+    }
+
     internal static string Entity_GetManagedComponentFields(ulong entityID, string componentName)
     {
         byte[] buf = EncodeUtf8Z(componentName);

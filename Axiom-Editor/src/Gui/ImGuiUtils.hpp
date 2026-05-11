@@ -6,6 +6,7 @@
 #include <magic_enum/magic_enum.hpp>
 #include <algorithm>
 #include <array>
+#include <cstdint>
 #include <cstring>
 #include <functional>
 #include <span>
@@ -140,7 +141,7 @@ namespace Axiom::ImGuiUtils {
 		return changed;
 	}
 
-	void DrawTexturePreview(unsigned int rendererId, float texWidth, float texHeight, float previewSize = 96.0f);
+	void DrawTexturePreview(uint64_t rendererId, float texWidth, float texHeight, float previewSize = 96.0f);
 	std::string Ellipsize(const std::string& text, float maxWidth, bool* outTruncated = nullptr);
 	void TextEllipsis(const std::string& text, float maxWidth = -1.0f);
 	void TextDisabledEllipsis(const std::string& text, float maxWidth = -1.0f);

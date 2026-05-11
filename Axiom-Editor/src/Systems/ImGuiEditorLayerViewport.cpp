@@ -560,7 +560,7 @@ namespace Axiom {
 						continue;
 					}
 
-					unsigned int camIcon = EditorIcons::Get("camera", 24);
+					uint64_t camIcon = EditorIcons::Get("camera", 24);
 					if (!camIcon) {
 						continue;
 					}

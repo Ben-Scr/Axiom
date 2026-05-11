@@ -55,17 +55,24 @@ newoption
     description = "Strip the Axiom profiler entirely from the build. Without this flag, Tracy is compiled into the engine, AXIOM_PROFILER_ENABLED is defined for engine/editor/runtime, and the in-engine ImGui Profiler panel is available. Pass --no-profiler for shipped runtime builds with strict size budgets."
 }
 
--- Engine renders exclusively through bgfx. The runtime backend (D3D11 /
--- D3D12 / Vulkan / OpenGL / Metal) is selected by the project's BgfxBackend
--- setting at bgfx::init time — no premake regen required to switch among
--- those. The legacy direct-OpenGL path (Glad + GLFW GL context) was retired
--- on 2026-05; AxiomRhi is kept as a permanent `IsBgfx = true` so the rest
--- of the build script doesn't have to be rewritten in lockstep, but every
--- branch that consults it now resolves to the bgfx side.
+-- Render-hardware-interface (RHI): WebGPU via Dawn, period.
+--
+-- The bgfx-era `--rhi` premake flag was retired on Stage 10 of the WebGPU
+-- port (along with the bgfx submodules at External/bgfx, External/bx,
+-- External/bimg and every Backend/Bgfx*.cpp / *_WebGPU.cpp sibling). The
+-- engine has exactly one graphics backend now; the runtime D3D12/Vulkan/
+-- Metal choice underneath Dawn is selected by Dawn itself based on the
+-- adapter request in WebGPUApi.cpp::RequestAdapterSync.
+--
+-- AxiomRhi stays as a constant table so the few downstream consumers that
+-- still consult `AxiomRhi.IsBgfx` / `AxiomRhi.IsWebGPU` resolve cleanly
+-- without a coordinated rewrite. A future cleanup can delete the table
+-- once those branches are pruned.
 AxiomRhi = {}
-AxiomRhi.Backend = "bgfx"
-AxiomRhi.IsBgfx = true
-AxiomRhi.IsOpenGL = false
+AxiomRhi.Backend  = "webgpu"
+AxiomRhi.IsBgfx   = false
+AxiomRhi.IsWebGPU = true
+AxiomRhi.IsOpenGL = false  -- retired 2026-05
 
 -- Resolved early so subsequent dep-set wiring can branch on it. Default ON;
 -- explicit --no-profiler turns it off. The single boolean drives:
@@ -77,6 +84,14 @@ AxiomProfiler = {}
 AxiomProfiler.Enabled = not _OPTIONS["no-profiler"]
 
 require("premake/fix_csharp_platforms")
+
+-- Surface DawnLayout (include / lib / define paths to the pre-built
+-- webgpu_dawn.lib) BEFORE Dependencies.lua is loaded so EngineCoreRender
+-- can splice the layout's lists into its own. dawn.lua is always loaded
+-- — WebGPU is the only RHI, so a missing External/dawn/ checkout is a
+-- real configuration error (scripts/SetupDawn.bat fixes it).
+include "premake/dependencies/dawn.lua"
+
 include "Dependencies.lua"
 
 local function HasExplicitModuleOption()
@@ -134,13 +149,13 @@ AxiomModules = ResolveAxiomModules()
 -- ImGui context as a Layer). EngineCoreEditor is therefore consumed only by the
 -- editor and launcher executables, not by the engine static library.
 --
--- Exception: under --rhi=bgfx, the engine DLL hosts the bgfx-imgui backend
--- (Gui/ImGuiImplBgfx.cpp). bgfx's renderer state is a per-DLL static, so the
--- backend has to live in the same module as bgfx::init — which is engine.dll.
--- That TU calls into ImGui (`ImGui::GetIO()`, `io.Fonts->...`) and so requires
--- the ImGui headers + lib to be reachable here; we sync the consumer's
--- ImGuiContext into engine.dll via PackageImGuiBridge at every backend entry
--- point (same pattern packages already use).
+-- Exception: engine.dll hosts the WebGPU-side ImGui backend
+-- (Gui/ImGuiImplWebGPU.cpp, a thin wrapper around the official
+-- imgui_impl_wgpu). It touches the wgpu::Device that lives in
+-- WebGPUApi.cpp's TU, so it has to compile in the same module. The
+-- consumer's ImGuiContext is synced into engine.dll's ImGui copy through
+-- PackageImGuiBridge at every backend entry point (same pattern packages
+-- already use).
 Dependency.EngineSelectedModules = MergeDependencySets(
     Dependency.EngineCore,
     AxiomModules.Render and Dependency.EngineCoreRender or nil,
@@ -148,7 +163,7 @@ Dependency.EngineSelectedModules = MergeDependencySets(
     AxiomModules.Physics and Dependency.EngineCorePhysics or nil,
     AxiomModules.Scripting and Dependency.EngineCoreScripting or nil,
     AxiomProfiler.Enabled and Dependency.Profiler or nil,
-    AxiomRhi.IsBgfx and Dependency.EngineCoreEditor or nil
+    Dependency.EngineCoreEditor  -- engine.dll always hosts the ImGui backend
 )
 
 Dependency.EditorRuntimeCommon = MergeDependencySets(
@@ -247,6 +262,31 @@ local function NormalizeRootPaths(paths)
     return normalized
 end
 
+-- Apply per-config libdirs pointing at Dawn's Debug vs Release output
+-- folders. Call once inside a project block; the filter context resets
+-- afterwards so subsequent project config isn't accidentally scoped.
+--
+-- `rootRelPrefix` is the path prefix to prepend so the (repo-root-
+-- relative) Dawn build directory resolves correctly from the consumer's
+-- own premake working directory. Top-level project folders (Axiom-Engine/,
+-- Axiom-Editor/, etc.) need "../"; deeper folders (Tests/Axiom-Engine-
+-- Tests/) need "../../" — caller picks.
+--
+-- Why per-config: webgpu_dawn.lib lives in both `Debug/` and `Release/`
+-- subdirectories with /MDd vs /MD runtime selection respectively. Linking
+-- the wrong-config lib into an /MDd Debug engine produces LNK2038
+-- "RuntimeLibrary" + "_ITERATOR_DEBUG_LEVEL" mismatch errors.
+function ApplyDawnLibDirs(rootRelPrefix)
+    local p = rootRelPrefix or "../"
+    filter "configurations:Debug"
+        libdirs { p .. "External/dawn/build/src/dawn/native/Debug" }
+    filter "configurations:Release"
+        libdirs { p .. "External/dawn/build/src/dawn/native/Release" }
+    filter "configurations:Dist"
+        libdirs { p .. "External/dawn/build/src/dawn/native/Release" }
+    filter {}
+end
+
 function UseDependencySet(dep)
     if dep.IncludeDirs then
         includedirs(NormalizeRootPaths(dep.IncludeDirs))
@@ -295,12 +335,25 @@ if AxiomModules.Editor then
             "External/imgui/imgui_tables.cpp",
             "External/imgui/imgui_widgets.cpp",
 
-            -- Backend (Axiom uses GLFW + OpenGL3)
+            -- Backends:
+            --   * imgui_impl_glfw     — used by editor / launcher / runtime
+            --     executables for input + window-event plumbing.
+            --   * imgui_impl_opengl3  — used by those same executables for
+            --     their own ImGui overlays (editor-managed panels, the
+            --     launcher's project picker, runtime debug HUD). These run
+            --     against a GLFW-owned GL context that's independent from
+            --     the engine's WebGPU device.
+            --   * imgui_impl_wgpu     — used by engine.dll via
+            --     Gui/ImGuiImplWebGPU.cpp for in-engine ImGui draws on the
+            --     shared wgpu::Device. Headers are reachable through
+            --     Dependency.ImGui below (DawnLayout spliced in).
             "External/imgui/backends/imgui_impl_glfw.h",
             "External/imgui/backends/imgui_impl_glfw.cpp",
             "External/imgui/backends/imgui_impl_opengl3.h",
             "External/imgui/backends/imgui_impl_opengl3.cpp",
-            "External/imgui/backends/imgui_impl_opengl3_loader.h"
+            "External/imgui/backends/imgui_impl_opengl3_loader.h",
+            "External/imgui/backends/imgui_impl_wgpu.h",
+            "External/imgui/backends/imgui_impl_wgpu.cpp"
         }
 
         if _OPTIONS["with-imgui-demo"] then
@@ -328,7 +381,9 @@ if AxiomModules.Editor then
                 "External/imgui/backends/imgui_impl_glfw.cpp",
                 "External/imgui/backends/imgui_impl_opengl3.h",
                 "External/imgui/backends/imgui_impl_opengl3.cpp",
-                "External/imgui/backends/imgui_impl_opengl3_loader.h"
+                "External/imgui/backends/imgui_impl_opengl3_loader.h",
+                "External/imgui/backends/imgui_impl_wgpu.h",
+                "External/imgui/backends/imgui_impl_wgpu.cpp"
             },
             ["Optional/*"] = { "External/imgui/imgui_demo.cpp" }
         }
@@ -361,10 +416,11 @@ end
 
 if AxiomModules.Render then
     include "premake/dependencies/glfw.lua"
-    -- bgfx talks to the GPU through its own context layer
-    -- (wgl/egl/d3d/metal/vk/...) so Glad is no longer in the build —
-    -- the legacy direct-OpenGL path was retired on 2026-05.
-    include "premake/dependencies/bgfx.lua"
+    -- Dawn (WebGPU) is the engine's sole GPU backend. The pre-built
+    -- webgpu_dawn.lib comes from scripts/SetupDawn.bat — premake just
+    -- links against it; see dawn.lua / DawnLayout for the paths.
+    -- (No project here, no premake-side compilation — Dawn is too large
+    -- to mirror into premake.)
 end
 
 if AxiomModules.Physics then

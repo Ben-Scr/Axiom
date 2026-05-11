@@ -672,7 +672,7 @@ namespace Axiom {
 	}
 
 	static bool IconButton(const char* id, const char* iconName, float iconSize, const ImVec2& btnSize) {
-		unsigned int tex = EditorIcons::Get(iconName, (int)iconSize);
+		uint64_t tex = EditorIcons::Get(iconName, (int)iconSize);
 		if (tex)
 			return ImGui::ImageButton(id, (ImTextureID)(intptr_t)tex, btnSize, ImVec2(0, 1), ImVec2(1, 0));
 		return ImGui::Button(id + 2);

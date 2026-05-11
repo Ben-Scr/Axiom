@@ -63,18 +63,27 @@ namespace Axiom {
 
 		// Backend identifier for the colour attachment. The editor passes
 		// this into `ImGui::Image` so the panel samples this FBO's texture.
-		uint32_t GetColorTextureBackendId() const { return m_ColorTextureId; }
+		// Returns a 64-bit value because under the WebGPU backend it's the
+		// raw WGPUTextureView pointer (must fit 8 bytes on x64), while
+		// under earlier backends it stored a small integer handle. ImGui's
+		// ImTextureID is `ImU64` in current Dear ImGui, so a uint64_t fits
+		// the consumer's cast chain naturally.
+		uint64_t GetColorTextureBackendId() const { return m_ColorTextureId; }
 
 		int GetWidth() const { return m_Viewport.GetWidth(); }
 		int GetHeight() const { return m_Viewport.GetHeight(); }
 		const Viewport& GetViewport() const { return m_Viewport; }
 
 	private:
-		// Backend handles. 0 = unset. The OpenGL backend stores GL object
-		// IDs here; a future bgfx backend would either store the handle's
-		// `.idx` or be replaced with backend-specific members + ifdef.
+		// Backend handles. 0 = unset. Under WebGPU `m_ColorTextureId`
+		// stores the raw WGPUTextureView pointer cast to uint64_t so it
+		// can be passed straight through to ImGui's imgui_impl_wgpu as a
+		// real WGPUTextureView (imgui_impl_wgpu reinterpret_casts the
+		// supplied ImTextureID to WGPUTextureView and dereferences it).
+		// `m_BackendId` stays a 32-bit pool key indexing into
+		// Framebuffer_WebGPU.cpp's GPU resource map.
 		uint32_t m_BackendId       = 0;
-		uint32_t m_ColorTextureId  = 0;
+		uint64_t m_ColorTextureId  = 0;
 		uint32_t m_DepthRenderbuffer = 0;
 
 		Viewport m_Viewport{ 0, 0 };

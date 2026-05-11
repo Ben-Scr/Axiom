@@ -1,6 +1,7 @@
 using System;
 using System.Runtime.InteropServices;
 using System.Threading;
+using Axiom.Components;
 using Axiom.Coroutines;
 
 namespace Axiom.Interop;
@@ -175,6 +176,13 @@ internal static class ScriptHostBridge
             managedCallbacks->InvokeScriptMethodByName = &ScriptInstanceManager.InvokeScriptMethodByName;
 
             ScriptInstanceManager.SetCoreAssembly(typeof(ScriptHostBridge).Assembly);
+
+            // Eager layout-drift guard for the ECS ref-API: force every
+            // ComponentTypes<T> static ctor to run now so a C++/C# size
+            // mismatch surfaces here instead of when the first script
+            // happens to GetRef<T> mid-play. TypeInitializationException
+            // wraps the underlying message; the catch below logs both.
+            ComponentTypes.RunAllStaticInitializers();
 
             // Install the main-thread sync context so any `await` inside
             // a script resumes on the engine main thread via our per-frame

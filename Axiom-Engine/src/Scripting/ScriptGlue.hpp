@@ -554,6 +554,46 @@ namespace Axiom {
 		void (*Dropdown_SetPressedColor)(uint64_t entityID, float r, float g, float b, float a);
 		void (*Dropdown_GetDisabledColor)(uint64_t entityID, float* r, float* g, float* b, float* a);
 		void (*Dropdown_SetDisabledColor)(uint64_t entityID, float r, float g, float b, float a);
+
+		// ── ECS ref-API (appended for binary compat) ────────────────
+		// Direct pointer into the component's EnTT storage slot for `entityID`,
+		// or nullptr when the entity / component is missing. The C# side casts
+		// the void* to a blittable struct that mirrors the C++ component's
+		// layout and reads/writes fields with no per-property P/Invoke. Pointer
+		// is valid only until the next structural change to the same component
+		// pool, so callers refetch rather than cache across frames.
+		void* (*Entity_GetComponentPtr)(uint64_t entityID, const char* componentName);
+
+		// sizeof(T) of the underlying C++ component, 0 when the name doesn't
+		// resolve or the type is empty/tag. C# checks its mirror struct's
+		// sizeof against this at script-engine init and refuses to load the
+		// user assembly on mismatch — catches silent layout drift before it
+		// corrupts memory.
+		int (*Entity_GetComponentSize)(const char* componentName);
+
+		// Opens a view across the named pools and fills outPointers with
+		// one row per matching entity. Each row contains poolCount slots:
+		// the first `writeCount` are raw pointers into the write pools (in
+		// the order names appear in `writeNames`), followed by `roCount`
+		// pointers into the readonly pools (in `readonlyNames` order). C#
+		// derives poolCount itself from the type parameters and indexes
+		// outPointers as `outPointers[row * poolCount + col]`.
+		//
+		// Returns the actual matched row count. If the return is larger than
+		// `maxRows`, only the first `maxRows` rows were written and the
+		// caller should resize and retry (same pattern as Scene_QueryEntities).
+		// Pointers are invalidated by any structural change to the same
+		// component pool — scripts must NOT add/remove/destroy entities
+		// inside a query iteration.
+		int (*Scene_OpenQueryView)(
+			const char* sceneName,
+			const char* writeNames,
+			const char* readonlyNames,
+			const char* mustHaveNames,
+			const char* withoutNames,
+			int enableFilter,
+			void** outPointers,
+			int maxRows);
 	};
 
 	/// Layout must match C# ManagedCallbacksStruct exactly.

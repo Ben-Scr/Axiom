@@ -385,7 +385,7 @@ namespace Axiom::ReferencePicker {
 		// If the icon fails to load (icon dir missing on disk), fall
 		// back to an ASCII-labelled button so the toggle stays usable.
 		const ImGuiStyle& style = ImGui::GetStyle();
-		const unsigned int eyeIcon = EditorIcons::Get("visibility_eye", 16);
+		const uint64_t eyeIcon = EditorIcons::Get("visibility_eye", 16);
 		const ImVec2 eyeIconSize(16.0f, 16.0f);
 		const float toggleWidth = (eyeIcon != 0)
 			? eyeIconSize.x + style.FramePadding.x * 2.0f
@@ -490,7 +490,7 @@ namespace Axiom::ReferencePicker {
 						const ImVec2 thumbMax(thumbMin.x + thumbnailSize, thumbMin.y + thumbnailSize);
 						drawList->AddRectFilled(thumbMin, thumbMax, IM_COL32(35, 35, 35, 255), 4.0f);
 
-						const unsigned int thumbnail = s_State.Thumbnails.GetThumbnail(entry.Secondary);
+						const uint64_t thumbnail = s_State.Thumbnails.GetThumbnail(entry.Secondary);
 						Texture2D* texture = s_State.Thumbnails.GetCacheEntry(entry.Secondary);
 						if (thumbnail != 0 && texture && texture->IsValid()) {
 							float drawWidth = thumbnailSize;

@@ -535,6 +535,11 @@ internal unsafe struct NativeBindingsStruct
     public delegate* unmanaged<ulong, float, float, float, float, void> Dropdown_SetPressedColor;
     public delegate* unmanaged<ulong, float*, float*, float*, float*, void> Dropdown_GetDisabledColor;
     public delegate* unmanaged<ulong, float, float, float, float, void> Dropdown_SetDisabledColor;
+
+    // ── ECS ref-API (appended for binary compat with ScriptGlue.hpp) ──
+    public delegate* unmanaged<ulong, byte*, void*> Entity_GetComponentPtr;
+    public delegate* unmanaged<byte*, int> Entity_GetComponentSize;
+    public delegate* unmanaged<byte*, byte*, byte*, byte*, byte*, int, void**, int, int> Scene_OpenQueryView;
 }
 
 internal static unsafe class NativeCallbacks

@@ -711,7 +711,7 @@ namespace Axiom {
 		ImGui::SameLine();
 
 		{
-			unsigned int infoIcon = EditorIcons::Get("info", 16);
+			uint64_t infoIcon = EditorIcons::Get("info", 16);
 			if (infoIcon) {
 				ImVec4 tint = m_ShowLogInfo ? ImVec4(1, 1, 1, 1) : ImVec4(0.4f, 0.4f, 0.4f, 0.5f);
 				if (ImGui::ImageButton("##FilterInfo",
@@ -729,7 +729,7 @@ namespace Axiom {
 		ImGui::SameLine();
 
 		{
-			unsigned int warnIcon = EditorIcons::Get("warning", 16);
+			uint64_t warnIcon = EditorIcons::Get("warning", 16);
 			ImVec4 tint = m_ShowLogWarn ? ImVec4(1, 1, 1, 1) : ImVec4(0.4f, 0.4f, 0.4f, 0.5f);
 			if (warnIcon) {
 				if (ImGui::ImageButton("##FilterWarn",
@@ -751,7 +751,7 @@ namespace Axiom {
 		ImGui::SameLine();
 
 		{
-			unsigned int errIcon = EditorIcons::Get("error", 16);
+			uint64_t errIcon = EditorIcons::Get("error", 16);
 			ImVec4 tint = m_ShowLogError ? ImVec4(1, 1, 1, 1) : ImVec4(0.4f, 0.4f, 0.4f, 0.5f);
 			if (errIcon) {
 				if (ImGui::ImageButton("##FilterError",

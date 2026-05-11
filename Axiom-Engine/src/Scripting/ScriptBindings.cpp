@@ -470,6 +470,35 @@ namespace Axiom {
 		return 1;
 	}
 
+	// Raw component pointer for the ScriptCore ref-API. Returns the address of
+	// the entity's component instance inside EnTT's storage pool, or nullptr
+	// when the entity / component is missing. The C# side casts to a blittable
+	// struct mirroring the C++ layout and reads/writes fields directly.
+	// Validity contract: the returned pointer is invalidated by any structural
+	// change to the same component pool (add/remove of any T on any entity).
+	// Callers refetch each frame rather than caching.
+	static void* Axiom_Entity_GetComponentPtr(uint64_t entityID, const char* componentName)
+	{
+		Scene* scene = nullptr;
+		EntityHandle handle = entt::null;
+		if (!ResolveEntityReference(entityID, scene, handle)) return nullptr;
+
+		const ComponentInfo* info = FindComponentByName(componentName);
+		if (!info || !info->getRaw) return nullptr;
+
+		return info->getRaw(scene->GetEntity(handle));
+	}
+
+	// sizeof(T) for the named component, 0 when unknown / empty. Used by C# at
+	// script-engine init to verify its struct mirror's size matches the C++
+	// component before any ref reads / writes happen.
+	static int Axiom_Entity_GetComponentSize(const char* componentName)
+	{
+		const ComponentInfo* info = FindComponentByName(componentName);
+		if (!info) return 0;
+		return static_cast<int>(info->rawSize);
+	}
+
 	uint64_t Axiom_Entity_Clone(uint64_t sourceEntityID)
 	{
 		Scene* targetScene = GetScene();
@@ -934,6 +963,121 @@ namespace Axiom {
 		uint64_t* outEntityIDs, int maxOut)
 	{
 		return QueryEntitiesFilteredInScene(GetScene(), withComponents, withoutComponents, mustHaveComponents, enableFilter, outEntityIDs, maxOut);
+	}
+
+	// Pool descriptor for OpenQueryView: same role as QueryComponentRequirement
+	// but also carries the ComponentInfo so we can call getRaw without a second
+	// registry lookup per (entity × pool).
+	struct QueryViewPool {
+		const ComponentInfo* Info = nullptr;
+		bool RequiresInfo = true;  // true for write/readonly pools (must yield a pointer)
+	};
+
+	static bool ParseQueryViewPools(const char* names, std::vector<QueryViewPool>& out, bool requireGetRaw) {
+		if (!names || names[0] == '\0') return true;
+		std::string str(names);
+		size_t start = 0;
+		while (start < str.size()) {
+			size_t end = str.find('|', start);
+			if (end == std::string::npos) end = str.size();
+			std::string name = str.substr(start, end - start);
+			if (!name.empty()) {
+				const ComponentInfo* info = FindComponentByName(name);
+				if (!info) return false;
+				if (requireGetRaw && !info->getRaw) {
+					// Empty / tag / managed-only components can't yield a ref
+					// — the user asked for one as a write or readonly pool.
+					return false;
+				}
+				if (!info->has) return false;
+				out.push_back({ info, requireGetRaw });
+			}
+			start = end + 1;
+		}
+		return true;
+	}
+
+	// Opens an EnTT-style view across the named pools and fills `outPointers`
+	// with one row per matching entity, `(writeCount + roCount)` pointers per
+	// row, in declaration order. The actual row count is returned; if it
+	// exceeds `maxRows` the caller resizes and retries (same convention as
+	// Scene_QueryEntities). The pointer-fill loop calls info->getRaw once per
+	// (entity × pool) — same sparse-set lookup cost a per-property binding
+	// would have done anyway, except we amortize it across all fields of all
+	// pools on this row instead of paying it per field access.
+	static int Axiom_Scene_OpenQueryView(
+		const char* sceneName,
+		const char* writeNames,
+		const char* readonlyNames,
+		const char* mustHaveNames,
+		const char* withoutNames,
+		int enableFilter,
+		void** outPointers,
+		int maxRows)
+	{
+		AIM_BINDING_TRY {
+			Scene* scene = ResolveLoadedSceneForQuery(sceneName);
+			if (!scene || !scene->IsLoaded()) return 0;
+
+			std::vector<QueryViewPool> writePools, roPools, withPools, withoutPools;
+			if (!ParseQueryViewPools(writeNames,    writePools,   /*requireGetRaw=*/true))  return 0;
+			if (!ParseQueryViewPools(readonlyNames, roPools,      /*requireGetRaw=*/true))  return 0;
+			if (!ParseQueryViewPools(mustHaveNames, withPools,    /*requireGetRaw=*/false)) return 0;
+			if (!ParseQueryViewPools(withoutNames,  withoutPools, /*requireGetRaw=*/false)) return 0;
+
+			const size_t writeCount = writePools.size();
+			const size_t roCount = roPools.size();
+			const size_t poolCount = writeCount + roCount;
+			if (poolCount == 0) return 0;  // empty query is a no-op
+
+			int rowIndex = 0;
+			auto& registry = scene->GetRegistry();
+			auto view = registry.view<entt::entity>();
+
+			for (auto handle : view) {
+				if (!registry.valid(handle)) continue;
+
+				if (enableFilter == 1 && registry.all_of<DisabledTag>(handle)) continue;
+				if (enableFilter == 2 && !registry.all_of<DisabledTag>(handle)) continue;
+
+				Entity entity = scene->GetEntity(handle);
+
+				// Match: every write/ro/must-have pool's `has` returns true.
+				bool match = true;
+				for (const auto& pool : writePools) {
+					if (!pool.Info->has(entity)) { match = false; break; }
+				}
+				if (!match) continue;
+				for (const auto& pool : roPools) {
+					if (!pool.Info->has(entity)) { match = false; break; }
+				}
+				if (!match) continue;
+				for (const auto& pool : withPools) {
+					if (!pool.Info->has(entity)) { match = false; break; }
+				}
+				if (!match) continue;
+				for (const auto& pool : withoutPools) {
+					if (pool.Info->has(entity)) { match = false; break; }
+				}
+				if (!match) continue;
+
+				// Row fits — fill pointers. If outPointers is null or the
+				// row would overflow maxRows, we still count it so the
+				// caller can resize and retry.
+				if (outPointers && rowIndex < maxRows) {
+					void** rowBase = outPointers + (static_cast<size_t>(rowIndex) * poolCount);
+					for (size_t i = 0; i < writeCount; ++i) {
+						rowBase[i] = writePools[i].Info->getRaw(entity);
+					}
+					for (size_t i = 0; i < roCount; ++i) {
+						rowBase[writeCount + i] = roPools[i].Info->getRaw(entity);
+					}
+				}
+				rowIndex++;
+			}
+
+			return rowIndex;
+		} AIM_BINDING_CATCH(0);
 	}
 
 	static int Axiom_Scene_QueryEntitiesFilteredInScene(
@@ -2851,6 +2995,10 @@ namespace Axiom {
 		b.Dropdown_SetPopupBackgroundColor = &Axiom_Dropdown_SetPopupBackgroundColor;
 		b.Dropdown_GetOptionTextColor      = &Axiom_Dropdown_GetOptionTextColor;
 		b.Dropdown_SetOptionTextColor      = &Axiom_Dropdown_SetOptionTextColor;
+
+		b.Entity_GetComponentPtr   = &Axiom_Entity_GetComponentPtr;
+		b.Entity_GetComponentSize  = &Axiom_Entity_GetComponentSize;
+		b.Scene_OpenQueryView      = &Axiom_Scene_OpenQueryView;
 	}
 
 } // namespace Axiom

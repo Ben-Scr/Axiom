@@ -2,7 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Text.Json;
+using Axiom.Components;
 using Axiom.Interop;
 
 namespace Axiom;
@@ -277,6 +279,51 @@ public class Entity : IEquatable<Entity>
     public T? GetComponent<T>() where T : Component, new()
     {
         return GetComponentByType(typeof(T)) as T;
+    }
+
+    // Direct ref into the entity's component storage. Returns a ref-to-null
+    // (Unsafe.IsNullRef) when the component or entity is missing — callers in
+    // hot paths can branch on that without an exception. For the common case
+    // where the script's contract already guarantees the component (a script
+    // that requires Transform2D on its host entity), use GetRefOrThrow<T>
+    // instead to skip the IsNullRef check.
+    //
+    // The returned ref is valid only until the next structural change to the
+    // same component pool (Add/Remove/Destroy on any T). Refetch each frame.
+    public unsafe ref T GetRef<T>() where T : unmanaged, IComponent
+    {
+        void* p = InternalCalls.Entity_GetComponentPtr(ID, ComponentTypes<T>.NativeName);
+        if (p == null) return ref Unsafe.NullRef<T>();
+        return ref Unsafe.AsRef<T>(p);
+    }
+
+    // Convenience: throws if the component is absent. Most scripts have a
+    // hard requirement on their host entity's components and shouldn't pay
+    // the IsNullRef branch on every access. The throw collapses to a single
+    // null-check in the JIT'd code; the message names the type for debugging.
+    public unsafe ref T GetRefOrThrow<T>() where T : unmanaged, IComponent
+    {
+        void* p = InternalCalls.Entity_GetComponentPtr(ID, ComponentTypes<T>.NativeName);
+        if (p == null)
+            throw new InvalidOperationException(
+                $"Entity {ID} has no '{ComponentTypes<T>.NativeName}' component.");
+        return ref Unsafe.AsRef<T>(p);
+    }
+
+    // Shortcut for the most-common ref: `entity.TransformRef.LocalPosition += v`.
+    // Chains exactly like today's `entity.Transform.Position` — ref-returns are
+    // lvalues, so `+= v` writes through to EnTT storage. Skips the per-frame
+    // GetComponent<Transform2D>() class-wrapper alloc + dictionary lookup.
+    public unsafe ref Components.Transform2D TransformRef
+    {
+        get
+        {
+            void* p = InternalCalls.Entity_GetComponentPtr(ID, Components.Transform2D.NativeName);
+            if (p == null)
+                throw new InvalidOperationException(
+                    $"Entity {ID} has no Transform 2D component.");
+            return ref Unsafe.AsRef<Components.Transform2D>(p);
+        }
     }
 
     // Non-generic resolution path used by GetComponent<T> AND by script-field

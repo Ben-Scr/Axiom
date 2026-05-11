@@ -38,6 +38,19 @@ namespace Axiom {
             info.add = [](Entity e) { e.AddComponent<T>(); };
             info.remove = [](Entity e) { e.RemoveComponent<T>(); };
 
+            // Auto-wire raw component pointer access for non-empty types so
+            // the ScriptCore ref-API can target every registered component
+            // without per-type plumbing. Empty tag types skip this — there's
+            // no payload to expose and EnTT's empty-type storage doesn't
+            // hand out addressable instances anyway.
+            if constexpr (!std::is_empty_v<T>) {
+                info.getRaw = [](Entity e) -> void* {
+                    if (!e.HasComponent<T>()) return nullptr;
+                    return static_cast<void*>(&e.GetComponent<T>());
+                };
+                info.rawSize = sizeof(T);
+            }
+
             // If the caller provided a custom copyTo (or a previous registration
             // installed one), keep it. Components that hold scene-bound runtime
             // state — e.g. ParticleSystem2DComponent's m_EmitterScene/Entity —

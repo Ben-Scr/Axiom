@@ -89,6 +89,12 @@
     <Compile Include="Source\Axiom\Collections\Native\NativeStack.cs" />
     <Compile Include="Source\Axiom\Collections\Native\NativeString.cs" />
     <Compile Include="Source\Axiom\Collections\Range.cs" />
+    <Compile Include="Source\Axiom\Components\ComponentTypes.cs" />
+    <Compile Include="Source\Axiom\Components\IComponent.cs" />
+    <Compile Include="Source\Axiom\Components\Ref.cs" />
+    <Compile Include="Source\Axiom\Components\SpriteRenderer.cs" />
+    <Compile Include="Source\Axiom\Components\TextureHandle.cs" />
+    <Compile Include="Source\Axiom\Components\Transform2D.cs" />
     <Compile Include="Source\Axiom\Core\Application.cs" />
     <Compile Include="Source\Axiom\Core\AssetManager.cs" />
     <Compile Include="Source\Axiom\Core\Engine.cs" />
@@ -132,6 +138,7 @@
     <Compile Include="Source\Axiom\Scene\EntityScript.cs" />
     <Compile Include="Source\Axiom\Scene\GameSystem.cs" />
     <Compile Include="Source\Axiom\Scene\GlobalSystem.cs" />
+    <Compile Include="Source\Axiom\Scene\QueryRef.cs" />
     <Compile Include="Source\Axiom\Scene\SceneManager.cs" />
     <Compile Include="Source\Axiom\Scene\SceneQuery.cs" />
     <Compile Include="Source\Axiom\UI\UIComponents.cs" />

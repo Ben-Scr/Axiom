@@ -29,7 +29,7 @@ namespace Axiom {
 		}
 	}
 
-	unsigned int ThumbnailCache::GetThumbnail(const std::string& absolutePath) {
+	uint64_t ThumbnailCache::GetThumbnail(const std::string& absolutePath) {
 		auto it = m_Cache.find(absolutePath);
 		if (it != m_Cache.end()) {
 			TouchLru(it); // E31: lookup counts as recent use
@@ -65,7 +65,7 @@ namespace Axiom {
 			return 0;
 		}
 
-		unsigned int handle = tex->GetHandle();
+		uint64_t handle = tex->GetHandle();
 		m_Cache[absolutePath] = { std::move(tex), handle, lruIt };
 		EnforceCapacity();
 		return handle;

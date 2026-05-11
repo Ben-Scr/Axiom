@@ -63,3 +63,10 @@ project "Axiom-Engine-Tests"
         optimize "Full"
         symbols "Off"
         defines { "AIM_DIST", "NDEBUG" }
+
+    filter {}
+
+    -- Per-config libdirs for webgpu_dawn.lib. Tests/ sits one level
+    -- deeper than the top-level project folders so the rel-prefix is
+    -- "../../" (two ups to reach the repo root).
+    ApplyDawnLibDirs("../../")

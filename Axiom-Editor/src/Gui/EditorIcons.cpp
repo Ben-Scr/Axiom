@@ -42,7 +42,7 @@ namespace Axiom {
 		return name + "_" + std::to_string(size);
 	}
 
-	unsigned int EditorIcons::Get(const std::string& name, int size) {
+	uint64_t EditorIcons::Get(const std::string& name, int size) {
 		int snapped = SnapSize(size);
 		std::string key = MakeKey(name, snapped);
 
@@ -75,7 +75,7 @@ namespace Axiom {
 			return 0;
 		}
 
-		unsigned int handle = entry.Texture.GetHandle();
+		uint64_t handle = entry.Texture.GetHandle();
 		s_Icons[key] = std::move(entry);
 		return handle;
 	}

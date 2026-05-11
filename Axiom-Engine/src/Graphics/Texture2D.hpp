@@ -48,7 +48,14 @@ namespace Axiom {
 		bool IsValid() const { return m_Tex != 0; }
 
 		std::unique_ptr<ImageData> GetImageData() const;
-		unsigned GetHandle() const { return m_Tex; }
+		// Returns the WGPU texture-view raw pointer cast to uint64_t under
+		// the WebGPU backend. ImGui's imgui_impl_wgpu reinterpret-casts
+		// ImTextureID directly to WGPUTextureView and dereferences it, so
+		// the editor's ImGui::Image / ImageButton call sites that pass
+		// `tex->GetHandle()` need a real Dawn handle here -- not a small
+		// integer pool counter (which Dawn would dereference at address
+		// 0x1, 0x2, etc. and crash with a 0xC0000005 access violation).
+		uint64_t GetHandle() const { return m_Tex; }
 		Vec2 Size() const { return Vec2{ float(m_Width), float(m_Height) }; }
 		float GetWidth() const { return m_Width; }
 		float GetHeight() const { return m_Height; }
@@ -56,7 +63,11 @@ namespace Axiom {
 		float AspectRatio() const { return m_Height != 0 ? float(m_Width) / float(m_Height) : 0.0f; }
 
 	private:
-		unsigned m_Tex = 0;
+		// Under WebGPU this holds the raw WGPUTextureView pointer (cast to
+		// uint64_t). 0 stays the "unset" sentinel; IsValid() compares
+		// against 0 unchanged. The Texture2D_WebGPU.cpp pool uses this
+		// same value as its key.
+		uint64_t m_Tex = 0;
 		int m_Width = 0, m_Height = 0, m_Channels = 0;
 
 		Filter m_Filter = Filter::Point;

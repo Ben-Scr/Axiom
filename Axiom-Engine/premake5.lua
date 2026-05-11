@@ -85,15 +85,15 @@ project "Axiom-Engine"
     )
 
     -- ── Render-API backend ─────────────────────────────────────────
-    -- The engine renders exclusively through bgfx. The legacy direct-
-    -- OpenGL path (Backend/OpenGLApi.cpp + Renderer2D.cpp + ... + the
-    -- Shader/*.glsl tree) was retired on 2026-05; the per-resource
-    -- `_Bgfx.cpp` siblings are now the canonical implementations and
-    -- the OpenGL files have been deleted from the tree. The runtime
-    -- backend (D3D11 / D3D12 / Vulkan / OpenGL / Metal) is still
-    -- selectable via the project's BgfxBackend setting at bgfx::init
-    -- time — that's a runtime choice, no rebuild required.
-    defines { "AIM_RHI_BGFX" }
+    -- WebGPU via Dawn. The engine has one graphics backend; the runtime
+    -- D3D12 / Vulkan / Metal choice underneath is Dawn's call at adapter-
+    -- request time (see Backend/WebGPUApi.cpp::RequestAdapterSync).
+    --
+    -- AIM_RHI_WEBGPU is defined for compatibility with TUs that still
+    -- check the macro. The bgfx-era AIM_RHI_BGFX define is gone alongside
+    -- the bgfx submodules + every Bgfx*.cpp file (Stage 10 of the WebGPU
+    -- port, 2026-05+).
+    defines { "AIM_RHI_WEBGPU" }
 
     RemoveFilesIfModuleDisabled(AxiomModules.Audio,
         {
@@ -148,10 +148,18 @@ project "Axiom-Engine"
 
     local renderIncludes = {
         "../External/glfw/include",
-        "../External/bgfx/include",
-        "../External/bx/include",
-        "../External/bimg/include",
     }
+
+    -- Splice in Dawn's header paths so the WebGPU backend + every
+    -- renderer can resolve <webgpu/webgpu_cpp.h>. Engine premake runs
+    -- from Axiom-Engine/ so the include paths (which are repo-root-
+    -- relative in DawnLayout) need a "../" prefix to match the
+    -- convention used by the other renderIncludes entries.
+    if DawnLayout then
+        for _, p in ipairs(DawnLayout.IncludeDirs) do
+            table.insert(renderIncludes, "../" .. p)
+        end
+    end
 
     local audioIncludes =
     {
@@ -290,3 +298,7 @@ project "Axiom-Engine"
         optimize "Full"
         symbols "Off"
         defines { "AIM_DIST", "NDEBUG" }
+
+    -- Per-config libdirs for webgpu_dawn.lib. See ApplyDawnLibDirs in
+    -- the root premake5.lua for the runtime-mismatch (LNK2038) rationale.
+    ApplyDawnLibDirs("../")

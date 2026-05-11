@@ -37,6 +37,22 @@ namespace Axiom {
 		void (*remove)(Entity) = nullptr;
 		void (*copyTo)(Entity src, Entity dst) = nullptr;
 
+		// Raw pointer to the component instance for this entity (nullptr when missing).
+		// Powers the ScriptCore ref-based API: C# casts the void* to a struct mirror of
+		// the C++ component and reads/writes fields with no per-property P/Invoke. Auto-
+		// wired by ComponentRegistry::Register for any non-empty T; empty tag types skip
+		// it because there's no payload to expose. The returned pointer is valid only
+		// until the next structural change to the same component pool (EnTT may move
+		// the storage on add/remove), so callers must refetch rather than cache across
+		// frames.
+		void* (*getRaw)(Entity) = nullptr;
+
+		// sizeof(T) for the underlying C++ component, or 0 for empty/tag types.
+		// Used by the managed side at script-engine init to detect layout drift between
+		// the C++ component and its C# struct mirror — a mismatch hard-fails the user
+		// assembly load instead of silently corrupting memory.
+		size_t rawSize = 0;
+
 		// Optional post-add hook fired by ComponentRegistry::AddWithDependencies
 		// AFTER the default `add` runs. Used by UI widgets (Button, Slider,
 		// Toggle, Dropdown, InputField, Scrollbar) to seed their NormalColor

@@ -46,6 +46,15 @@ namespace Axiom {
 		// their own cleanup; this handles backend-init mirror image.
 		static void Shutdown();
 
+		// End-of-frame hook: flush any pending GPU commands and present the
+		// swap chain. Called from Window::SwapBuffers so the call site stays
+		// backend-neutral. Under bgfx this collapses to bgfx::touch(0) +
+		// bgfx::frame(); under WebGPU it submits the per-frame command
+		// buffer to the queue and calls surface.Present(). Safe to invoke
+		// when nothing was rendered this frame — both backends issue an
+		// equivalent of "touch" so the swap chain still advances.
+		static void Present();
+
 		static bool IsInitialized();
 
 		// Identifier of the active backend ("OpenGL", "bgfx-d3d11", etc.) —

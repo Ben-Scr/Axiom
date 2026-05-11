@@ -13,11 +13,13 @@
 #include "Components/UI/MaskComponent.hpp"
 #include "Core/Application.hpp"
 #include "Core/Input.hpp"
+#include "Core/Log.hpp"
 #include "Core/MouseButton.hpp"
 #include "Core/Time.hpp"
 #include "Core/Window.hpp"
-#include "Graphics/BgfxSpriteResources.hpp"
+#include "Graphics/Backend/WebGPUBackend.hpp"
 #include "Graphics/Instance44.hpp"
+#include "Graphics/SpriteResources.hpp"
 #include "Graphics/Texture2D.hpp"
 #include "Graphics/Text/Font.hpp"
 #include "Graphics/Text/FontManager.hpp"
@@ -28,7 +30,7 @@
 #include "Scene/SceneManager.hpp"
 #include "Systems/UILayoutSystem.hpp"
 
-#include <bgfx/bgfx.h>
+#include <webgpu/webgpu_cpp.h>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 
@@ -38,44 +40,37 @@
 #include <cstring>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 // =============================================================================
-// GuiRenderer — bgfx implementation. Stage 2.4 of the bgfx port.
+// GuiRenderer — WebGPU (Dawn) implementation. Stage 5 of the WebGPU port.
 // -----------------------------------------------------------------------------
-// Mirrors GuiRenderer.cpp's CollectAndDraw structure verbatim — hierarchy walk,
-// image/circle/text/dropdown/input-field collection, sort by (Layer, Order,
-// DrawIndex), merge-walk image+text spans — then replaces the GL-state +
-// glScissor/glDrawElementsInstanced submission with bgfx per-submit state and
-// a transient instance data buffer.
+// Sibling to GuiRenderer.cpp. CPU-side collection (hierarchy walk, dropdown
+// popups, input-field overlays, mask-based clip resolve, sort by Layer/Order/
+// DrawIndex) is preserved verbatim from the bgfx implementation — only the
+// final submit replaces bgfx views + transient instance buffers with a single
+// wgpu::RenderPassEncoder + persistent instance VBO + per-batch SetScissorRect.
 //
-// View-id strategy
-//   GuiRenderer allocates one bgfx view at Initialize (m_UiViewId). Each frame
-//   RenderScene mirrors the currently-bound framebuffer + view rect onto
-//   m_UiViewId, sets the UI mvp via setViewTransform, and submits UI draws
-//   there. Because m_UiViewId is allocated AFTER bgfx::init's view 0 + any
-//   editor-FBO views that exist at construction time, bgfx's numeric view
-//   flush order naturally lands UI on top of scene rendering.
+// Stage 5 scope: image quads (RectTransform2D + ImageComponent), dropdown
+// option rows, circular slider geometry, input-field caret/selection overlays.
+// Text is NOT rendered in Stage 5 — the m_TextScratch collection still runs
+// for sort ordering, but the TextRenderer::RenderInstances call is a no-op
+// stub (Stage 6 lands the real text path). The visible result: every UI
+// widget shows its background + interactive elements, labels are blank.
 //
-//   Caveat: editor panels created AFTER GuiRenderer construction get a higher
-//   view-id than m_UiViewId, so their scene render would flush AFTER UI on
-//   that panel. Practical impact today is nil — the editor allocates Game
-//   View / Editor View FBOs at startup before the first GuiRenderer touch.
-//   When that becomes a real symptom we'll lift the order via
-//   bgfx::setViewOrder().
+// Per-GuiRenderer GPU state (instance buffer, uniform buffer, per-frame
+// bind-group cache) lives in a TU-local side table keyed by `this`. The
+// editor instantiates two GuiRenderers (Game View + Editor View FBOs), each
+// with its own state entry — same isolation the bgfx side gets via per-FBO
+// view-ids.
 // =============================================================================
-
-namespace Axiom::BgfxBackend {
-	bgfx::ViewId AllocateViewId();
-	void FreeViewId(bgfx::ViewId id);
-	void CurrentViewRect(uint16_t& outX, uint16_t& outY, uint16_t& outW, uint16_t& outH);
-	bgfx::FrameBufferHandle CurrentFramebuffer();
-}
 
 namespace Axiom {
-	namespace {
 
-		// ── Input field overlay helpers ───────────────────────────
-		// Lifted verbatim from GuiRenderer.cpp — pure CPU helpers.
+	namespace {
+		// ── Input field overlay helpers — copied from bgfx GuiRenderer.cpp ──
+		// Pure CPU, no backend deps. Same byte-walk + MeasureUpToByteUI logic
+		// drives the caret/selection rect placement.
 
 		bool Utf8DecodeAt(std::string_view s, int idx, uint32_t& outCp, int& outLen) {
 			if (idx < 0 || idx >= static_cast<int>(s.size())) {
@@ -230,159 +225,233 @@ namespace Axiom {
 			return true;
 		}
 
-		// Per-(GuiRenderer instance, framebuffer) UI view-id pool.
-		//
-		// The editor renders two FBOs per frame (Game View + Editor View),
-		// each calling GuiRenderer::RenderScene against its own bgfx
-		// framebuffer. A single UI view-id can't service both — the second
-		// RenderScene's setViewFrameBuffer would point the view at the
-		// Editor View FBO and bgfx would flush BOTH passes' UI submits
-		// onto that one target, leaving Game View's UI overlay missing.
-		//
-		// Keying the view-id by (this, framebuffer-idx) gives every FBO its
-		// own dedicated UI overlay view. View-ids stay allocated until the
-		// GuiRenderer is destroyed (FBOs come and go but their handle idx
-		// reuse cycles through us via Shutdown). 0xFFFF stands in for
-		// "swap chain / default framebuffer".
-		struct GuiRendererBgfxState {
-			std::unordered_map<uint16_t, bgfx::ViewId> UiViewByFboIdx;
+		// ── WebGPU per-GuiRenderer GPU state ────────────────────────────────
+		// Keyed by `this` so the editor's two GuiRenderers (Game View FBO +
+		// Editor View FBO) don't trample each other's instance VBO or bind
+		// group cache. Cleared on Shutdown.
+		struct GuiRendererWebGPUState {
+			wgpu::Buffer InstanceBuffer;
+			uint32_t     InstanceBufferCapacity = 0;
+			wgpu::Buffer UniformBuffer;
+			// Keyed by Texture2D::GetHandle() (the raw WGPUTextureView pointer
+			// cast to uint64_t under WebGPU). Matches Renderer2D's per-frame
+			// cache shape so cache lookups are stable across renderer types.
+			std::unordered_map<uint64_t, wgpu::BindGroup> BindGroupsThisFrame;
+			std::vector<WebGPUSpriteResources::SpriteInstance> EncodedScratch;
 		};
-		std::unordered_map<const GuiRenderer*, GuiRendererBgfxState> g_BgfxState;
+		std::unordered_map<const GuiRenderer*, GuiRendererWebGPUState> g_State;
 
-		GuiRendererBgfxState& GetBgfxState(const GuiRenderer* self) {
-			return g_BgfxState[self];
+		GuiRendererWebGPUState& GetState(const GuiRenderer* self) {
+			return g_State[self];
 		}
 
-		bgfx::ViewId AcquireUiViewForFbo(GuiRendererBgfxState& s, bgfx::FrameBufferHandle fbo) {
-			const uint16_t key = bgfx::isValid(fbo) ? fbo.idx : uint16_t(0xFFFFu);
-			auto it = s.UiViewByFboIdx.find(key);
-			if (it != s.UiViewByFboIdx.end()) {
-				return it->second;
+		bool EnsureUniformBuffer(wgpu::Device device, GuiRendererWebGPUState& state) {
+			if (state.UniformBuffer) return true;
+			wgpu::BufferDescriptor desc{};
+			desc.size  = 64;
+			desc.usage = wgpu::BufferUsage::Uniform | wgpu::BufferUsage::CopyDst;
+			desc.label = "guirenderer-viewproj-ubo";
+			state.UniformBuffer = device.CreateBuffer(&desc);
+			return static_cast<bool>(state.UniformBuffer);
+		}
+
+		bool EnsureInstanceBuffer(wgpu::Device device, GuiRendererWebGPUState& state,
+			uint32_t neededInstances)
+		{
+			if (state.InstanceBufferCapacity >= neededInstances && state.InstanceBuffer) return true;
+			uint32_t newCapacity = state.InstanceBufferCapacity > 0 ? state.InstanceBufferCapacity : 256;
+			while (newCapacity < neededInstances) newCapacity *= 2;
+
+			wgpu::BufferDescriptor desc{};
+			desc.size  = static_cast<uint64_t>(newCapacity)
+				* sizeof(WebGPUSpriteResources::SpriteInstance);
+			desc.usage = wgpu::BufferUsage::Vertex | wgpu::BufferUsage::CopyDst;
+			desc.label = "guirenderer-instance-vbo";
+			wgpu::Buffer buf = device.CreateBuffer(&desc);
+			if (!buf) {
+				AIM_CORE_ERROR_TAG("GuiRenderer",
+					"Failed to create instance buffer (cap={})", newCapacity);
+				return false;
 			}
-			const bgfx::ViewId id = BgfxBackend::AllocateViewId();
-			s.UiViewByFboIdx.emplace(key, id);
-			return id;
+			state.InstanceBuffer         = std::move(buf);
+			state.InstanceBufferCapacity = newCapacity;
+			return true;
 		}
 
-	} // namespace
+		wgpu::BindGroup ResolveBindGroup(wgpu::Device device, GuiRendererWebGPUState& state,
+			TextureHandle handle)
+		{
+			Texture2D* tex = TextureManager::GetTexture(handle);
+			if (!tex || !tex->IsValid()) return nullptr;
+			const uint64_t poolId = tex->GetHandle();
+
+			auto cacheIt = state.BindGroupsThisFrame.find(poolId);
+			if (cacheIt != state.BindGroupsThisFrame.end()) return cacheIt->second;
+
+			const auto lookup = WebGPUBackend::LookupTexture2D(poolId);
+			if (!lookup.Valid || !lookup.View || !lookup.Sampler) return nullptr;
+
+			wgpu::BindGroupEntry entries[3] = {};
+			entries[0].binding = 0;
+			entries[0].buffer  = state.UniformBuffer;
+			entries[0].offset  = 0;
+			entries[0].size    = 64;
+			entries[1].binding     = 1;
+			entries[1].textureView = lookup.View;
+			entries[2].binding = 2;
+			entries[2].sampler = lookup.Sampler;
+
+			wgpu::BindGroupDescriptor desc{};
+			desc.layout     = WebGPUSpriteResources::GetBindGroupLayout();
+			desc.entryCount = 3;
+			desc.entries    = entries;
+			desc.label      = "guirenderer-ui-bindgroup";
+
+			wgpu::BindGroup bg = device.CreateBindGroup(&desc);
+			if (!bg) return nullptr;
+			state.BindGroupsThisFrame.emplace(poolId, bg);
+			return bg;
+		}
+
+		bool ClipsEqual(bool aHas, const Vec2& aMin, const Vec2& aMax,
+			bool bHas, const Vec2& bMin, const Vec2& bMax)
+		{
+			if (aHas != bHas) return false;
+			if (!aHas) return true;
+			return aMin.x == bMin.x && aMin.y == bMin.y
+				&& aMax.x == bMax.x && aMax.y == bMax.y;
+		}
+
+		// Project a UI-space clip rect through MVP into NDC, then map NDC to
+		// pixel coords (top-left origin to match WebGPU's SetScissorRect
+		// convention). Returns the computed [x, y, w, h] in framebuffer pixels.
+		// Caller checks `valid`; an invalid rect (NaN, zero-area, fully out
+		// of bounds) leaves the pass with no scissor change.
+		struct ScissorPx { uint32_t X, Y, W, H; bool Valid; };
+		ScissorPx ComputeScissor(const glm::mat4& mvp,
+			const Vec2& clipMin, const Vec2& clipMax,
+			uint32_t targetW, uint32_t targetH)
+		{
+			ScissorPx out{};
+			const glm::vec4 corners[4] = {
+				mvp * glm::vec4(clipMin.x, clipMin.y, 0.0f, 1.0f),
+				mvp * glm::vec4(clipMax.x, clipMin.y, 0.0f, 1.0f),
+				mvp * glm::vec4(clipMin.x, clipMax.y, 0.0f, 1.0f),
+				mvp * glm::vec4(clipMax.x, clipMax.y, 0.0f, 1.0f),
+			};
+			const float invW0 = corners[0].w != 0.0f ? 1.0f / corners[0].w : 1.0f;
+			float ndcMinX = corners[0].x * invW0;
+			float ndcMaxX = ndcMinX;
+			float ndcMinY = corners[0].y * invW0;
+			float ndcMaxY = ndcMinY;
+			for (int i = 1; i < 4; ++i) {
+				const float invW = corners[i].w != 0.0f ? 1.0f / corners[i].w : 1.0f;
+				const float x = corners[i].x * invW;
+				const float y = corners[i].y * invW;
+				ndcMinX = std::min(ndcMinX, x);
+				ndcMaxX = std::max(ndcMaxX, x);
+				ndcMinY = std::min(ndcMinY, y);
+				ndcMaxY = std::max(ndcMaxY, y);
+			}
+			ndcMinX = std::clamp(ndcMinX, -1.0f, 1.0f);
+			ndcMaxX = std::clamp(ndcMaxX, -1.0f, 1.0f);
+			ndcMinY = std::clamp(ndcMinY, -1.0f, 1.0f);
+			ndcMaxY = std::clamp(ndcMaxY, -1.0f, 1.0f);
+
+			const float fW = static_cast<float>(targetW);
+			const float fH = static_cast<float>(targetH);
+			const float xMin = (ndcMinX * 0.5f + 0.5f) * fW;
+			const float xMax = (ndcMaxX * 0.5f + 0.5f) * fW;
+			// Y flip: NDC +Y up -> screen +Y down for top-left origin.
+			const float yMinTop = (1.0f - (ndcMaxY * 0.5f + 0.5f)) * fH;
+			const float yMaxTop = (1.0f - (ndcMinY * 0.5f + 0.5f)) * fH;
+			const float sx = std::floor(std::min(xMin, xMax));
+			const float sy = std::floor(std::min(yMinTop, yMaxTop));
+			const float sw = std::ceil(std::abs(xMax - xMin));
+			const float sh = std::ceil(std::abs(yMaxTop - yMinTop));
+			if (sw <= 0.0f || sh <= 0.0f) return out;
+
+			const uint32_t ix = static_cast<uint32_t>(std::max(0.0f, sx));
+			const uint32_t iy = static_cast<uint32_t>(std::max(0.0f, sy));
+			uint32_t iw = static_cast<uint32_t>(std::max(0.0f, sw));
+			uint32_t ih = static_cast<uint32_t>(std::max(0.0f, sh));
+			// Clamp to target bounds so SetScissorRect doesn't trip Dawn's
+			// validation (the spec requires x+w <= targetW, y+h <= targetH).
+			if (ix >= targetW || iy >= targetH) return out;
+			if (ix + iw > targetW) iw = targetW - ix;
+			if (iy + ih > targetH) ih = targetH - iy;
+			out.X = ix; out.Y = iy; out.W = iw; out.H = ih; out.Valid = true;
+			return out;
+		}
+
+	}  // anonymous namespace
 
 	void GuiRenderer::Initialize() {
-		if (m_IsInitialized) {
-			return;
-		}
+		if (m_IsInitialized) return;
 
-		// Bumping the shared sprite resources is idempotent — Renderer2D
-		// already grabbed them at engine start, but the refcount keeps
-		// them alive even if Renderer2D shuts down first.
-		BgfxSpriteResources::Acquire();
+		WebGPUSpriteResources::Acquire();
 
-		// Owned text renderer for screen-space widget labels. The bgfx
-		// variant manages its own program + transient vertex buffer; same
-		// public surface as the GL version.
 		m_TextRenderer = std::make_unique<TextRenderer>();
 		m_TextRenderer->Initialize();
 
-		// UI view-ids are allocated lazily per framebuffer in
-		// AcquireUiViewForFbo — there's nothing to do at Initialize.
-		(void)GetBgfxState(this); // ensure the side-table entry exists
+		(void)GetState(this);  // ensure per-instance state entry exists
 
 		m_IsInitialized = true;
 	}
 
 	void GuiRenderer::Shutdown() {
-		if (!m_IsInitialized) {
-			return;
-		}
+		if (!m_IsInitialized) return;
 
-		auto it = g_BgfxState.find(this);
-		if (it != g_BgfxState.end()) {
-			for (auto& [_, vid] : it->second.UiViewByFboIdx) {
-				BgfxBackend::FreeViewId(vid);
-			}
-			g_BgfxState.erase(it);
-		}
+		g_State.erase(this);
 
 		if (m_TextRenderer) {
 			m_TextRenderer->Shutdown();
 			m_TextRenderer.reset();
 		}
-		BgfxSpriteResources::Release();
+		WebGPUSpriteResources::Release();
 		m_IsInitialized = false;
 	}
 
 	void GuiRenderer::BeginFrame(const SceneManager& sceneManager) {
-		if (!m_IsInitialized || m_SkipBeginFrameRender) {
-			return;
-		}
-
+		if (!m_IsInitialized || m_SkipBeginFrameRender) return;
 		sceneManager.ForeachLoadedScene([&](const Scene& scene) { RenderScene(scene); });
 	}
 	void GuiRenderer::EndFrame() {
-		// No-op — submission landed inside RenderScene; bgfx::frame()
-		// flushes everything from Window::SwapBuffers.
+		// No-op — Present() flushes from Window::SwapBuffers.
 	}
 
 	float GuiRenderer::ComputeWorldUIPixelScale() {
 		int canvasW = 0;
 		int canvasH = 0;
-		if (!ResolveUICanvasSize(canvasW, canvasH)) {
-			return 0.01f;
-		}
+		if (!ResolveUICanvasSize(canvasW, canvasH)) return 0.01f;
 		if (Camera2DComponent* cam = Camera2DComponent::Main()) {
 			const float worldHeight = 2.0f * cam->GetOrthographicSize() * cam->GetZoom();
-			if (worldHeight > 0.0f) {
-				return worldHeight / static_cast<float>(canvasH);
-			}
+			if (worldHeight > 0.0f) return worldHeight / static_cast<float>(canvasH);
 		}
 		return 0.01f;
 	}
 
 	void GuiRenderer::RenderScene(const Scene& scene) {
-		if (!m_IsInitialized) {
-			return;
-		}
-
-		// Compute layout for this frame so renderer reads fresh rects
-		// (mirrors the OpenGL impl's pre-render layout pass).
+		if (!m_IsInitialized) return;
 		ComputeUILayout(const_cast<Scene&>(scene));
 
-		int w = 0;
-		int h = 0;
-		if (!ResolveUICanvasSize(w, h)) {
-			return;
-		}
+		int w = 0, h = 0;
+		if (!ResolveUICanvasSize(w, h)) return;
 
 		const float halfW = 0.5f * w;
 		const float halfH = 0.5f * h;
-		const float zNear = -1.0f;
-		const float zFar  = 1.0f;
-
-		// Standard +Y-up ortho — matches the camera VP convention used
-		// for sprite rendering, so screen-space UI and world-space
-		// sprites share an orientation. Editor FBO display + standalone
-		// runtime both consume the result without an extra Y flip
-		// (ImGui::Image uses default UV(0,0)–(1,1), runtime draws
-		// straight to the swap chain). An earlier port of this path
-		// Y-flipped the ortho to compensate for an ImGui::Image UV flip
-		// that has since been removed; flipping both broke the runtime
-		// (no FBO to undo the flip) and left UI mirrored vs sprites
-		// inside the editor's Editor View.
-		const glm::mat4 mvp = glm::ortho(-halfW, +halfW, -halfH, +halfH, zNear, zFar);
+		const glm::mat4 mvp = glm::ortho(-halfW, +halfW, -halfH, +halfH, -1.0f, 1.0f);
 		CollectAndDraw(scene, mvp, halfW, halfH);
 	}
 
-	void GuiRenderer::RenderScene(const Scene& scene, const glm::mat4& worldVP, float pixelToWorldScale) {
-		if (!m_IsInitialized) {
-			return;
-		}
-
+	void GuiRenderer::RenderScene(const Scene& scene,
+		const glm::mat4& worldVP, float pixelToWorldScale)
+	{
+		if (!m_IsInitialized) return;
 		ComputeUILayout(const_cast<Scene&>(scene));
 
-		int w = 0;
-		int h = 0;
-		if (!ResolveUICanvasSize(w, h)) {
-			return;
-		}
+		int w = 0, h = 0;
+		if (!ResolveUICanvasSize(w, h)) return;
 
 		const glm::mat4 uiToWorld = glm::scale(glm::mat4(1.0f),
 			glm::vec3(pixelToWorldScale, pixelToWorldScale, 1.0f));
@@ -523,8 +592,7 @@ namespace Axiom {
 					parentRot,
 					cs.BackgroundColor,
 					bgTexture,
-					/*sortOrder*/ 0,
-					/*sortLayer*/ 0,
+					0, 0,
 					static_cast<std::uint32_t>(drawIndex));
 				bg.HasClip = hasClip;
 				bg.ClipMin = clipMin;
@@ -544,7 +612,7 @@ namespace Axiom {
 			}
 		}
 
-		// ── 3. UI text instances (entity-driven) ─────────────────────
+		// ── 3. UI text instances (collection runs; submission is a Stage-6 no-op) ──
 		m_TextScratch.clear();
 		m_TextScratch.reserve(m_DrawOrder.size());
 
@@ -558,6 +626,10 @@ namespace Axiom {
 			const float effectivePixelSize = text.FontSize * std::max(0.01f, std::abs(rect.Scale.x));
 			Font* font = TextRenderer::ResolveFontAtPixelSize(text, effectivePixelSize);
 			if (!font || !font->IsLoaded()) continue;
+			// Stage 5: Font_WebGPU stub always reports IsLoaded()=false so we
+			// never reach the cmd-emit path. Stage 6 swaps Font + TextRenderer
+			// to the real WebGPU impls and the rest of this block becomes
+			// live without further GuiRenderer changes.
 			const Vec2 bl = rect.GetBottomLeft();
 			const Vec2 tr = rect.GetTopRight();
 			const Vec2 size{ tr.x - bl.x, tr.y - bl.y };
@@ -646,9 +718,9 @@ namespace Axiom {
 				FontHandle dh = FontManager::GetDefaultFont();
 				dropdownFont = FontManager::GetFont(dh);
 			}
-			if (!dropdownFont || !dropdownFont->IsLoaded()) continue;
-
-			const float bakedSize = dropdownFont->GetPixelSize() > 0.0f
+			// Stage 5: dropdownFont is nullptr (stub FontManager). Option-row
+			// quads still emit (they're textureless); labels skipped.
+			const float bakedSize = (dropdownFont && dropdownFont->GetPixelSize() > 0.0f)
 				? dropdownFont->GetPixelSize() : fontPx;
 			const float uniformScale = rect.Scale.x;
 			const float textScale = (fontPx / bakedSize) * uniformScale;
@@ -678,19 +750,21 @@ namespace Axiom {
 					static_cast<std::uint8_t>(10),
 					static_cast<std::uint32_t>(popupDraw + i));
 
-				TextDrawCmd cmd;
-				cmd.FontPtr = dropdownFont;
-				cmd.Text = std::string_view(dd.Options[i]);
-				cmd.X = rowBL.x + 8.0f * uniformScale;
-				cmd.Y = rowBL.y + rowSize.y * 0.5f - fontPx * 0.35f * uniformScale;
-				cmd.Scale = textScale;
-				cmd.LetterSpacing = 0.0f;
-				cmd.Tint = dd.OptionTextColor;
-				cmd.Align = TextAlignment::Left;
-				cmd.SortingOrder = static_cast<int16_t>((popupDraw + i) & 0x7fff);
-				cmd.SortingLayer = 11;
-				cmd.DrawIndex = static_cast<std::uint32_t>(popupDraw + i);
-				m_TextScratch.push_back(cmd);
+				if (dropdownFont && dropdownFont->IsLoaded()) {
+					TextDrawCmd cmd;
+					cmd.FontPtr = dropdownFont;
+					cmd.Text = std::string_view(dd.Options[i]);
+					cmd.X = rowBL.x + 8.0f * uniformScale;
+					cmd.Y = rowBL.y + rowSize.y * 0.5f - fontPx * 0.35f * uniformScale;
+					cmd.Scale = textScale;
+					cmd.LetterSpacing = 0.0f;
+					cmd.Tint = dd.OptionTextColor;
+					cmd.Align = TextAlignment::Left;
+					cmd.SortingOrder = static_cast<int16_t>((popupDraw + i) & 0x7fff);
+					cmd.SortingLayer = 11;
+					cmd.DrawIndex = static_cast<std::uint32_t>(popupDraw + i);
+					m_TextScratch.push_back(cmd);
+				}
 			}
 			counter += static_cast<int>(dd.Options.size());
 		}
@@ -710,7 +784,7 @@ namespace Axiom {
 			if (!field.IsFocused && !hasSelection) continue;
 
 			InputFieldOverlayLayout layout = ResolveInputFieldOverlay(registry, field);
-			if (!layout.Valid) continue;
+			if (!layout.Valid) continue;  // stub Font path returns Valid=false
 
 			auto fieldIt = m_DrawIndexByEntity.find(entity);
 			auto textIt = m_DrawIndexByEntity.find(field.TextEntity);
@@ -779,13 +853,10 @@ namespace Axiom {
 					const Vec2 selCenter{ xLo + selW * 0.5f, centerY };
 					const Vec2 selSize{ selW, halfHeight * 2.0f };
 					Instance44 selInst(
-						selCenter,
-						selSize,
-						0.0f,
+						selCenter, selSize, 0.0f,
 						field.SelectionColor,
 						TextureHandle{},
-						static_cast<short>(0),
-						static_cast<std::uint8_t>(0),
+						0, 0,
 						fieldDI + 1u);
 					selInst.HasClip = fieldHasClip;
 					selInst.ClipMin = fieldClipMin;
@@ -803,13 +874,10 @@ namespace Axiom {
 				const Vec2 caretCenter{ caretX + caretWidth * 0.5f, centerY };
 				const Vec2 caretSize{ caretWidth, halfHeight * 2.0f };
 				Instance44 caretInst(
-					caretCenter,
-					caretSize,
-					0.0f,
+					caretCenter, caretSize, 0.0f,
 					field.CaretColor,
 					TextureHandle{},
-					static_cast<short>(0),
-					static_cast<std::uint8_t>(0),
+					0, 0,
 					textDI + 1u);
 				caretInst.HasClip = fieldHasClip;
 				caretInst.ClipMin = fieldClipMin;
@@ -819,7 +887,7 @@ namespace Axiom {
 			(void)tc;
 		}
 
-		// ── 5. Unified UI z-stack ────────────────────────────────────
+		// ── 5. Sort image instances ──────────────────────────────────
 		std::sort(m_InstancesScratch.begin(), m_InstancesScratch.end(),
 			[](const Instance44& a, const Instance44& b) {
 				if (a.SortingLayer != b.SortingLayer)
@@ -828,249 +896,175 @@ namespace Axiom {
 					return a.SortingOrder < b.SortingOrder;
 				return a.DrawIndex < b.DrawIndex;
 			});
-		std::sort(m_TextScratch.begin(), m_TextScratch.end(),
-			[](const TextDrawCmd& a, const TextDrawCmd& b) {
-				if (a.SortingLayer != b.SortingLayer)
-					return a.SortingLayer < b.SortingLayer;
-				if (a.SortingOrder != b.SortingOrder)
-					return a.SortingOrder < b.SortingOrder;
-				return a.DrawIndex < b.DrawIndex;
-			});
 
-		// ── bgfx submit setup ────────────────────────────────────────
-		// Acquire (or reuse) a UI view-id keyed on the currently-bound
-		// framebuffer. The editor renders two FBOs per frame (Game View
-		// + Editor View) — each gets its own UI overlay view so neither
-		// overwrites the other's setViewFrameBuffer when GuiRenderer
-		// runs again later in the frame.
-		auto& bgfxState = GetBgfxState(this);
-		const bgfx::FrameBufferHandle currentFbo = BgfxBackend::CurrentFramebuffer();
-		const bgfx::ViewId uiView = AcquireUiViewForFbo(bgfxState, currentFbo);
+		if (m_InstancesScratch.empty()) {
+			// No UI image quads this frame. Stage 5 has no text submit, so
+			// nothing else to do. Stage 6 will keep going here to flush the
+			// text spans.
+			return;
+		}
 
-		uint16_t vpX = 0, vpY = 0, vpW = 0, vpH = 0;
-		BgfxBackend::CurrentViewRect(vpX, vpY, vpW, vpH);
-		if (vpW == 0 || vpH == 0) return;
+		// ── WebGPU submit setup ──────────────────────────────────────
+		auto& state = GetState(this);
+		state.BindGroupsThisFrame.clear();
 
-		bgfx::setViewName(uiView, "GuiRendererUi");
-		bgfx::setViewMode(uiView, bgfx::ViewMode::Sequential);
-		bgfx::setViewClear(uiView, BGFX_CLEAR_NONE);
-		bgfx::setViewRect(uiView, vpX, vpY, vpW, vpH);
-		bgfx::setViewFrameBuffer(uiView, currentFbo);
-		bgfx::setViewTransform(uiView, nullptr, glm::value_ptr(mvp));
+		auto target = WebGPUBackend::BeginRenderToCurrentTarget();
+		if (!target.Valid) return;
+		if (!WebGPUSpriteResources::IsReady()) return;
 
-		if (!BgfxSpriteResources::IsReady()) return;
-		const bgfx::ProgramHandle prog = BgfxSpriteResources::GetProgram();
-		if (!bgfx::isValid(prog)) return;
+		wgpu::Device device = WebGPUBackend::GetDevice();
+		wgpu::Queue  queue  = WebGPUBackend::GetQueue();
+		if (!device || !queue) return;
 
-		const auto& instanceLayout = BgfxSpriteResources::GetInstanceLayout();
-		const bgfx::VertexBufferHandle quadVbh = BgfxSpriteResources::GetQuadVbh();
-		const bgfx::IndexBufferHandle  quadIbh = BgfxSpriteResources::GetQuadIbh();
-		const bgfx::UniformHandle      sampler = BgfxSpriteResources::GetSamplerAlbedo();
-		(void)instanceLayout;
+		wgpu::RenderPipeline pipeline = WebGPUSpriteResources::GetSpritePipeline(
+			target.ColorFormat, target.HasDepth);
+		if (!pipeline) {
+			AIM_CORE_WARN_TAG("GuiRenderer",
+				"No pipeline for color-format {} hasDepth={} — UI not submitted",
+				static_cast<int>(target.ColorFormat), target.HasDepth);
+			return;
+		}
+
+		if (!EnsureUniformBuffer(device, state)) return;
+		queue.WriteBuffer(state.UniformBuffer, 0, glm::value_ptr(mvp), 64);
+
+		const size_t n = m_InstancesScratch.size();
+		if (!EnsureInstanceBuffer(device, state, static_cast<uint32_t>(n))) return;
+
+		state.EncodedScratch.resize(n);
+		for (size_t k = 0; k < n; ++k) {
+			WebGPUSpriteResources::EncodeInstance44(m_InstancesScratch[k], state.EncodedScratch[k]);
+		}
+		queue.WriteBuffer(state.InstanceBuffer, 0,
+			state.EncodedScratch.data(),
+			n * sizeof(WebGPUSpriteResources::SpriteInstance));
+
+		wgpu::CommandEncoder encoder = WebGPUBackend::GetFrameEncoder();
+		if (!encoder) return;
+
+		wgpu::RenderPassColorAttachment colorAtt{};
+		colorAtt.view       = target.ColorView;
+		colorAtt.loadOp     = wgpu::LoadOp::Load;
+		colorAtt.storeOp    = wgpu::StoreOp::Store;
+		colorAtt.depthSlice = wgpu::kDepthSliceUndefined;
+
+		wgpu::RenderPassDepthStencilAttachment depthAtt{};
+		if (target.HasDepth) {
+			depthAtt.view              = target.DepthView;
+			depthAtt.depthLoadOp       = wgpu::LoadOp::Load;
+			depthAtt.depthStoreOp      = wgpu::StoreOp::Store;
+			depthAtt.stencilLoadOp     = wgpu::LoadOp::Load;
+			depthAtt.stencilStoreOp    = wgpu::StoreOp::Store;
+		}
+
+		wgpu::RenderPassDescriptor passDesc{};
+		passDesc.label                  = "guirenderer-ui";
+		passDesc.colorAttachmentCount   = 1;
+		passDesc.colorAttachments       = &colorAtt;
+		passDesc.depthStencilAttachment = target.HasDepth ? &depthAtt : nullptr;
+
+		wgpu::RenderPassEncoder pass = encoder.BeginRenderPass(&passDesc);
+		pass.SetPipeline(pipeline);
+		pass.SetVertexBuffer(0, WebGPUSpriteResources::GetQuadVertexBuffer());
+		pass.SetVertexBuffer(1, state.InstanceBuffer);
+		pass.SetIndexBuffer(WebGPUSpriteResources::GetQuadIndexBuffer(),
+			wgpu::IndexFormat::Uint16);
+
+		// Default scissor = full attachment. Each batch with a clip rect
+		// overrides this; runs without a clip rect call SetScissorRect
+		// back to full so a prior clipped batch's rect doesn't leak.
+		pass.SetScissorRect(0, 0, target.Width, target.Height);
 
 		const TextureHandle defaultTexture = TextureManager::GetDefaultTexture(DefaultTexture::Square);
 		auto resolveHandle = [&](TextureHandle h) {
 			return TextureManager::IsValid(h) ? h : defaultTexture;
 		};
 
-		auto clipsEqual = [](bool aHas, const Vec2& aMin, const Vec2& aMax,
-			bool bHas, const Vec2& bMin, const Vec2& bMax) -> bool {
-			if (aHas != bHas) return false;
-			if (!aHas) return true;
-			return aMin.x == bMin.x && aMin.y == bMin.y
-				&& aMax.x == bMax.x && aMax.y == bMax.y;
-		};
+		bool scissorIsFull = true;
+		size_t i = 0;
+		while (i < n) {
+			const TextureHandle runHandle = resolveHandle(m_InstancesScratch[i].TextureHandle);
+			const bool runHasClip = m_InstancesScratch[i].HasClip;
+			const Vec2 runClipMin = m_InstancesScratch[i].ClipMin;
+			const Vec2 runClipMax = m_InstancesScratch[i].ClipMax;
 
-		// Project a UI-space clip rect through MVP into NDC, then map NDC
-		// to pixel coords via the cached UI view rect. bgfx::setScissor
-		// uses top-left coords in framebuffer pixels — Y is flipped from
-		// the GL impl's bottom-left mapping.
-		//
-		// Returns a bgfx scissor-cache index so TextRenderer can re-set
-		// the same scissor before each of its multi-atlas submits.
-		// 0xFFFF = no scissor (bgfx sentinel that disables clipping).
-		auto applyScissor = [&](bool hasClip, const Vec2& clipMin, const Vec2& clipMax) -> uint16_t {
-			if (!hasClip) {
-				bgfx::setScissor(0xFFFFu);
-				return 0xFFFFu;
+			size_t runEnd = i + 1;
+			while (runEnd < n) {
+				const TextureHandle h = resolveHandle(m_InstancesScratch[runEnd].TextureHandle);
+				if (!(h.index == runHandle.index && h.generation == runHandle.generation)) break;
+				if (!ClipsEqual(runHasClip, runClipMin, runClipMax,
+					m_InstancesScratch[runEnd].HasClip,
+					m_InstancesScratch[runEnd].ClipMin,
+					m_InstancesScratch[runEnd].ClipMax)) break;
+				++runEnd;
 			}
-			const glm::vec4 corners[4] = {
-				mvp * glm::vec4(clipMin.x, clipMin.y, 0.0f, 1.0f),
-				mvp * glm::vec4(clipMax.x, clipMin.y, 0.0f, 1.0f),
-				mvp * glm::vec4(clipMin.x, clipMax.y, 0.0f, 1.0f),
-				mvp * glm::vec4(clipMax.x, clipMax.y, 0.0f, 1.0f),
-			};
-			const float invW0 = corners[0].w != 0.0f ? 1.0f / corners[0].w : 1.0f;
-			float ndcMinX = corners[0].x * invW0;
-			float ndcMaxX = ndcMinX;
-			float ndcMinY = corners[0].y * invW0;
-			float ndcMaxY = ndcMinY;
-			for (int i = 1; i < 4; ++i) {
-				const float invW = corners[i].w != 0.0f ? 1.0f / corners[i].w : 1.0f;
-				const float x = corners[i].x * invW;
-				const float y = corners[i].y * invW;
-				ndcMinX = std::min(ndcMinX, x);
-				ndcMaxX = std::max(ndcMaxX, x);
-				ndcMinY = std::min(ndcMinY, y);
-				ndcMaxY = std::max(ndcMaxY, y);
+			const uint32_t count = static_cast<uint32_t>(runEnd - i);
+
+			wgpu::BindGroup bg = ResolveBindGroup(device, state, runHandle);
+			if (!bg) {
+				// Default texture also missing — skip the run. Same fallback
+				// the bgfx side takes when TextureManager has no live handle.
+				i = runEnd;
+				continue;
 			}
-			ndcMinX = std::clamp(ndcMinX, -1.0f, 1.0f);
-			ndcMaxX = std::clamp(ndcMaxX, -1.0f, 1.0f);
-			ndcMinY = std::clamp(ndcMinY, -1.0f, 1.0f);
-			ndcMaxY = std::clamp(ndcMaxY, -1.0f, 1.0f);
 
-			const float fVpW = static_cast<float>(vpW);
-			const float fVpH = static_cast<float>(vpH);
-			const float xMin = vpX + (ndcMinX * 0.5f + 0.5f) * fVpW;
-			const float xMax = vpX + (ndcMaxX * 0.5f + 0.5f) * fVpW;
-			const float yMinTop = vpY + (1.0f - (ndcMaxY * 0.5f + 0.5f)) * fVpH;
-			const float yMaxTop = vpY + (1.0f - (ndcMinY * 0.5f + 0.5f)) * fVpH;
-			const float sx = std::floor(std::min(xMin, xMax));
-			const float sy = std::floor(std::min(yMinTop, yMaxTop));
-			const float sw = std::ceil(std::abs(xMax - xMin));
-			const float sh = std::ceil(std::abs(yMaxTop - yMinTop));
-			return bgfx::setScissor(
-				static_cast<uint16_t>(std::max(0.0f, sx)),
-				static_cast<uint16_t>(std::max(0.0f, sy)),
-				static_cast<uint16_t>(std::max(0.0f, sw)),
-				static_cast<uint16_t>(std::max(0.0f, sh)));
-		};
-
-		// Submit a contiguous span of pre-sorted images, batching adjacent
-		// same-texture / same-clip instances into one bgfx::submit through
-		// a transient instance data buffer.
-		auto drawImageSpan = [&](const Instance44* base, size_t count) {
-			if (count == 0) return;
-
-			size_t runStart = 0;
-			while (runStart < count) {
-				const TextureHandle runHandle = resolveHandle(base[runStart].TextureHandle);
-				const bool runHasClip = base[runStart].HasClip;
-				const Vec2 runClipMin = base[runStart].ClipMin;
-				const Vec2 runClipMax = base[runStart].ClipMax;
-
-				size_t runEnd = runStart + 1;
-				while (runEnd < count) {
-					const TextureHandle h = resolveHandle(base[runEnd].TextureHandle);
-					if (!(h.index == runHandle.index && h.generation == runHandle.generation)) break;
-					if (!clipsEqual(runHasClip, runClipMin, runClipMax,
-						base[runEnd].HasClip, base[runEnd].ClipMin, base[runEnd].ClipMax)) break;
-					++runEnd;
+			// Per-batch scissor: either project the clip rect or reset to
+			// full attachment if no clip applies.
+			if (runHasClip) {
+				const ScissorPx sc = ComputeScissor(mvp, runClipMin, runClipMax,
+					target.Width, target.Height);
+				if (sc.Valid) {
+					pass.SetScissorRect(sc.X, sc.Y, sc.W, sc.H);
+					scissorIsFull = false;
+				} else {
+					// Degenerate / fully-outside clip — skip the run rather
+					// than draw with the previous batch's scissor stuck.
+					i = runEnd;
+					continue;
 				}
-				const uint32_t runCount = static_cast<uint32_t>(runEnd - runStart);
-
-				if (bgfx::getAvailInstanceDataBuffer(runCount,
-					sizeof(BgfxSpriteResources::SpriteInstance)) < runCount)
-				{
-					AIM_CORE_WARN_TAG("GuiRenderer",
-						"Instance buffer exhausted; dropped {} UI quads this frame", runCount);
-					break;
-				}
-				bgfx::InstanceDataBuffer idb{};
-				bgfx::allocInstanceDataBuffer(&idb, runCount,
-					sizeof(BgfxSpriteResources::SpriteInstance));
-				BgfxSpriteResources::SpriteInstance* dst =
-					reinterpret_cast<BgfxSpriteResources::SpriteInstance*>(idb.data);
-				for (uint32_t k = 0; k < runCount; ++k) {
-					BgfxSpriteResources::EncodeInstance44(base[runStart + k], dst[k]);
-				}
-
-				(void)applyScissor(runHasClip, runClipMin, runClipMax);
-
-				if (Texture2D* tex = TextureManager::GetTexture(runHandle); tex && tex->IsValid()) {
-					const uint16_t texIdx = static_cast<uint16_t>(tex->GetHandle() - 1u);
-					bgfx::setTexture(0, sampler, bgfx::TextureHandle{ texIdx });
-				}
-
-				bgfx::setVertexBuffer(0, quadVbh);
-				bgfx::setIndexBuffer(quadIbh);
-				bgfx::setInstanceDataBuffer(&idb);
-				bgfx::setState(0
-					| BGFX_STATE_WRITE_RGB
-					| BGFX_STATE_WRITE_A
-					| BGFX_STATE_BLEND_ALPHA
-					| BGFX_STATE_MSAA);
-				bgfx::submit(uiView, prog);
-
-				runStart = runEnd;
+			} else if (!scissorIsFull) {
+				pass.SetScissorRect(0, 0, target.Width, target.Height);
+				scissorIsFull = true;
 			}
-		};
 
-		auto drawTextSpan = [&](const TextDrawCmd* base, size_t count) {
-			if (count == 0) return;
-			if (!m_TextRenderer || !m_TextRenderer->IsInitialized()) return;
+			pass.SetBindGroup(0, bg);
+			pass.DrawIndexed(/*indexCount=*/6,
+				/*instanceCount=*/count,
+				/*firstIndex=*/0,
+				/*baseVertex=*/0,
+				/*firstInstance=*/static_cast<uint32_t>(i));
 
-			size_t runStart = 0;
-			while (runStart < count) {
-				const bool runHasClip = base[runStart].HasClip;
-				const Vec2 runClipMin = base[runStart].ClipMin;
-				const Vec2 runClipMax = base[runStart].ClipMax;
-
-				size_t runEnd = runStart + 1;
-				while (runEnd < count) {
-					if (!clipsEqual(runHasClip, runClipMin, runClipMax,
-						base[runEnd].HasClip, base[runEnd].ClipMin, base[runEnd].ClipMax)) break;
-					++runEnd;
-				}
-
-				const uint16_t scissorCache = applyScissor(runHasClip, runClipMin, runClipMax);
-				m_TextRenderer->RenderInstances(std::span<const TextDrawCmd>(
-					base + runStart, runEnd - runStart), mvp,
-					static_cast<unsigned short>(uiView),
-					scissorCache);
-
-				runStart = runEnd;
-			}
-		};
-
-		// Merge-walk sorted images + text by (Layer, Order, DrawIndex). Same
-		// stable interleave as the GL impl so a label authored below its
-		// background image still renders on top.
-		const auto imageKey = [](const Instance44& v) {
-			return std::tuple<int, int, std::uint32_t>{
-				static_cast<int>(v.SortingLayer),
-				static_cast<int>(v.SortingOrder),
-				v.DrawIndex };
-		};
-		const auto textKey = [](const TextDrawCmd& v) {
-			return std::tuple<int, int, std::uint32_t>{
-				static_cast<int>(v.SortingLayer),
-				static_cast<int>(v.SortingOrder),
-				v.DrawIndex };
-		};
-
-		size_t ii = 0;
-		size_t ti = 0;
-		const size_t iCount = m_InstancesScratch.size();
-		const size_t tCount = m_TextScratch.size();
-
-		while (ii < iCount && ti < tCount) {
-			const auto ik = imageKey(m_InstancesScratch[ii]);
-			const auto tk = textKey(m_TextScratch[ti]);
-
-			if (ik <= tk) {
-				size_t end = ii + 1;
-				while (end < iCount && imageKey(m_InstancesScratch[end]) == ik) ++end;
-				drawImageSpan(m_InstancesScratch.data() + ii, end - ii);
-				ii = end;
-			}
-			else {
-				size_t end = ti + 1;
-				while (end < tCount && textKey(m_TextScratch[end]) == tk) ++end;
-				drawTextSpan(m_TextScratch.data() + ti, end - ti);
-				ti = end;
-			}
-		}
-		if (ii < iCount) {
-			drawImageSpan(m_InstancesScratch.data() + ii, iCount - ii);
-		}
-		if (ti < tCount) {
-			drawTextSpan(m_TextScratch.data() + ti, tCount - ti);
+			i = runEnd;
 		}
 
-		// Make sure the view executes even if no spans submitted (e.g.
-		// empty UI scene) — bgfx::touch keeps the clear/setup live.
-		bgfx::touch(uiView);
+		pass.End();
+
+		if (target.IsSwapChain) {
+			WebGPUBackend::MarkSwapChainRendered();
+		}
+
+		// ── Text submission ─────────────────────────────────────────
+		// Stage 5: TextRenderer_WebGPU.cpp's RenderInstances is a no-op
+		// stub. The m_TextScratch collection ran above (kept for the
+		// hierarchy walk's side effects on m_DrawIndexByEntity) but the
+		// commands aren't sent. Stage 6 wires this back in with the real
+		// WebGPU text pipeline. The viewId / scissorCache parameters here
+		// are vestigial under WebGPU — the implementation ignores them.
+		if (m_TextRenderer && m_TextRenderer->IsInitialized() && !m_TextScratch.empty()) {
+			std::sort(m_TextScratch.begin(), m_TextScratch.end(),
+				[](const TextDrawCmd& a, const TextDrawCmd& b) {
+					if (a.SortingLayer != b.SortingLayer)
+						return a.SortingLayer < b.SortingLayer;
+					if (a.SortingOrder != b.SortingOrder)
+						return a.SortingOrder < b.SortingOrder;
+					return a.DrawIndex < b.DrawIndex;
+				});
+			m_TextRenderer->RenderInstances(
+				std::span<const TextDrawCmd>(m_TextScratch.data(), m_TextScratch.size()),
+				mvp,
+				/*viewId*/ 0xFFFFu,
+				/*scissorCache*/ 0xFFFFu);
+		}
 	}
 
-} // namespace Axiom
+}  // namespace Axiom

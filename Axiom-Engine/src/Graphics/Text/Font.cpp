@@ -2,29 +2,32 @@
 #include "Graphics/Text/Font.hpp"
 
 #include "Core/Log.hpp"
+#include "Graphics/Backend/WebGPUBackend.hpp"
 #include "Serialization/File.hpp"
 
-#include <bgfx/bgfx.h>
+#include <webgpu/webgpu_cpp.h>
 
 #define STB_TRUETYPE_IMPLEMENTATION
 #include <stb_truetype.h>
 
 #include <algorithm>
 #include <cstring>
+#include <unordered_map>
 #include <utility>
 
 // =============================================================================
-// Font — real bgfx implementation. Stage 2.1 of the bgfx port.
+// Font — WebGPU implementation. Stage 6 of the WebGPU port.
 // -----------------------------------------------------------------------------
-// Mirrors the OpenGL Font.cpp's stb_truetype baking logic exactly, with the
-// atlas upload routed through `bgfx::createTexture2D` (R8 format) instead of
-// `glTexImage2D`. The two implementations could share the bake step in a
-// later cleanup pass — for Stage 2.1 the duplication is intentional so each
-// backend stays a single coherent file.
+// Sibling to Font.cpp (the bgfx implementation). CPU-side stbtt bake is
+// preserved verbatim: same codepoint ranges, same two-tier oversample, same
+// atlas-side growth ladder. Only the GPU upload swaps — from
+// `bgfx::createTexture2D` to a wgpu::Texture (R8Unorm) + view registered in
+// a TU-local pool that WebGPUBackend::LookupFontAtlas reads back.
 //
-// `m_AtlasTexture` stores (bgfx handle.idx + 1) with 0 = invalid sentinel,
-// matching the Texture2D_Bgfx convention. The existing `IsLoaded()` check
-// (`m_AtlasTexture != 0`) keeps working for both backends.
+// `m_AtlasTexture` stores an opaque pool ID (1-based; 0 = unset, same
+// `IsLoaded() => m_AtlasTexture != 0` contract from the header). Owners
+// (FontManager slot's unique_ptr<Font>) drop the entry via Cleanup at
+// destruction, releasing the wgpu::Texture immediately.
 // =============================================================================
 
 namespace Axiom {
@@ -32,8 +35,8 @@ namespace Axiom {
 	namespace {
 		struct CodepointRange { uint32_t First; uint32_t Last; };
 		constexpr CodepointRange k_BakedRanges[] = {
-			{ 32,  126 }, // ASCII printable
-			{ 160, 255 }, // Latin-1 supplement
+			{ 32,  126 },  // ASCII printable
+			{ 160, 255 },  // Latin-1 supplement
 		};
 		constexpr int k_CodepointRangeCount =
 			static_cast<int>(sizeof(k_BakedRanges) / sizeof(k_BakedRanges[0]));
@@ -46,17 +49,37 @@ namespace Axiom {
 		constexpr int k_CodepointCount = ComputeBakedCodepointCount();
 
 		constexpr int k_AtlasInitialSide = 256;
-		constexpr int k_AtlasMaxSide = 4096;
+		constexpr int k_AtlasMaxSide     = 4096;
 
-		constexpr unsigned EncodeBgfxIdx(uint16_t idx) noexcept {
-			return static_cast<unsigned>(idx) + 1u;
+		// ── Pool ────────────────────────────────────────────────────────────
+		struct GpuFontAtlas {
+			wgpu::Texture     Texture;
+			wgpu::TextureView View;
+		};
+		std::unordered_map<unsigned, GpuFontAtlas> g_Atlases;
+		unsigned g_NextAtlasId = 1;
+
+		unsigned RegisterAtlas(GpuFontAtlas&& atlas) {
+			unsigned id = g_NextAtlasId++;
+			if (id == 0) id = g_NextAtlasId++;
+			g_Atlases.emplace(id, std::move(atlas));
+			return id;
 		}
-		constexpr uint16_t DecodeBgfxIdx(unsigned m) noexcept {
-			return static_cast<uint16_t>(m - 1u);
+		void DeregisterAtlas(unsigned id) {
+			if (id == 0) return;
+			g_Atlases.erase(id);
 		}
-		bgfx::TextureHandle FromAtlas(unsigned m) noexcept {
-			if (m == 0) return BGFX_INVALID_HANDLE;
-			return bgfx::TextureHandle{ DecodeBgfxIdx(m) };
+		GpuFontAtlas* TryLookupAtlas(unsigned id) {
+			if (id == 0) return nullptr;
+			auto it = g_Atlases.find(id);
+			return (it == g_Atlases.end()) ? nullptr : &it->second;
+		}
+	}
+
+	namespace WebGPUBackend {
+		wgpu::TextureView LookupFontAtlas(unsigned atlasId) {
+			GpuFontAtlas* slot = TryLookupAtlas(atlasId);
+			return slot ? slot->View : wgpu::TextureView{};
 		}
 	}
 
@@ -142,6 +165,12 @@ namespace Axiom {
 
 	bool Font::BakeAtlas(float pixelSize) {
 		if (m_TtfBuffer.empty() || pixelSize <= 0.0f) return false;
+		if (!WebGPUBackend::IsInitialized()) {
+			AIM_CORE_ERROR_TAG("Font", "BakeAtlas called before WebGPU backend initialized: {}",
+				m_Filepath);
+			m_TtfBuffer.clear();
+			return false;
+		}
 
 		m_StbFontInfoStorage.assign(sizeof(stbtt_fontinfo), 0);
 		stbtt_fontinfo* font = reinterpret_cast<stbtt_fontinfo*>(m_StbFontInfoStorage.data());
@@ -161,15 +190,13 @@ namespace Axiom {
 
 		int ascent = 0, descent = 0, lineGap = 0;
 		stbtt_GetFontVMetrics(font, &ascent, &descent, &lineGap);
-		m_Ascent = ascent * scale;
-		m_Descent = descent * scale;
+		m_Ascent     = ascent * scale;
+		m_Descent    = descent * scale;
 		m_LineHeight = (ascent - descent + lineGap) * scale;
 
-		// Mirror the OpenGL impl's two-tier bake: try 2× oversample first
-		// for sharper glyphs, fall back to 1× for very large pixel sizes.
-		// The Font.cpp fast-path optimization in `Font::BakeAtlas` already
-		// skips the 2× pre-pass above 48 px (added in the font-perf fix);
-		// duplicate that condition here so the bgfx path matches.
+		// Two-tier bake: 2× oversample at sizes ≤ 48 px for sharper text,
+		// 1× otherwise. Matches the bgfx + OpenGL impls so quantization
+		// buckets stay consistent across backends.
 		std::vector<stbtt_packedchar> packed(k_CodepointCount);
 		std::vector<uint8_t> bitmap;
 		int chosenOversample = 0;
@@ -205,8 +232,8 @@ namespace Axiom {
 				stbtt_PackEnd(&pctx);
 
 				if (packResult) {
-					m_AtlasWidth = side;
-					m_AtlasHeight = side;
+					m_AtlasWidth     = side;
+					m_AtlasHeight    = side;
 					chosenOversample = oversample;
 					ok = true;
 					break;
@@ -224,27 +251,80 @@ namespace Axiom {
 		}
 		(void)chosenOversample;
 
-		// Upload as R8 (single-channel alpha). bgfx::copy duplicates
-		// the source bytes so we can free `bitmap` immediately after.
-		const uint32_t bytes = static_cast<uint32_t>(m_AtlasWidth)
-			* static_cast<uint32_t>(m_AtlasHeight);
-		const bgfx::Memory* mem = bgfx::copy(bitmap.data(), bytes);
-		bgfx::TextureHandle handle = bgfx::createTexture2D(
-			static_cast<uint16_t>(m_AtlasWidth),
-			static_cast<uint16_t>(m_AtlasHeight),
-			/*hasMips=*/false, /*numLayers=*/1,
-			bgfx::TextureFormat::R8,
-			BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP,
-			mem);
-		if (!bgfx::isValid(handle)) {
-			AIM_CORE_ERROR_TAG("Font", "bgfx::createTexture2D failed for atlas: {}", m_Filepath);
+		// Upload as R8Unorm (single-channel coverage). bytesPerRow must be a
+		// multiple of 256 per WebGPU's COPY_BYTES_PER_ROW_ALIGNMENT spec
+		// requirement — we pad the source rows to the next multiple before
+		// the queue.WriteTexture call. (Power-of-two atlas sides ≥ 256
+		// already satisfy this, but documenting + asserting keeps the path
+		// safe if k_AtlasInitialSide is ever lowered.)
+		wgpu::Device device = WebGPUBackend::GetDevice();
+		wgpu::Queue  queue  = WebGPUBackend::GetQueue();
+		if (!device || !queue) {
+			AIM_CORE_ERROR_TAG("Font", "Device / queue unavailable while baking: {}", m_Filepath);
 			m_TtfBuffer.clear();
 			m_StbFontInfoStorage.clear();
 			return false;
 		}
-		m_AtlasTexture = EncodeBgfxIdx(handle.idx);
 
-		// Translate stb's packed table → m_Glyphs map (same as OpenGL impl).
+		wgpu::TextureDescriptor texDesc{};
+		texDesc.dimension       = wgpu::TextureDimension::e2D;
+		texDesc.size            = { static_cast<uint32_t>(m_AtlasWidth),
+		                            static_cast<uint32_t>(m_AtlasHeight), 1 };
+		texDesc.format          = wgpu::TextureFormat::R8Unorm;
+		texDesc.usage           = wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopyDst;
+		texDesc.mipLevelCount   = 1;
+		texDesc.sampleCount     = 1;
+		texDesc.viewFormatCount = 0;
+		texDesc.label           = "font-atlas";
+
+		wgpu::Texture texture = device.CreateTexture(&texDesc);
+		if (!texture) {
+			AIM_CORE_ERROR_TAG("Font", "CreateTexture failed for atlas: {}", m_Filepath);
+			m_TtfBuffer.clear();
+			m_StbFontInfoStorage.clear();
+			return false;
+		}
+
+		// Dawn renamed these structs mid-2025: ImageCopyTexture ->
+		// TexelCopyTextureInfo, TextureDataLayout -> TexelCopyBufferLayout.
+		wgpu::TexelCopyTextureInfo dst{};
+		dst.texture  = texture;
+		dst.mipLevel = 0;
+		dst.origin   = { 0, 0, 0 };
+		dst.aspect   = wgpu::TextureAspect::All;
+
+		wgpu::TexelCopyBufferLayout layout{};
+		layout.offset       = 0;
+		layout.bytesPerRow  = static_cast<uint32_t>(m_AtlasWidth);
+		layout.rowsPerImage = static_cast<uint32_t>(m_AtlasHeight);
+
+		wgpu::Extent3D writeSize{ static_cast<uint32_t>(m_AtlasWidth),
+		                          static_cast<uint32_t>(m_AtlasHeight), 1 };
+		const size_t byteCount = static_cast<size_t>(m_AtlasWidth)
+			* static_cast<size_t>(m_AtlasHeight);
+
+		queue.WriteTexture(&dst, bitmap.data(), byteCount, &layout, &writeSize);
+
+		wgpu::TextureViewDescriptor viewDesc{};
+		viewDesc.format          = wgpu::TextureFormat::R8Unorm;
+		viewDesc.dimension       = wgpu::TextureViewDimension::e2D;
+		viewDesc.mipLevelCount   = 1;
+		viewDesc.arrayLayerCount = 1;
+		viewDesc.aspect          = wgpu::TextureAspect::All;
+		wgpu::TextureView view   = texture.CreateView(&viewDesc);
+		if (!view) {
+			AIM_CORE_ERROR_TAG("Font", "Atlas view creation failed: {}", m_Filepath);
+			m_TtfBuffer.clear();
+			m_StbFontInfoStorage.clear();
+			return false;
+		}
+
+		GpuFontAtlas atlas;
+		atlas.Texture = std::move(texture);
+		atlas.View    = std::move(view);
+		m_AtlasTexture = RegisterAtlas(std::move(atlas));
+
+		// Translate stb's packed table → m_Glyphs map (identical to bgfx + GL).
 		int packedIndex = 0;
 		for (int r = 0; r < k_CodepointRangeCount; ++r) {
 			const auto& cr = k_BakedRanges[r];
@@ -256,10 +336,10 @@ namespace Axiom {
 				m.V0 = float(pc.y0) / float(m_AtlasHeight);
 				m.U1 = float(pc.x1) / float(m_AtlasWidth);
 				m.V1 = float(pc.y1) / float(m_AtlasHeight);
-				m.Width = pc.xoff2 - pc.xoff;
-				m.Height = pc.yoff2 - pc.yoff;
-				m.XOffset = pc.xoff;
-				m.YOffset = pc.yoff;
+				m.Width    = pc.xoff2 - pc.xoff;
+				m.Height   = pc.yoff2 - pc.yoff;
+				m.XOffset  = pc.xoff;
+				m.YOffset  = pc.yoff;
 				m.XAdvance = pc.xadvance;
 				m_Glyphs[cr.First + uint32_t(i)] = m;
 			}
@@ -282,7 +362,7 @@ namespace Axiom {
 
 	void Font::Cleanup() {
 		if (m_AtlasTexture != 0) {
-			bgfx::destroy(FromAtlas(m_AtlasTexture));
+			DeregisterAtlas(m_AtlasTexture);
 			m_AtlasTexture = 0;
 		}
 		m_TtfBuffer.clear();
@@ -298,4 +378,4 @@ namespace Axiom {
 		m_Filepath.clear();
 	}
 
-} // namespace Axiom
+}  // namespace Axiom

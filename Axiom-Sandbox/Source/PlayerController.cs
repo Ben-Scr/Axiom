@@ -4,17 +4,14 @@ public class PlayerController : EntityScript
 {
     private float speed = 5.0f;
 
-    // E26: override the documented OnStart/OnUpdate surface from EntityScript
     public override void OnStart()
     {
         Log.Info("PlayerController attached to: " + Entity.Name);
     }
 
-    // E26: override the documented OnStart/OnUpdate surface from EntityScript
     public override void OnUpdate()
     {
-        // Test 5
-        var velocity = Vector2.One;
+        var velocity = Vector2.Zero;
 
         if (Input.GetKey(KeyCode.W) || Input.GetKey(KeyCode.Up))
             velocity.Y += 1.0f;
@@ -23,12 +20,16 @@ public class PlayerController : EntityScript
         if (Input.GetKey(KeyCode.A) || Input.GetKey(KeyCode.Left))
             velocity.X -= 1.0f;
         if (Input.GetKey(KeyCode.D) || Input.GetKey(KeyCode.Right))
-            velocity.X += 2.0f;
+            velocity.X += 1.0f;
 
-        if (velocity != Vector2.Zero)
-        {
-            velocity = velocity.Normalized();
-            Entity.Transform.Position += velocity * speed * Time.DeltaTime;
-        }
+        if (velocity == Vector2.Zero) return;
+
+        // ECS ref-API: TransformRef returns `ref Transform2D` (the struct in
+        // Axiom.Components) pointing directly at this entity's slot in the
+        // EnTT pool. The += writes through to native storage with zero
+        // per-property P/Invoke. Writes go to LocalPosition because
+        // TransformHierarchySystem recomputes world Position from it each
+        // frame; touching the world cache directly would be overwritten.
+        Entity.TransformRef.LocalPosition += velocity.Normalized() * speed * Time.DeltaTime;
     }
 }

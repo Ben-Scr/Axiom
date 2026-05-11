@@ -150,7 +150,7 @@ namespace Axiom::ImGuiUtils {
 		return activated;
 	}
 
-	void DrawTexturePreview(unsigned int rendererId, float texWidth, float texHeight, float previewSize)
+	void DrawTexturePreview(uint64_t rendererId, float texWidth, float texHeight, float previewSize)
 	{
 		const ImVec2 previewMin = ImGui::GetCursorScreenPos();
 		const ImVec2 previewMax = ImVec2(previewMin.x + previewSize, previewMin.y + previewSize);

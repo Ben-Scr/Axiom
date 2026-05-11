@@ -132,10 +132,12 @@ namespace Axiom {
 		void Create(const WindowSpecification& props);
 		void SyncViewportFromFramebuffer();
 		void UpdateViewport();
-		// Present the rendered frame to the OS window. Implementation lives
-		// in Window.cpp because the bgfx backend (--rhi=bgfx) presents via
-		// `bgfx::frame()` rather than `glfwSwapBuffers` — see the
-		// implementation for the per-backend branch.
+		// Present the rendered frame to the OS window. Delegates to
+		// RenderApi::Present(), so it's backend-neutral — bgfx routes to
+		// bgfx::touch(0) + bgfx::frame(), WebGPU submits its per-frame
+		// command buffer and calls surface.Present(). GLFW's
+		// glfwSwapBuffers can't be used here because the window is created
+		// with GLFW_NO_API (neither backend wants GLFW's GL context).
 		void SwapBuffers() const;
 
 		bool ShouldClose() const { return glfwWindowShouldClose(m_GLFWwindow); }

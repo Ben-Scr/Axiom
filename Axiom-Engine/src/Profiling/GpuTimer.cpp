@@ -1,26 +1,56 @@
 #include "pch.hpp"
 #include "Profiling/GpuTimer.hpp"
 
+// =============================================================================
+// GpuTimer — WebGPU stub. Stage 8 of the WebGPU port.
+// -----------------------------------------------------------------------------
+// Sibling to GpuTimer.cpp. Under bgfx, this class was already a thin wrapper
+// around `bgfx::getStats()` — bgfx ran a per-frame GPU timer internally and
+// exposed (gpuTimeBegin / gpuTimeEnd / gpuTimerFreq) values that GpuTimer
+// just converted to milliseconds. WebGPU has no equivalent built-in timer;
+// getting per-frame GPU times requires:
+//
+//   1. Request the `wgpu::FeatureName::TimestampQuery` feature when the
+//      device is created (in WebGPUApi.cpp::RequestDeviceSync). Not all
+//      adapter+OS combinations advertise it (Apple Silicon / iOS Safari /
+//      some Vulkan drivers don't), so the path has to gracefully degrade.
+//   2. Create a wgpu::QuerySet with the timestamp type (sized for N frames
+//      of ring buffering — same lag pattern the OpenGL impl's per-frame
+//      query ring used).
+//   3. Plumb `wgpu::RenderPassTimestampWrites` into EVERY render pass
+//      descriptor across the engine (Renderer2D / GuiRenderer / Text /
+//      Gizmo, plus WebGPUApi.cpp's Clear path). The `beginningOfPass-
+//      WriteIndex` / `endOfPassWriteIndex` flags tell WebGPU to write a
+//      timestamp at the GPU start/end of the pass; we'd allocate two
+//      slots per pass per frame.
+//   4. Encode `encoder.ResolveQuerySet` into a CopyDst-usage wgpu::Buffer
+//      at end-of-frame, then map+read it on the next frame (async — same
+//      "read frame N's result during frame N+3" pattern the header
+//      documents).
+//
+// Stage 8 ships the stub: GpuTimer compiles cleanly under --rhi=webgpu so
+// the engine links, but it pushes no samples into the profiler's GPU
+// module — the panel renders "N/A", matching the documented behaviour
+// when no GPU timer is available (e.g. bgfx noop backend, hardware
+// without the timer extension). The full implementation is its own
+// substantial diff that touches every renderer's pass descriptor; doing
+// it as a fast-follow keeps Stage 8 scoped to "the engine links" rather
+// than "the engine links AND profiler shows real GPU times AND four
+// other files change."
+//
+// To wire the real implementation later:
+//   * Add TimestampQuery to the requiredFeatures array in RequestDeviceSync,
+//     wrapped in an availability check via adapter.HasFeature.
+//   * Add `WebGPUBackend::WriteFrameStartTimestamp` and `…EndTimestamp`
+//     helpers callable from BeginFrame / EndFrame here.
+//   * Add the timestamp-writes struct to each renderer's RenderPassDescriptor.
+//   * Implement PollAndPublish to consume the previous-frame buffer
+//     readback and push the ms delta into Profiler::PushSample("GPU", ms).
+// =============================================================================
+
 #ifdef AXIOM_PROFILER_ENABLED
 #include "Profiling/Profiler.hpp"
-#include <bgfx/bgfx.h>
 #endif
-
-// =============================================================================
-// GpuTimer — real bgfx implementation. Stage 2.1 of the bgfx port.
-// -----------------------------------------------------------------------------
-// bgfx already runs a per-frame GPU timer internally and exposes it through
-// `bgfx::getStats()`:
-//   * `gpuTimeBegin` / `gpuTimeEnd` — device-clock ticks bracketing the
-//     frame's GPU work.
-//   * `gpuTimerFreq` — ticks per second.
-// We just convert (end - begin) / freq → milliseconds and push it into the
-// "GPU" profiler module each frame. No per-frame ring of GL queries needed
-// — bgfx's read is already non-blocking + lag-correct.
-//
-// PerFrame (declared in the header) stays an opaque pointer for ABI
-// compatibility with the OpenGL impl; we don't allocate it under bgfx.
-// =============================================================================
 
 namespace Axiom {
 
@@ -30,35 +60,24 @@ namespace Axiom {
 	void GpuTimer::Initialize() { m_Initialized = true; }
 	void GpuTimer::Shutdown()   { m_Initialized = false; m_FrameOpen = false; }
 
-	// bgfx tracks the GPU timer for us — Begin/End are markers only.
 	void GpuTimer::BeginFrame() { m_FrameOpen = true; }
 	void GpuTimer::EndFrame()   { m_FrameOpen = false; }
 
 	void GpuTimer::PollAndPublish() {
 #ifdef AXIOM_PROFILER_ENABLED
-		if (!m_Initialized) return;
-		const bgfx::Stats* stats = bgfx::getStats();
-		if (!stats) return;
-		// gpuTimerFreq == 0 means the backend doesn't expose a GPU
-		// timer (bgfx noop / some software backends). Skip silently.
-		if (stats->gpuTimerFreq == 0) return;
-		const int64_t deltaTicks = stats->gpuTimeEnd - stats->gpuTimeBegin;
-		if (deltaTicks <= 0) return;
-		const double ms = (double(deltaTicks) * 1000.0) / double(stats->gpuTimerFreq);
-		Profiler::PushSample("GPU", static_cast<float>(ms));
+		// No-op until wgpu::QuerySet timestamp plumbing lands (see file
+		// header). Profiler's GPU panel renders "N/A" — same path it takes
+		// when bgfx returns gpuTimerFreq=0 from a noop backend.
 #endif
 	}
 
 	long long GpuTimer::QueryGpuMemoryMb() {
-#ifdef AXIOM_PROFILER_ENABLED
-		const bgfx::Stats* stats = bgfx::getStats();
-		if (!stats) return -1;
-		// gpuMemoryUsed is bytes, -1 when the backend can't report.
-		if (stats->gpuMemoryUsed < 0) return -1;
-		return stats->gpuMemoryUsed / (1024 * 1024);
-#else
+		// WebGPU has no standard surface for reporting GPU memory usage.
+		// Dawn exposes some Vulkan/D3D12 stats via internal toggles but
+		// nothing portable across backends; returning -1 surfaces as
+		// "N/A" in the editor's stats overlay (same value the bgfx side
+		// returns when the adapter doesn't report gpuMemoryUsed).
 		return -1;
-#endif
 	}
 
-} // namespace Axiom
+}  // namespace Axiom

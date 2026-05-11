@@ -407,3 +407,15 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+
+# ── Axiom: Dawn (WebGPU) + portable CMake bootstrap ─────────────────────
+# Dawn is cloned + built locally by scripts/SetupDawn.bat. ~5 GB of
+# source + intermediate build files; we never commit it.
+External/dawn/
+
+# vendor/cmake/ is the portable CMake distribution that SetupDawn.bat
+# auto-downloads when no system CMake is reachable. ~120 MB of binaries
+# from the official Kitware ZIP — not worth committing. vendor/bin/ stays
+# trackable per the !vendor/bin/ overrides above (that's where premake5
+# lives, which IS committed).
+vendor/cmake/

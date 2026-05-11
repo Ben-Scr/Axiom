@@ -71,3 +71,10 @@ project "Axiom-Editor"
 
     filter { "system:windows", "configurations:Dist" }
         kind "WindowedApp"
+
+    filter {}
+
+    -- Per-config libdirs for webgpu_dawn.lib (inherited via EngineCore-
+    -- Render's Links). See ApplyDawnLibDirs in the root premake5.lua for
+    -- the runtime-mismatch (LNK2038) rationale.
+    ApplyDawnLibDirs("../")

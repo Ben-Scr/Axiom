@@ -37,6 +37,27 @@ local function AppendUnique(target, values)
     end
 end
 
+-- Concatenate any number of list-style tables into a single new table,
+-- dropping duplicates. Used by the per-RHI dep sets below to splice in
+-- the active backend's include/lib/define lists without mutating the
+-- inputs. Returns a fresh table — callers can keep mutating it freely.
+function MergeListsForDep(...)
+    local result = {}
+    local seen = {}
+    for i = 1, select("#", ...) do
+        local list = select(i, ...)
+        if list then
+            for _, value in ipairs(list) do
+                if not seen[value] then
+                    table.insert(result, value)
+                    seen[value] = true
+                end
+            end
+        end
+    end
+    return result
+end
+
 function MergeDependencySets(...)
     local merged =
     {
@@ -79,11 +100,17 @@ end
 Dependency = {}
 Dependency["ImGui"] =
 {
-    -- Glad include dropped along with the legacy direct-OpenGL path on
-    -- 2026-05; ImGui's own backends compile from imgui_impl_glfw + the
-    -- engine-side Gui/ImGuiImplBgfx.cpp under bgfx, neither of which
-    -- needs glad.
-    IncludeDirs = { "%{IncludeDir.ImGui}", "%{IncludeDir.ImGui}/backends", "%{IncludeDir.GLFW}" },
+    -- imgui_impl_glfw + imgui_impl_opengl3 serve the consumer executables
+    -- (editor / launcher / runtime). imgui_impl_wgpu serves engine.dll
+    -- (Gui/ImGuiImpl.cpp wraps it). Dawn's include paths splice in so
+    -- imgui_impl_wgpu.cpp can find <webgpu/webgpu.h>; the WGPU_SHARED_-
+    -- LIBRARY=0 define carries through too so every TU that touches the
+    -- WebGPU C ABI agrees on linkage.
+    IncludeDirs = MergeListsForDep(
+        { "%{IncludeDir.ImGui}", "%{IncludeDir.ImGui}/backends", "%{IncludeDir.GLFW}" },
+        DawnLayout and DawnLayout.IncludeDirs or {}
+    ),
+    Defines = DawnLayout and DawnLayout.Defines or {},
     BuildProject = true
 }
 
@@ -143,46 +170,41 @@ Dependency["EngineCore"] =
     Links = {}
 }
 
--- Render-API backend dispatch. The legacy direct-OpenGL path was retired
--- on 2026-05; the engine renders exclusively through bgfx, with the
--- runtime backend (D3D11/D3D12/Vulkan/OpenGL/Metal) selected per-project
--- via the BgfxBackend setting at bgfx::init time. Engine code talks to
--- the GPU through Graphics::RenderApi, so consumers don't care which
--- bgfx backend is active.
+-- Render-API dep set — WebGPU via Dawn. The legacy direct-OpenGL path was
+-- retired on 2026-05; the bgfx interregnum that succeeded it was retired
+-- on Stage 10 of the WebGPU port (bgfx submodules deleted from External/,
+-- per-RHI dep splits collapsed into this single entry). Dawn is built
+-- out-of-band by scripts/SetupDawn.bat into a monolithic webgpu_dawn.lib;
+-- premake/dependencies/dawn.lua exposes DawnLayout with the resulting
+-- include + lib paths. No DependsOn entry for a premake project because
+-- Dawn isn't built by premake — it's a vendored pre-built static lib.
 Dependency["EngineCoreRender"] =
 {
-    IncludeDirs =
-    {
-        "%{IncludeDir.GLFW}",
-        "External/bgfx/include",
-        "External/bx/include",
-        "External/bimg/include",
-    },
+    IncludeDirs = MergeListsForDep(
+        { "%{IncludeDir.GLFW}" },
+        DawnLayout and DawnLayout.IncludeDirs or {}
+    ),
 
+    -- Dawn's webgpu_dawn.lib lives under either Debug\ or Release\, and
+    -- mixing runtime libraries (/MDd Debug vs /MD Release) trips MSVC's
+    -- "_ITERATOR_DEBUG_LEVEL" + "RuntimeLibrary" mismatch (LNK2038). So
+    -- LibDirs MUST be set per-config, not as a single default. The
+    -- per-config wiring lives in Axiom-Engine/premake5.lua via explicit
+    -- `filter "configurations:Debug" / Release / Dist` blocks that
+    -- libdirs() each into the matching Dawn output folder.
     LibDirs = {},
 
-    Defines =
-    {
-        "GLFW_DLL",
-        -- Match the bgfx-side define so headers compiled in the engine see
-        -- the same renderer-config decisions as the bgfx static lib.
-        "BGFX_CONFIG_MULTITHREADED=0",
-        -- Consumer-side mirror of the engine's AIM_RHI_BGFX define. Kept
-        -- (rather than dropped) so the rare TU still reaching for the
-        -- macro doesn't have to update in lockstep with the cleanup —
-        -- AIM_RHI_BGFX simply means "always true" now.
-        "AIM_RHI_BGFX",
-    },
+    Defines = MergeListsForDep(
+        { "GLFW_DLL", "AIM_RHI_WEBGPU" },
+        DawnLayout and DawnLayout.Defines or {}
+    ),
 
-    DependsOn = { "GLFW", "bgfx", "bimg", "bx" },
+    DependsOn = { "GLFW" },
 
-    Links =
-    {
-        "GLFW",
-        "bgfx",
-        "bimg",
-        "bx",
-    }
+    Links = MergeListsForDep(
+        { "GLFW" },
+        DawnLayout and DawnLayout.Links or {}
+    )
 }
 
 Dependency["EngineCoreAudio"] =

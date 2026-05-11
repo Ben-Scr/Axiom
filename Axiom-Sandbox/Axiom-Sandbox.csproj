@@ -62,6 +62,7 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="Source\PlayerController.cs" />
+    <Compile Include="Source\SpinSystem.cs" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\Axiom-ScriptCore\Axiom-ScriptCore.csproj">

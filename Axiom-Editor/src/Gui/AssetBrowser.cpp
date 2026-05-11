@@ -644,7 +644,7 @@ namespace Axiom {
 		// Refresh button (right-aligned, unchanged).
 		ImGui::SameLine(ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX() - 30.0f);
 		{
-			unsigned int refreshIcon = EditorIcons::Get("redo", 16);
+			uint64_t refreshIcon = EditorIcons::Get("redo", 16);
 			bool clicked = false;
 			if (refreshIcon) {
 				clicked = ImGui::ImageButton("##Refresh",
@@ -763,7 +763,7 @@ namespace Axiom {
 		}
 
 		ImVec2 iconPos = cursorPos;
-		unsigned int thumbnail = 0;
+		uint64_t thumbnail = 0;
 
 		if (!entry.IsDirectory) {
 			thumbnail = m_Thumbnails.GetThumbnail(entry.Path);
@@ -819,7 +819,7 @@ namespace Axiom {
 			}
 
 			if (iconName) {
-				unsigned int icon = EditorIcons::Get(iconName, (int)m_TileSize);
+				uint64_t icon = EditorIcons::Get(iconName, (int)m_TileSize);
 				if (icon) {
 					const float pad = m_TileSize * 0.1f;
 					const float drawSize = m_TileSize - pad * 2.0f;
