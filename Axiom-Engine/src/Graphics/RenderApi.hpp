@@ -13,17 +13,12 @@
 // Every immediate-mode GPU operation the engine needs (clear / viewport /
 // scissor / blend / cull / polygon mode / line width / generic state) is
 // dispatched through this interface so the renderer code itself doesn't
-// include any backend headers. The OpenGL implementation lives in
-// `Backend/OpenGLApi.cpp` — it is the only file outside this header allowed
-// to include `<glad/glad.h>` going forward (existing resource wrappers like
-// Texture2D / Shader / QuadMesh / Font / GpuTimer / GuiRenderer's
-// stream-buffer code are documented exceptions, to be migrated in later
-// stages of the bgfx port).
+// include any backend headers. The WebGPU implementation lives in
+// `Backend/WebGPUApi.cpp`.
 //
-// Stage 0 scope (this file): immediate state + framebuffer binding +
-// debugging info. Resource creation (buffers, textures, shaders) keeps its
-// existing class wrappers; those are migrated in later stages so the diff
-// stays bounded.
+// Scope of this file: immediate state + framebuffer binding + debugging
+// info. Resource creation (buffers, textures, shaders) keeps its own class
+// wrappers.
 // =============================================================================
 
 namespace Axiom {
@@ -48,18 +43,16 @@ namespace Axiom {
 
 		// End-of-frame hook: flush any pending GPU commands and present the
 		// swap chain. Called from Window::SwapBuffers so the call site stays
-		// backend-neutral. Under bgfx this collapses to bgfx::touch(0) +
-		// bgfx::frame(); under WebGPU it submits the per-frame command
-		// buffer to the queue and calls surface.Present(). Safe to invoke
-		// when nothing was rendered this frame — both backends issue an
-		// equivalent of "touch" so the swap chain still advances.
+		// backend-neutral. Submits the per-frame command buffer to the
+		// queue and calls surface.Present(). Safe to invoke when nothing
+		// was rendered this frame — issues a "touch" so the swap chain
+		// still advances.
 		static void Present();
 
 		static bool IsInitialized();
 
-		// Identifier of the active backend ("OpenGL", "bgfx-d3d11", etc.) —
-		// shown in the editor's About / Stats overlay. Backend-neutral so the
-		// caller doesn't have to special-case GL strings.
+		// Identifier of the active backend ("WebGPU", etc.) — shown in
+		// the editor's About / Stats overlay.
 		static std::string_view BackendName();
 
 		// Cached GPU info (filled in by Init). Empty strings if Init never
@@ -81,12 +74,12 @@ namespace Axiom {
 		static void SetScissor(int x, int y, int width, int height);
 
 		// Window resize → swap-chain resize hook. Called from Window's
-		// resize callback so the bgfx swap-chain follows the GLFW window
-		// (otherwise the swap-chain stays at bgfx::init's resolution and
-		// rendering only fills the top-left of the resized window). Pulled
-		// out of SetViewport because SetViewport is ALSO called when an
-		// FBO of a different size is bound — only `OnWindowResize` should
-		// trigger a swap-chain reset.
+		// resize callback so the swap-chain follows the GLFW window
+		// (otherwise the swap-chain stays at its initial resolution and
+		// rendering only fills the top-left of the resized window).
+		// Pulled out of SetViewport because SetViewport is ALSO called
+		// when an FBO of a different size is bound — only
+		// `OnWindowResize` should trigger a swap-chain reset.
 		static void OnWindowResize(int width, int height);
 		static void EnableScissorTest();
 		static void DisableScissorTest();
@@ -119,8 +112,6 @@ namespace Axiom {
 		// ── Framebuffer binding ──────────────────────────────────────
 		// Bind one of the engine's Framebuffer wrappers as the current
 		// render target, or restore the window's default framebuffer.
-		// Implementation translates to glBindFramebuffer(GL_FRAMEBUFFER, id)
-		// today; on bgfx this becomes a `bgfx::setViewFrameBuffer` call.
 		static void BindFramebuffer(const Framebuffer& fbo);
 		static void BindDefaultFramebuffer();
 	};

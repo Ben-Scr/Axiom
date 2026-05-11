@@ -5,16 +5,14 @@
 #include "Core/Application.hpp"
 #include "Core/Log.hpp"
 #include "Core/Time.hpp"
-#include "Core/Version.hpp"
 #include "Core/Window.hpp"
 #include "Graphics/Texture2D.hpp"
 #include "Graphics/TextureManager.hpp"
 #include "Project/AxiomProject.hpp"
 #include "Project/ProjectManager.hpp"
-#include "Serialization/Path.hpp"
+#include "Project/SplashAssetResolve.hpp"
 
 #include <algorithm>
-#include <filesystem>
 #include <imgui.h>
 #include <string>
 
@@ -32,80 +30,6 @@ namespace Axiom {
 				static_cast<int>(g * 255.0f),
 				static_cast<int>(b * 255.0f),
 				static_cast<int>(a * 255.0f));
-		}
-
-		std::string DefaultBuildLine() {
-			std::string profile;
-#if defined(AXIOM_BUILD_RELEASE)
-			profile = "Release";
-#elif defined(AXIOM_BUILD_DEVELOPMENT)
-			profile = "Development";
-#else
-			profile = "Development";
-#endif
-			std::string platform;
-#if defined(AIM_PLATFORM_WINDOWS)
-			platform = "Windows";
-#elif defined(__APPLE__)
-			platform = "macOS";
-#else
-			platform = "Linux";
-#endif
-			// Latin-1 supplement covers '·' (U+00B7) — the engine's text
-			// renderer atlas now bakes 32-126 + 160-255. ImGui's default
-			// font here renders the Latin-1 set since codepoints 160-255
-			// fall inside its baked range too. Higher codepoints like
-			// '•' (U+2022) still need the SDF/on-demand path.
-			return std::string("Axiom ") + AIM_VERSION + "  ·  " + platform + "  ·  " + profile;
-		}
-
-		std::string ResolveDefaultLogoPath() {
-			// The canonical engine logo lives at the root of
-			// AxiomAssets/Textures as `icon.png` — same payload the
-			// editor uses for the unset-AppIcon placeholder thumbnail,
-			// so a project with no SplashScreen.ImagePath ships with
-			// the same default look as its build's .exe icon.
-			// `Axiom64.png` is kept as a back-compat fallback for older
-			// engine installs that still carry the historical name.
-			std::string root = Path::ResolveAxiomAssets("Textures");
-			if (root.empty()) return {};
-			std::filesystem::path candidate = std::filesystem::path(root) / "icon.png";
-			if (std::filesystem::exists(candidate)) return candidate.string();
-			candidate = std::filesystem::path(root) / "Axiom64.png";
-			if (std::filesystem::exists(candidate)) return candidate.string();
-			return {};
-		}
-
-		std::string ResolveCustomLogoPath(const std::string& projectRelative) {
-			if (projectRelative.empty()) return {};
-			AxiomProject* project = ProjectManager::GetCurrentProject();
-			if (!project) return projectRelative;
-
-			std::filesystem::path absolute(projectRelative);
-			if (absolute.is_absolute() && std::filesystem::exists(absolute)) {
-				return absolute.string();
-			}
-			// AppIconPath / SplashScreen.ImagePath are stored relative to the
-			// project root (Assets/foo.png style). Try that first, then fall
-			// back to the cwd next to the executable.
-			std::filesystem::path projectRel = std::filesystem::path(project->RootDirectory) / projectRelative;
-			if (std::filesystem::exists(projectRel)) return projectRel.string();
-
-			// Last-resort fallback for builds where the runtime exe sits in
-			// a different cwd than its asset payload. Try the explicit
-			// AssetsDirectory the project records (the editor copies the
-			// user's Assets tree alongside the runtime, but Process::Run
-			// starts the game with cwd at the user's Documents/Desktop on
-			// double-click — `projectRelative` typed as "Assets/foo.png"
-			// wouldn't otherwise resolve). Without this, ResolveTexturePath
-			// inside LoadTexture sees a relative path that can't be found
-			// and returns an invalid handle, which is the symptom that
-			// surfaces as "TextureHandle index 65535" log spam.
-			std::filesystem::path assetsRel = std::filesystem::path(project->AssetsDirectory)
-				/ std::filesystem::path(projectRelative).filename();
-			if (std::filesystem::exists(assetsRel)) return assetsRel.string();
-
-			return projectRelative;
 		}
 	}
 
@@ -137,11 +61,15 @@ namespace Axiom {
 			m_BackgroundR = project->SplashScreen.BackgroundR;
 			m_BackgroundG = project->SplashScreen.BackgroundG;
 			m_BackgroundB = project->SplashScreen.BackgroundB;
+			m_FontColorR = project->SplashScreen.FontColorR;
+			m_FontColorG = project->SplashScreen.FontColorG;
+			m_FontColorB = project->SplashScreen.FontColorB;
+			m_FontSize = project->SplashScreen.FontSize;
 			m_Subtitle = project->SplashScreen.CustomText.empty()
-				? DefaultBuildLine() : project->SplashScreen.CustomText;
+				? SplashAssetResolve::DefaultSubtitleLine() : project->SplashScreen.CustomText;
 		}
 		else {
-			m_Subtitle = DefaultBuildLine();
+			m_Subtitle = SplashAssetResolve::DefaultSubtitleLine();
 		}
 	}
 
@@ -197,10 +125,10 @@ namespace Axiom {
 			AxiomProject* project = ProjectManager::GetCurrentProject();
 			if (project && !project->SplashScreen.ImagePath.empty()) {
 				customRequested = true;
-				logoPath = ResolveCustomLogoPath(project->SplashScreen.ImagePath);
+				logoPath = SplashAssetResolve::Resolve(project->SplashScreen.ImagePath, project);
 			}
 			if (logoPath.empty()) {
-				logoPath = ResolveDefaultLogoPath();
+				logoPath = SplashAssetResolve::DefaultLogoPath();
 			}
 			if (!logoPath.empty()) {
 				m_Logo = TextureManager::LoadTexture(logoPath);
@@ -225,7 +153,8 @@ namespace Axiom {
 			// invalid and fall back to the solid Background{R,G,B} fill
 			// already drawn below.
 			if (project && !project->SplashScreen.BackgroundImagePath.empty()) {
-				const std::string bgPath = ResolveCustomLogoPath(project->SplashScreen.BackgroundImagePath);
+				const std::string bgPath = SplashAssetResolve::Resolve(
+					project->SplashScreen.BackgroundImagePath, project);
 				if (!bgPath.empty()) {
 					m_Background = TextureManager::LoadTexture(bgPath);
 				}
@@ -318,7 +247,7 @@ namespace Axiom {
 				draw->AddImage(
 					static_cast<ImTextureID>(static_cast<intptr_t>(background->GetHandle())),
 					bgMin, bgMax,
-					ImVec2(0, 1), ImVec2(1, 0),
+					ImVec2(0, 0), ImVec2(1, 1),
 					bgTint);
 			}
 		}
@@ -341,18 +270,24 @@ namespace Axiom {
 				draw->AddImage(
 					static_cast<ImTextureID>(static_cast<intptr_t>(logo->GetHandle())),
 					imgMin, imgMax,
-					ImVec2(0, 1), ImVec2(1, 0),
+					ImVec2(0, 0), ImVec2(1, 1),
 					tint);
 			}
 		}
 
 		// Subtitle line — engine version + platform + build profile, OR
-		// the project's customText override.
+		// the project's customText override. FontSize ≤ 0 falls back to
+		// the current ImGui font's default size so legacy projects (no
+		// FontSize in axiom-project.json) render unchanged.
 		if (!m_Subtitle.empty()) {
-			const ImVec2 textSize = ImGui::CalcTextSize(m_Subtitle.c_str());
+			ImFont* font = ImGui::GetFont();
+			const float fontSize = (m_FontSize > 0.0f) ? m_FontSize : ImGui::GetFontSize();
+			const ImVec2 textSize = font->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, m_Subtitle.c_str());
 			const ImVec2 textPos(centerX - textSize.x * 0.5f,
 				centerY + std::min(width, height) * 0.18f);
-			draw->AddText(textPos, PackColor(1.0f, 1.0f, 1.0f, alpha * 0.85f), m_Subtitle.c_str());
+			draw->AddText(font, fontSize, textPos,
+				PackColor(m_FontColorR, m_FontColorG, m_FontColorB, alpha * 0.85f),
+				m_Subtitle.c_str());
 		}
 
 		ImGui::End();

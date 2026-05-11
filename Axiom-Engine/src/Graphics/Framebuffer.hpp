@@ -9,19 +9,17 @@
 // =============================================================================
 // Framebuffer — RAII wrapper for an offscreen render target.
 // -----------------------------------------------------------------------------
-// Used by the editor's per-panel viewports (Editor View + Game View) to render
-// into a texture that ImGui then samples for its docked panels. Created with
-// (width, height, format), can be resized in place via Recreate, and cleans
-// up its backend handles on destruction. The OpenGL backend creates a colour
-// texture + depth/stencil renderbuffer; future bgfx backend creates a
-// `bgfx::FrameBufferHandle` with matching attachments.
+// Used by the editor's per-panel viewports (Editor View + Game View) to
+// render into a texture that ImGui then samples for its docked panels.
+// Created with (width, height, format), can be resized in place via
+// Recreate, and cleans up its backend handles on destruction. Under
+// WebGPU a colour wgpu::Texture + depth/stencil wgpu::Texture are
+// created with matching attachments.
 //
-// `GetColorTextureBackendId()` exposes the raw backend handle for the colour
-// attachment so ImGui::Image can sample it. This is the one place backend
-// integers leak through the abstraction — required by ImGui's API contract.
-// Once bgfx lands, the same accessor returns a `bgfx::TextureHandle::idx`
-// (which the bgfx ImGui backend already knows how to consume), so callers
-// don't change.
+// `GetColorTextureBackendId()` exposes the raw backend handle for the
+// colour attachment so ImGui::Image can sample it. This is the one place
+// backend integers leak through the abstraction — required by ImGui's
+// API contract.
 // =============================================================================
 
 namespace Axiom {

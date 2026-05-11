@@ -7,6 +7,8 @@
 #include "Graphics/Backend/WebGPUBackend.hpp"
 #include "Graphics/Framebuffer.hpp"
 #include "Graphics/GLInitSpecifications.hpp"
+#include "Project/AxiomProject.hpp"
+#include "Project/ProjectManager.hpp"
 
 #include <webgpu/webgpu_cpp.h>
 
@@ -26,48 +28,38 @@
 #endif
 
 // =============================================================================
-// WebGPU backend (Dawn) — Stage 1 of the WebGPU port.
+// WebGPU backend (Dawn).
 // -----------------------------------------------------------------------------
 // Implements the RenderApi static surface against Google's Dawn WebGPU
-// implementation. Selected at premake time via `--rhi=webgpu`; in that mode
-// this file is compiled and Backend/BgfxApi.cpp is excluded (see
-// Axiom-Engine/premake5.lua's RHI swap). Engine code calling into RenderApi
-// is unchanged either way.
+// implementation.
 //
-// Stage 1 scope — minimum viable WebGPU integration:
+// Scope:
 //   * wgpu::Instance / Adapter / Device / Queue creation, with a Win32 HWND
 //     surface from the engine's GLFW window. macOS (NSView) + Linux (X11/
-//     Wayland) come in Stage 1b alongside platform-data parity with
-//     BgfxApi.cpp's PopulatePlatformData.
+//     Wayland) come later.
 //   * Per-frame command encoder, surface-texture acquisition, swap-chain
-//     present via Present() — invoked from Window::SwapBuffers in place of
-//     bgfx::frame(). The encoder is lazy-created on first use this frame so
-//     "no-op frames" (engine paused, window minimized) don't pay for an
-//     empty submit.
+//     present via Present() — invoked from Window::SwapBuffers. The encoder
+//     is lazy-created on first use this frame so "no-op frames" (engine
+//     paused, window minimized) don't pay for an empty submit.
 //   * Clear / SetClearColor / SetViewport / SetScissor / OnWindowResize
 //     dispatch onto the equivalent WebGPU primitives. Clear opens a load-
-//     op-clear render pass on the current target and closes it immediately
-//     — same role bgfx::touch plays under the bgfx backend.
-//   * Every other state call (blend / cull / polygon / line width / color
-//     mask / logic-op clear) is a documented no-op for Stage 1. WebGPU
-//     expresses those per-pipeline (not as global state), so they fold
-//     into the per-renderer port (Stage 2+) when Renderer2D / GizmoRenderer
-//     / TextRenderer learn to build wgpu::RenderPipelines.
-//   * BindFramebuffer is a stub that just records the target — Framebuffer
-//     itself is still bgfx-flavoured in Stage 1; Stage 3 ports it to a
-//     wgpu::Texture-backed render-target wrapper so this routing becomes
-//     meaningful.
+//     op-clear render pass on the current target and closes it immediately.
+//   * Other state calls (blend / cull / polygon / line width / color mask /
+//     logic-op clear) are documented no-ops. WebGPU expresses those
+//     per-pipeline (not as global state), so they fold into the per-renderer
+//     port when Renderer2D / GizmoRenderer / TextRenderer learn to build
+//     wgpu::RenderPipelines.
+//   * BindFramebuffer just records the target — Framebuffer is a stub for
+//     now and will be ported to a wgpu::Texture-backed render-target
+//     wrapper later.
 //
-// Frame lifecycle (differs from bgfx by design):
-//   - bgfx is submission-driven: per-view state set, draws queued, one
-//     bgfx::frame() at end-of-frame flushes everything.
-//   - WebGPU is immediate-recording: a wgpu::CommandEncoder records render
-//     passes, then wgpu::Queue::Submit() executes them. Each pass is
-//     scoped (BeginRenderPass / End) and must be open to record draws.
+// Frame lifecycle:
+//   WebGPU is immediate-recording: a wgpu::CommandEncoder records render
+//   passes, then wgpu::Queue::Submit() executes them. Each pass is scoped
+//   (BeginRenderPass / End) and must be open to record draws.
 // We hide this with a small lazy-init helper (EnsureFrameEncoder /
 // EnsureSurfaceTexture) so the call-site model in the engine — "set state,
-// clear, draw, present" — keeps working without rewriting the renderers
-// in Stage 1.
+// clear, draw, present" — keeps working without rewriting the renderers.
 //
 // Dawn API version assumption: webgpu_cpp.h as shipped by Dawn ~2024 H2 or
 // newer. Specifically expects:
@@ -87,7 +79,7 @@
 namespace Axiom {
 
 	namespace {
-		// ── Backend lifecycle state (mirror of BgfxApi.cpp's globals) ───────
+		// ── Backend lifecycle state ─────────────────────────────────────────
 		bool        g_Initialized = false;
 		std::string g_VersionString;
 		std::string g_VendorString;
@@ -122,7 +114,7 @@ namespace Axiom {
 			bool HasActivePass = false;
 			// At least one render pass executed against the swap chain this
 			// frame? If false at Present() time, we issue a "touch" clear so
-			// the swap-chain frame advances regardless — mirrors bgfx::touch.
+			// the swap-chain frame advances regardless.
 			bool PresentedSwapChain = false;
 		};
 		FrameState g_Frame;
@@ -224,10 +216,34 @@ namespace Axiom {
 			return true;
 		}
 
-		bool RequestAdapterSync() {
+		// Translate the project's preferred backend to a wgpu::BackendType.
+		// Returns Undefined for Auto (let Dawn pick) or when no project is
+		// loaded (engine boot before ProjectManager has anything to read).
+		wgpu::BackendType PreferredBackendType() {
+			AxiomProject* project = ProjectManager::GetCurrentProject();
+			if (!project) return wgpu::BackendType::Undefined;
+			switch (project->ActiveRenderBackend) {
+				case AxiomProject::RenderBackend::Auto:       return wgpu::BackendType::Undefined;
+				case AxiomProject::RenderBackend::Vulkan:     return wgpu::BackendType::Vulkan;
+				case AxiomProject::RenderBackend::Direct3D11: return wgpu::BackendType::D3D11;
+				case AxiomProject::RenderBackend::Direct3D12: return wgpu::BackendType::D3D12;
+				case AxiomProject::RenderBackend::OpenGL:     return wgpu::BackendType::OpenGL;
+			}
+			return wgpu::BackendType::Undefined;
+		}
+
+		// Issue a RequestAdapter call with a specific backendType + power
+		// preference, blocking on the resulting wgpu::Future. The boolean
+		// return reflects callback success; on failure, `outAdapter` is
+		// left empty and `outError` carries Dawn's message (often empty
+		// when the backend simply isn't available on the host).
+		bool TryRequestAdapter(wgpu::BackendType backendType,
+			wgpu::Adapter& outAdapter, std::string& outError)
+		{
 			wgpu::RequestAdapterOptions opts{};
 			opts.compatibleSurface = g_Surface;
 			opts.powerPreference   = wgpu::PowerPreference::HighPerformance;
+			opts.backendType       = backendType;
 
 			struct AdapterCtx { wgpu::Adapter Adapter; std::string Error; };
 			AdapterCtx ctx;
@@ -247,12 +263,42 @@ namespace Axiom {
 			g_Instance.WaitAny(1, &wait, /*timeoutNS*/ UINT64_MAX);
 
 			if (!ctx.Adapter) {
-				AIM_CORE_ERROR_TAG("WebGPUApi", "RequestAdapter failed: {}",
-					ctx.Error.empty() ? "no compatible GPU" : ctx.Error);
+				outError = std::move(ctx.Error);
 				return false;
 			}
-			g_Adapter = std::move(ctx.Adapter);
+			outAdapter = std::move(ctx.Adapter);
 			return true;
+		}
+
+		bool RequestAdapterSync() {
+			// Read the project's preferred backend. If it can't be honoured on
+			// the host (e.g. D3D12 on Linux), retry with Undefined so Dawn
+			// picks the best available — matches the "graceful fallback with
+			// warning" behaviour documented on AxiomProject::RenderBackend.
+			const wgpu::BackendType preferred = PreferredBackendType();
+
+			wgpu::Adapter adapter;
+			std::string   error;
+
+			if (preferred != wgpu::BackendType::Undefined) {
+				if (TryRequestAdapter(preferred, adapter, error)) {
+					g_Adapter = std::move(adapter);
+					return true;
+				}
+				AIM_CORE_WARN_TAG("WebGPUApi",
+					"Requested {} backend not available on this host ({}); falling back to Auto.",
+					BackendTypeName(preferred),
+					error.empty() ? "no compatible GPU" : error);
+			}
+
+			if (TryRequestAdapter(wgpu::BackendType::Undefined, adapter, error)) {
+				g_Adapter = std::move(adapter);
+				return true;
+			}
+
+			AIM_CORE_ERROR_TAG("WebGPUApi", "RequestAdapter failed: {}",
+				error.empty() ? "no compatible GPU" : error);
+			return false;
 		}
 
 		bool RequestDeviceSync() {
@@ -327,7 +373,7 @@ namespace Axiom {
 			config.usage       = wgpu::TextureUsage::RenderAttachment;
 			config.width       = width;
 			config.height      = height;
-			config.presentMode = wgpu::PresentMode::Fifo;       // V-sync; matches bgfx default
+			config.presentMode = wgpu::PresentMode::Fifo;       // V-sync
 			config.alphaMode   = wgpu::CompositeAlphaMode::Opaque;
 			config.viewFormatCount = 0;
 
@@ -395,27 +441,63 @@ namespace Axiom {
 			g_Frame.ActivePass = nullptr;
 			g_Frame.HasActivePass = false;
 		}
+
+		// Submit whatever's been recorded on the per-frame encoder so far
+		// and reset it, while keeping the per-frame swap-chain acquisition
+		// and present-tracking flags intact. Used when the bound render
+		// target changes mid-frame: every renderer (Renderer2D, GuiRenderer,
+		// TextRenderer, GizmoRenderer) uploads its per-draw uniform / vertex
+		// data via `queue.WriteBuffer`, which Dawn services by enqueueing
+		// internal copy commands on its dynamic uploader. Those uploader
+		// copies are flushed BEFORE the user's command buffer executes —
+		// in the *order they were called*, but with no synchronisation
+		// between the upload-copy timeline and the user's render-pass
+		// timeline. So if frame N records:
+		//   WriteBuffer(uniform, VP_editor); BeginPass(editorFBO); ...
+		//   WriteBuffer(uniform, VP_game);   BeginPass(gameFBO);   ...
+		//   Submit
+		// Dawn applies BOTH writes first (the second overwrites the first),
+		// THEN executes BOTH passes — so the editor's pass ends up reading
+		// VP_game out of the shared uniform buffer. Visible symptom: the
+		// editor viewport flickers when both views are open, because the
+		// game view's vsync gate makes its WriteBuffer happen on some
+		// frames and not others.
+		// Submitting between the two target switches turns each FBO's
+		// WriteBuffer + pass pair into its own atomic submission unit,
+		// closing the window.
+		void FlushFrameCommands() {
+			EndActivePassIfAny();
+			if (!g_Frame.HasEncoder) return;
+
+			wgpu::CommandBufferDescriptor cbDesc{};
+			wgpu::CommandBuffer cmd = g_Frame.Encoder.Finish(&cbDesc);
+			g_Queue.Submit(1, &cmd);
+
+			g_Frame.Encoder    = nullptr;
+			g_Frame.HasEncoder = false;
+			// Surface texture + view stay alive — they're tied to the
+			// per-frame swap-chain acquisition, not the encoder, and the
+			// ImGui pass later in the frame still needs to render against
+			// them. PresentedSwapChain stays too: it tracks whether any
+			// pass in *this whole frame* targeted the swap chain, so
+			// Present()'s touch-fallback gets the right answer.
+		}
 	}  // anonymous namespace
 
 	// ── Backend-internal hooks (consumed by Window::SwapBuffers) ─────────────
-	// Mirrors the BgfxBackend:: helper namespace used by the bgfx backend so
-	// engine code outside this TU (Window.cpp, the future imgui_impl_wgpu
-	// integration) has a typed surface to call into. Symbols are namespaced
-	// so they can't collide with the bgfx backend's helpers in mixed-port
-	// stages.
+	// Helper namespace giving engine code outside this TU (Window.cpp, the
+	// future imgui_impl_wgpu integration) a typed surface to call into.
 	namespace WebGPUBackend {
 		// End-of-frame: close any active pass, submit the command buffer,
-		// present the surface. Called from Window::SwapBuffers in place of
-		// bgfx::touch(0) + bgfx::frame(). Safe to call when nothing was
-		// recorded this frame (issues a "touch" clear so the swap-chain
-		// frame still advances — same role as bgfx::touch).
+		// present the surface. Called from Window::SwapBuffers. Safe to
+		// call when nothing was recorded this frame (issues a "touch"
+		// clear so the swap-chain frame still advances).
 		void Present() {
 			if (!g_Initialized) return;
 
 			// Touch-fallback: if no render pass ran this frame, do a
 			// clear-only pass on the swap-chain so the surface still
 			// advances and the visible result matches g_ClearColor.
-			// Mirrors bgfx::touch(0) semantics from BgfxApi.cpp Stage 1.
 			if (!g_Frame.PresentedSwapChain) {
 				EnsureFrameEncoder();
 				if (EnsureSurfaceTexture()) {
@@ -464,8 +546,7 @@ namespace Axiom {
 		// _WebGPU.cpp ports (Texture2D, Framebuffer, future Shader /
 		// RenderPipeline, ...) can create GPU objects through the engine's
 		// single device without smuggling it via a Singleton or stuffing
-		// it onto Application. Same role as BgfxBackend::CurrentViewId
-		// in BgfxApi.cpp. Declared in Backend/WebGPUBackend.hpp.
+		// it onto Application. Declared in Backend/WebGPUBackend.hpp.
 		wgpu::Device GetDevice() { return g_Device; }
 		wgpu::Queue  GetQueue()  { return g_Queue; }
 		wgpu::TextureFormat GetSurfaceFormat() { return g_SurfaceFormat; }
@@ -526,6 +607,10 @@ namespace Axiom {
 
 		void MarkSwapChainRendered() {
 			g_Frame.PresentedSwapChain = true;
+		}
+
+		void FlushCommands() {
+			FlushFrameCommands();
 		}
 	}
 
@@ -674,9 +759,7 @@ namespace Axiom {
 		// target's colour view is either the per-frame swap-chain surface
 		// view (lazy-acquired) or an FBO's persistent colour view (looked
 		// up by BindFramebuffer). If the target has a depth attachment
-		// (FBOs always do), it's cleared alongside — matches the bgfx side
-		// where every FBO ships with a D24S8 attachment and BGFX_CLEAR_DEPTH
-		// is part of the view's clear flags.
+		// (FBOs always do), it's cleared alongside.
 		EnsureFrameEncoder();
 
 		wgpu::TextureView targetColorView;
@@ -789,11 +872,9 @@ namespace Axiom {
 	// WebGPU expresses depth, cull, blend, polygon mode, line width, color
 	// mask, and logic-op as part of the wgpu::RenderPipeline (BlendState,
 	// PrimitiveState, ColorTargetState). They aren't global state at all
-	// — there's no equivalent of glEnable / bgfx::setState here. The
-	// renderer ports (Renderer2D / GizmoRenderer / TextRenderer) will bake
-	// these into their pipelines in Stage 2; until then these are documented
-	// no-ops on the WebGPU backend, matching BgfxApi.cpp's Stage 1 treatment
-	// of the same ops.
+	// — there's no equivalent of glEnable here. The renderer ports
+	// (Renderer2D / GizmoRenderer / TextRenderer) will bake these into
+	// their pipelines in Stage 2; until then these are documented no-ops.
 
 	void RenderApi::EnableDepthTest()                            { /* per-pipeline via DepthStencilState; Stage 2 */ }
 	void RenderApi::DisableDepthTest()                           { /* per-pipeline via DepthStencilState; Stage 2 */ }
@@ -820,8 +901,7 @@ namespace Axiom {
 	// against them, and Stage 3+ renderers will too. An FBO with an
 	// unresolved ID (no matching pool entry — shouldn't happen in normal
 	// operation; would indicate use-after-destroy) falls back to the swap
-	// chain with a warning, matching the BgfxApi side's graceful-degradation
-	// behaviour.
+	// chain with a warning.
 	void RenderApi::BindFramebuffer(const Framebuffer& fbo) {
 		const uint32_t backendId = fbo.GetBackendId();
 		if (backendId == 0) {
@@ -838,9 +918,21 @@ namespace Axiom {
 			return;
 		}
 
-		// Close any in-flight pass first — its render-target binding is
-		// about to become stale.
-		EndActivePassIfAny();
+		// Target actually changing? If we're already on this FBO, don't
+		// pay for a flush + resubmit. If we're switching off some other
+		// target (swap chain or a different FBO), flush the previous
+		// target's recorded commands so its per-pass queue.WriteBuffer
+		// uploads (uniform / instance buffers shared with every other
+		// renderer pass this frame) take effect before the next target
+		// stomps the same buffer offsets. See FlushFrameCommands for the
+		// full rationale.
+		const bool sameTarget = !g_CurrentTarget.IsSwapChain
+			&& g_CurrentTarget.ColorView.Get() == lookup.ColorView.Get();
+		if (!sameTarget) {
+			FlushFrameCommands();
+		} else {
+			EndActivePassIfAny();
+		}
 
 		g_CurrentTarget = TargetState{};
 		g_CurrentTarget.ColorView   = lookup.ColorView;
@@ -852,8 +944,16 @@ namespace Axiom {
 	}
 
 	void RenderApi::BindDefaultFramebuffer() {
-		// Close any in-flight FBO pass before switching to the swap-chain.
-		EndActivePassIfAny();
+		// Switching off an FBO back to the swap chain — submit the FBO's
+		// recorded commands so any uniform / instance WriteBuffer copies
+		// it queued take effect before subsequent passes overwrite the
+		// same buffer offsets. No-op when we were already on the swap
+		// chain. (Same rationale as the BindFramebuffer flush above.)
+		if (!g_CurrentTarget.IsSwapChain) {
+			FlushFrameCommands();
+		} else {
+			EndActivePassIfAny();
+		}
 
 		g_CurrentTarget = TargetState{};
 		g_CurrentTarget.IsSwapChain = true;

@@ -7,22 +7,19 @@
 // =============================================================================
 // DEPRECATED: thin shim over `RenderApi`.
 // -----------------------------------------------------------------------------
-// Stage 0 of the bgfx port introduced `Graphics/RenderApi.hpp` as the
-// backend-neutral interface every renderer should call. This file forwards
-// the historical `OpenGL::Foo` static methods to the equivalent
-// `RenderApi::Foo` so existing callers (Application::Initialize,
-// ScriptBindingsScene's GPU-info accessors, ImGuiDebugSystem's clear-color
-// editor, Window::IsInitialized check) keep compiling.
+// `Graphics/RenderApi.hpp` is the backend-neutral interface every renderer
+// should call. This file forwards the historical `OpenGL::Foo` static
+// methods to the equivalent `RenderApi::Foo` so existing callers
+// (Application::Initialize, ScriptBindingsScene's GPU-info accessors,
+// Window::IsInitialized check) keep compiling.
 //
-// New code should use `RenderApi` directly. This shim will be deleted once
-// the bgfx backend lands and the OpenGL backend becomes one implementation
-// among several.
+// New code should use `RenderApi` directly.
 //
 // Notably, the previous header leaked `<glad/glad.h>` and `GLenum` in its
-// public surface (BlendFunc/Enable/Disable). Those are gone — the shim only
-// exposes the calls that were actually used outside the renderer (init, GPU
-// info, clear color), and the rest moved into `RenderApi`'s neutral enum
-// surface (BlendMode / CullMode / etc.).
+// public surface (BlendFunc/Enable/Disable). Those are gone — the shim
+// only exposes the calls that were actually used outside the renderer
+// (init, GPU info, clear color), and the rest moved into `RenderApi`'s
+// neutral enum surface (BlendMode / CullMode / etc.).
 // =============================================================================
 
 namespace Axiom {

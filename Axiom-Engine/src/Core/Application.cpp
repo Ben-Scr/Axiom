@@ -17,6 +17,7 @@
 #include "Events/WindowEvents.hpp"
 #include "Graphics/Text/FontManager.hpp"
 #include "Graphics/TextureManager.hpp"
+#include "Jobs/JobSystem.hpp"
 #include "Physics/PhysicsSystem2D.hpp"
 #include "Profiling/Profiler.hpp"
 #include "Scene/Scene.hpp"
@@ -296,6 +297,14 @@ namespace Axiom {
 #endif
 
 		Timer timer = Timer();
+		// JobSystem before any other subsystem so init-time fan-out
+		// (e.g. parallel asset scans) is available. The pool itself is
+		// cheap to spin up — milliseconds — and other shutdown paths
+		// rely on it still being alive when they tear down.
+		JobSystem::Initialize();
+		AIM_INFO_TAG("JobSystem", "Initialization took " + StringHelper::ToString(timer));
+
+		timer.Reset();
 		Window::Initialize();
 		m_Window = std::make_unique<Window>(m_Configuration.WindowSpecification);
 		m_Window->SetVsync(m_Configuration.Vsync);
@@ -612,6 +621,12 @@ namespace Axiom {
 
 		dispatcher.Dispatch<WindowResizeEvent>([this](WindowResizeEvent& e) {
 			m_IsMinimized = e.GetWidth() == 0 || e.GetHeight() == 0;
+			// Forward to managed scripts so `Axiom.Window.OnResize`
+			// subscribers fire the same frame GLFW delivered the new
+			// framebuffer size. Skipped when minimised (zero-area
+			// frame) so scripts don't see a transient 0x0 just because
+			// the user dragged the window down to the taskbar.
+			if (!m_IsMinimized) ScriptEngine::RaiseWindowResize();
 			return false;
 			});
 

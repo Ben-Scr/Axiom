@@ -11,24 +11,22 @@
 #include <backends/imgui_impl_wgpu.h>
 
 // =============================================================================
-// imgui_impl_wgpu wrapper — Stage 9 of the WebGPU port.
+// imgui_impl_wgpu wrapper.
 // -----------------------------------------------------------------------------
 // Thin Axiom shim around Dear ImGui's official imgui_impl_wgpu backend (in
-// External/imgui/backends/). Compiled only under --rhi=webgpu; the premake
-// gate selects between this and ImGuiImplBgfx.cpp via AIM_RHI_WEBGPU.
+// External/imgui/backends/).
 //
 // Why a wrapper rather than calling imgui_impl_wgpu directly from the
 // editor / launcher / runtime:
 //   1. wgpu::Device + Queue + per-frame command encoder live in engine.dll
 //      (WebGPUApi.cpp). The backend has to call into those, so it must run
-//      in the same module. The bgfx-side header documents the equivalent
-//      constraint for bgfx.
+//      in the same module.
 //   2. PackageImGuiBridge synchronises the consumer's ImGuiContext into
 //      engine.dll's ImGui copy on every entry. Without this, the engine
 //      DLL would see a null GImGui pointer and crash inside ImGui::GetIO.
-//   3. The ABI-stable AXIOM_API surface (`Init`, `NewFrame`, `RenderDraw-
-//      Data(d, viewId)`, `Shutdown`) is identical to ImGuiImplBgfx so
-//      every editor/launcher/runtime call site is backend-neutral.
+//   3. The ABI-stable AXIOM_API surface (`Init`, `NewFrame`,
+//      `RenderDrawData(d, viewId)`, `Shutdown`) keeps editor/launcher/
+//      runtime call sites backend-neutral.
 //
 // imgui_impl_wgpu uses Dawn's C API (`WGPUDevice`, `WGPURenderPassEncoder`).
 // We pass wgpu::Device through .Get() to drop into the C ABI; equivalent
@@ -39,8 +37,8 @@ namespace Axiom::ImGuiImplWebGPU {
 
 	namespace {
 		bool g_Initialized = false;
-		// Bridge generation tracking — same pattern ImGuiImplBgfx uses to
-		// resync after the consumer hot-reloads its ImGuiContext.
+		// Bridge generation tracking — resyncs after the consumer
+		// hot-reloads its ImGuiContext.
 		unsigned long long g_LastSyncedGen = 0;
 
 		void SyncImGuiContextFromBridge() {
@@ -73,7 +71,7 @@ namespace Axiom::ImGuiImplWebGPU {
 		SyncImGuiContextFromBridge();
 		if (ImGui::GetCurrentContext() == nullptr) {
 			// Consumer hasn't published a context yet — try again on the
-			// next entry. Matches the ImGuiImplBgfx graceful-defer.
+			// next entry.
 			return false;
 		}
 
@@ -118,7 +116,7 @@ namespace Axiom::ImGuiImplWebGPU {
 	void NewFrame() {
 		if (!g_Initialized) return;
 		// Resync to pick up consumer-side context hot-reloads before any
-		// ImGui call. Same defensive pattern the bgfx side uses.
+		// ImGui call.
 		SyncImGuiContextFromBridge();
 		ImGui_ImplWGPU_NewFrame();
 	}

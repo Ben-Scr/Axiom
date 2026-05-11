@@ -1,10 +1,9 @@
 #include "pch.hpp"
 #include "Graphics/SpriteShaderProgram.hpp"
 
-// SpriteShaderProgram bgfx stub. See Shader_Bgfx.cpp's header comment for
-// the Stage 2 rationale — all three header-side helpers (Shader,
-// SpriteShaderProgram, QuadMesh) collapse to no-ops under the bgfx port
-// until the real bgfx pipeline lands in a follow-up sub-stage.
+// SpriteShaderProgram stub — sprite parameter binding lives on the
+// renderer's uniform / instance buffer now; this header-side helper
+// collapses to no-ops.
 
 namespace Axiom {
 

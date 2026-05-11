@@ -18,10 +18,9 @@
 namespace Axiom::WebGPUSpriteResources {
 
 	namespace {
-		// Unit quad in [-0.5, 0.5]². Identical to BgfxSpriteResources's
-		// k_QuadVerts so the WGSL sprite shader can use the same
-		// `a_position.xy + 0.5` -> UV mapping (with the Y flip baked into
-		// the shader, not the geometry).
+		// Unit quad in [-0.5, 0.5]². The WGSL sprite shader uses
+		// `a_position.xy + 0.5` -> UV mapping (with the Y flip baked
+		// into the shader, not the geometry).
 		struct QuadVertex {
 			float X, Y, Z;
 		};
@@ -151,8 +150,7 @@ namespace Axiom::WebGPUSpriteResources {
 			buffers[1].attributeCount = 3;
 			buffers[1].attributes     = instanceAttrs;
 
-			// Alpha-blended colour target — engine default for sprites and UI
-			// matches BgfxSpriteResources's BGFX_STATE_BLEND_ALPHA recipe.
+			// Alpha-blended colour target — engine default for sprites and UI.
 			wgpu::BlendState blend{};
 			blend.color.srcFactor = wgpu::BlendFactor::SrcAlpha;
 			blend.color.dstFactor = wgpu::BlendFactor::OneMinusSrcAlpha;
@@ -215,9 +213,8 @@ namespace Axiom::WebGPUSpriteResources {
 			wgpu::Device device = WebGPUBackend::GetDevice();
 			if (!device) return false;
 
-			// Shader — same name BgfxSpriteResources passes
-			// ("SpriteShader.vs" -> stem "sprite"), now resolved by
-			// Shader_WebGPU.cpp via its built-in WGSL registry.
+			// Shader — passes "SpriteShader.vs" -> stem "sprite",
+			// resolved by Shader.cpp via its built-in WGSL registry.
 			g_Res.SpriteShader = std::make_unique<Shader>(
 				std::string("AxiomAssets/Shaders/SpriteShader.vs"),
 				std::string("AxiomAssets/Shaders/SpriteShader.fs"));

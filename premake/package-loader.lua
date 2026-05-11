@@ -284,6 +284,23 @@ local function RegisterNativeProject(manifest)
             UseDependencySet(Dependency.EditorRuntimeCommon)
             -- Engine is a SharedLib; consumers must declare the import side of AXIOM_API.
             defines { "AIM_IMPORT_DLL" }
+            -- EditorRuntimeCommon pulls in EngineCoreRender, which links
+            -- webgpu_dawn.lib. The lib lives under per-config Debug/Release
+            -- folders so libdirs MUST be set per-config (LNK2038 otherwise).
+            -- ApplyDawnLibDirs accepts a script-relative prefix, but this
+            -- script is loaded via dofile from the repo-root premake5.lua,
+            -- and the project location here is an absolute path under
+            -- premake/generated/Pkg.<Name>.Native/ — that mix doesn't resolve
+            -- through ApplyDawnLibDirs's relative-prefix scheme. Use absolute
+            -- paths (rooted at ROOT_DIR) so premake can compute the correct
+            -- vcxproj-relative output on its own.
+            filter "configurations:Debug"
+                libdirs { path.join(ROOT_DIR, "External/dawn/build/src/dawn/native/Debug") }
+            filter "configurations:Release"
+                libdirs { path.join(ROOT_DIR, "External/dawn/build/src/dawn/native/Release") }
+            filter "configurations:Dist"
+                libdirs { path.join(ROOT_DIR, "External/dawn/build/src/dawn/native/Release") }
+            filter {}
         end
 
         if manifest.dependencies then

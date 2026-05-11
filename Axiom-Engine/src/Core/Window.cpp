@@ -125,10 +125,9 @@ namespace Axiom {
 	void Window::Create(const WindowSpecification& props) {
 		AIM_ASSERT(s_IsInitialized, AxiomErrorCode::NotInitialized, "The Window isn't initialized");
 
-		// bgfx owns the GPU context (D3D11 / Vulkan / Metal / its own GL
-		// loader, picked at bgfx::init time). Telling GLFW to skip the
-		// OpenGL context creation is mandatory — otherwise GLFW would
-		// pick a GL context for us that bgfx then can't talk to.
+		// WebGPU (Dawn) owns the GPU context. Telling GLFW to skip OpenGL
+		// context creation is mandatory — otherwise GLFW would pick a GL
+		// context the render backend can't talk to.
 		glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
 		glfwWindowHint(GLFW_SAMPLES, 8);
 
@@ -170,7 +169,7 @@ namespace Axiom {
 				"After fullscreen/center: GLFW framebuffer={}x{}", fbW, fbH);
 		}
 
-		// No GL context to make current — bgfx handles the device.
+		// No GL context to make current — the render backend handles the device.
 		glfwSetWindowUserPointer(m_GLFWwindow, this);
 
 		glfwSetKeyCallback(m_GLFWwindow, SetKeyCallback);
@@ -195,7 +194,7 @@ namespace Axiom {
 		// shouldClose=true and the loop exits with no warning.
 		glfwSetWindowCloseCallback(m_GLFWwindow, &Window::CloseCallback);
 
-		// Vsync is handled by bgfx via BGFX_RESET_VSYNC at bgfx::init time.
+		// Vsync is handled by the render backend.
 		SyncViewportFromFramebuffer();
 
 		s_ActiveWindow = this;
@@ -228,14 +227,9 @@ namespace Axiom {
 	}
 
 	void Window::SwapBuffers() const {
-		// Backend-neutral present hook. Under --rhi=bgfx this expands to
-		// bgfx::touch(0) + bgfx::frame() (the touch ensures the swap-chain
-		// view's clear executes even when nothing was submitted this frame,
-		// so the runtime build doesn't accumulate stale backbuffer
-		// contents). Under --rhi=webgpu it submits the per-frame command
-		// buffer and calls surface.Present(). GLFW's glfwSwapBuffers isn't
-		// usable for either backend — GLFW was created with GLFW_NO_API so
-		// there's no GL context to swap.
+		// Submits the per-frame command buffer and calls surface.Present().
+		// GLFW's glfwSwapBuffers isn't usable — GLFW was created with
+		// GLFW_NO_API so there's no GL context to swap.
 		RenderApi::Present();
 	}
 
@@ -641,15 +635,15 @@ namespace Axiom {
 		}
 		const int w = s_MainViewport->GetWidth();
 		const int h = s_MainViewport->GetHeight();
-		// Drives BOTH the swap-chain reset (bgfx::reset on the GLFW
-		// framebuffer's new size) AND the default view's rect. Without
-		// the explicit OnWindowResize call, SetViewport-only would miss
-		// the reset whenever it was called with an FBO currently bound
-		// — the editor's FBO render keeps view 1+ bound between scene
-		// passes, so a window resize landing mid-frame would set the
-		// per-FBO viewport but leave the swap chain at bgfx::init's
-		// resolution (visible as "editor renders only into the top-
-		// left corner of the OS window").
+		// Drives BOTH the swap-chain reset on the GLFW framebuffer's new
+		// size AND the default view's rect. Without the explicit
+		// OnWindowResize call, SetViewport-only would miss the reset
+		// whenever it was called with an FBO currently bound — the
+		// editor's FBO render keeps view 1+ bound between scene passes,
+		// so a window resize landing mid-frame would set the per-FBO
+		// viewport but leave the swap chain at its initial resolution
+		// (visible as "editor renders only into the top-left corner of
+		// the OS window").
 		RenderApi::OnWindowResize(w, h);
 		RenderApi::SetViewport(0, 0, w, h);
 	}

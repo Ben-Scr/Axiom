@@ -90,6 +90,10 @@ internal unsafe struct ManagedCallbacksStruct
     // InspectorEventArgKind, argValue is the encoded string per the kind
     // (or null when argKind == 0 / Void).
     public delegate* unmanaged<int, byte*, byte, byte*, int> InvokeScriptMethodByName;
+
+    // ── Window events (appended for binary compat) ──
+    // Routed from Application::DispatchEvent on WindowResizeEvent.
+    public delegate* unmanaged<void> RaiseWindowResize;
 }
 
 /// <summary>
@@ -174,6 +178,9 @@ internal static class ScriptHostBridge
             // ── Inspector event bindings (appended for binary compat) ──
             managedCallbacks->GetInvokableMethodsBuffer = &ScriptInstanceManager.GetInvokableMethodsBuffer;
             managedCallbacks->InvokeScriptMethodByName = &ScriptInstanceManager.InvokeScriptMethodByName;
+
+            // ── Window events (appended for binary compat) ──
+            managedCallbacks->RaiseWindowResize = &ScriptInstanceManager.RaiseWindowResize;
 
             ScriptInstanceManager.SetCoreAssembly(typeof(ScriptHostBridge).Assembly);
 

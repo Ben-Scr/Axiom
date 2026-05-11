@@ -35,14 +35,13 @@
 #include <unordered_set>
 
 namespace Axiom {
-	// Per-panel render target lifecycle. The actual OpenGL handle juggling
-	// (glGenFramebuffers, glTexImage2D, depth-stencil renderbuffer attach,
-	// completeness check) lives behind `Framebuffer::Recreate` in
-	// `Graphics/Framebuffer.cpp` — Stage 0 of the bgfx port carved that
-	// out so this file no longer touches GL directly. The two helpers
-	// below are kept so existing call sites (RenderSceneIntoFBO, layer
-	// teardown) read the same as before; they're just one-line wrappers
-	// over the RAII Framebuffer API now.
+	// Per-panel render target lifecycle. The actual GPU-handle juggling
+	// (texture + depth attachment, completeness check) lives behind
+	// `Framebuffer::Recreate` in `Graphics/Framebuffer.cpp` so this file
+	// doesn't touch the render backend directly. The two helpers below
+	// are kept so existing call sites (RenderSceneIntoFBO, layer
+	// teardown) read the same as before; they're one-line wrappers over
+	// the RAII Framebuffer API.
 	void ImGuiEditorLayer::EnsureViewportFramebuffer(int width, int height) {
 		m_EditorViewFBO.Recreate(width, height);
 	}

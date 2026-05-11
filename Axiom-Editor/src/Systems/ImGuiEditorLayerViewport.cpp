@@ -60,9 +60,9 @@ namespace Axiom {
 		const int w = fbo.GetWidth();
 		const int h = fbo.GetHeight();
 
-		// All immediate-mode state goes through RenderApi after Stage 0 of
-		// the bgfx port — no glXxx calls in editor code anymore. Backend
-		// translation lives in `Graphics/Backend/OpenGLApi.cpp`.
+		// All immediate-mode state goes through RenderApi — no glXxx calls
+		// in editor code. Backend translation lives in
+		// `Graphics/Backend/WebGPUApi.cpp`.
 		RenderApi::BindFramebuffer(fbo);
 		RenderApi::SetViewport(0, 0, w, h);
 		RenderApi::SetClearColor(clearColor);
@@ -527,15 +527,10 @@ namespace Axiom {
 				RenderSceneIntoFBO(m_EditorViewFBO, *renderScene, vp, viewAABB, true, false, clearColor, IsInPrefabEditMode(), true, m_EditorViewDrawMode);
 				Gizmo::ClearViewportAABBOverride();
 
-				// FBO color textures under bgfx D3D11 use the renderer's
-				// native top-left origin (texel row 0 = top of the rendered
-				// image). Sample with default UV(0,0)-(1,1) so what the
-				// engine drew at world +y appears at the top of the panel.
-				// (The previous UV(0,1)-(1,0) flip dated from the OpenGL
-				// path where FBO textures were stored bottom-up; bgfx-port
-				// FBOs aren't, and the flip combined with GuiRenderer's
-				// Y-flipped ortho to make the editor look right while
-				// silently breaking the standalone runtime.)
+				// FBO color textures use the renderer's native top-left
+				// origin (texel row 0 = top of the rendered image). Sample
+				// with default UV(0,0)-(1,1) so what the engine drew at
+				// world +y appears at the top of the panel.
 				ImGui::Image(
 					static_cast<ImTextureID>(static_cast<intptr_t>(m_EditorViewFBO.GetColorTextureBackendId())),
 					viewportSize);

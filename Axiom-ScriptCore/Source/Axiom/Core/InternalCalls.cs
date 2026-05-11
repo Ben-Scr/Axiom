@@ -32,6 +32,46 @@ internal static unsafe class InternalCalls
     internal static bool Application_GetVsyncEnabled() => NativeCallbacks.Bindings.Application_GetVsyncEnabled() != 0;
     internal static void Application_SetVsyncEnabled(bool enabled) => NativeCallbacks.Bindings.Application_SetVsyncEnabled(enabled ? 1 : 0);
 
+    // ── Window ──────────────────────────────────────────────────────
+
+    internal static int Window_GetWidth() => NativeCallbacks.Bindings.Window_GetWidth();
+    internal static int Window_GetHeight() => NativeCallbacks.Bindings.Window_GetHeight();
+
+    internal static string Window_GetTitle()
+        => ReadNativeString(NativeCallbacks.Bindings.Window_GetTitleBuffer);
+
+    internal static void Window_SetTitle(string? value)
+    {
+        byte[] buf = EncodeUtf8Z(value);
+        fixed (byte* ptr = buf) NativeCallbacks.Bindings.Window_SetTitle(ptr);
+    }
+
+    internal static void Window_Minimize() => NativeCallbacks.Bindings.Window_Minimize();
+    internal static void Window_Maximize() => NativeCallbacks.Bindings.Window_Maximize();
+    internal static bool Window_IsMaximized() => NativeCallbacks.Bindings.Window_IsMaximized() != 0;
+    internal static bool Window_IsFullScreen() => NativeCallbacks.Bindings.Window_IsFullScreen() != 0;
+    internal static void Window_SetFullScreen(bool enabled)
+        => NativeCallbacks.Bindings.Window_SetFullScreen(enabled ? 1 : 0);
+
+    internal static Vector2Int Window_GetPosition()
+    {
+        int x, y;
+        NativeCallbacks.Bindings.Window_GetPosition(&x, &y);
+        return new Vector2Int(x, y);
+    }
+
+    internal static void Window_SetPosition(Vector2Int value)
+        => NativeCallbacks.Bindings.Window_SetPosition(value.X, value.Y);
+
+    internal static void Window_Focus() => NativeCallbacks.Bindings.Window_Focus();
+
+    internal static Vector2Int Window_GetScreenSize()
+    {
+        int w, h;
+        NativeCallbacks.Bindings.Window_GetScreenSize(&w, &h);
+        return new Vector2Int(w, h);
+    }
+
     // ── Engine ──────────────────────────────────────────────────────
 
     internal static string Engine_GetVersion()

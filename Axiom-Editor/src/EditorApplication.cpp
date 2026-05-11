@@ -7,7 +7,6 @@
 #include "Scene/SceneManager.hpp"
 #include <Gui/ImGuiContextLayer.hpp>
 #include <Systems/ImGuiEditorLayer.hpp>
-#include <Systems/ImGuiDebugSystem.hpp>
 #include <Systems/GizmosDebugSystem.hpp>
 #include <Project/ProjectManager.hpp>
 #include <Project/AxiomProject.hpp>
@@ -77,7 +76,6 @@ public:
 		// ImGui::NewFrame and ImGui::Render around the other layers' UI work.
 		PushLayer<ImGuiContextLayer>();
 		PushLayer<ImGuiEditorLayer>();
-		PushOverlay<ImGuiDebugSystem>();
 		PushOverlay<GizmosDebugSystem>();
 	}
 

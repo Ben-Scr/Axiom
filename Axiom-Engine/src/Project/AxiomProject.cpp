@@ -539,6 +539,10 @@ endforeach()
 			splash.AddMember("backgroundR", static_cast<double>(project.SplashScreen.BackgroundR));
 			splash.AddMember("backgroundG", static_cast<double>(project.SplashScreen.BackgroundG));
 			splash.AddMember("backgroundB", static_cast<double>(project.SplashScreen.BackgroundB));
+			splash.AddMember("fontColorR", static_cast<double>(project.SplashScreen.FontColorR));
+			splash.AddMember("fontColorG", static_cast<double>(project.SplashScreen.FontColorG));
+			splash.AddMember("fontColorB", static_cast<double>(project.SplashScreen.FontColorB));
+			splash.AddMember("fontSize", static_cast<double>(project.SplashScreen.FontSize));
 			root.AddMember("splashScreen", std::move(splash));
 		}
 
@@ -630,18 +634,12 @@ endforeach()
 			root.AddMember("buildProfile",
 				std::string(AxiomProject::BuildProfileToString(project.ActiveBuildProfile)));
 		}
-		// Persist the rendering backend only when it diverges from the
-		// Bgfx default — keeps axiom-project.json minimal for projects
-		// that haven't touched the Graphics tab.
-		if (project.ActiveRenderingApi != AxiomProject::RenderingApi::Bgfx) {
-			root.AddMember("renderingApi",
-				std::string(AxiomProject::RenderingApiToString(project.ActiveRenderingApi)));
-		}
-		// Bgfx backend choice — also written only when non-default
-		// (Auto). Mirrors the renderingApi minimisation rule.
-		if (project.ActiveBgfxBackend != AxiomProject::BgfxBackend::Auto) {
-			root.AddMember("bgfxBackend",
-				std::string(AxiomProject::BgfxBackendToString(project.ActiveBgfxBackend)));
+		// Preferred render backend — written only when non-default (Auto)
+		// to keep axiom-project.json minimal for projects that haven't
+		// touched the Graphics tab.
+		if (project.ActiveRenderBackend != AxiomProject::RenderBackend::Auto) {
+			root.AddMember("renderBackend",
+				std::string(AxiomProject::RenderBackendToString(project.ActiveRenderBackend)));
 		}
 		if (!project.CustomDefines.empty()) {
 			Json::Value definesJson = Json::Value::MakeArray();
@@ -732,49 +730,26 @@ endforeach()
 		return BuildProfile::Development;
 	}
 
-	const char* AxiomProject::RenderingApiToString(RenderingApi api) {
-		switch (api) {
-			case RenderingApi::Bgfx:   return "Bgfx";
-			case RenderingApi::OpenGL: return "OpenGL";
-		}
-		return "OpenGL";
-	}
-
-	AxiomProject::RenderingApi AxiomProject::RenderingApiFromString(std::string_view value) {
-		// Accept a few spellings so manually-edited project files don't bite
-		// users who type "bgfx" instead of the canonical "Bgfx".
-		if (value == "Bgfx" || value == "bgfx" || value == "BGFX") return RenderingApi::Bgfx;
-		return RenderingApi::OpenGL;
-	}
-
-	const char* AxiomProject::RenderingApiToPremakeFlag(RenderingApi api) {
-		switch (api) {
-			case RenderingApi::Bgfx:   return "bgfx";
-			case RenderingApi::OpenGL: return "opengl";
-		}
-		return "opengl";
-	}
-
-	const char* AxiomProject::BgfxBackendToString(BgfxBackend backend) {
+	const char* AxiomProject::RenderBackendToString(RenderBackend backend) {
 		switch (backend) {
-			case BgfxBackend::Auto:       return "Auto";
-			case BgfxBackend::Vulkan:     return "Vulkan";
-			case BgfxBackend::Direct3D11: return "Direct3D11";
-			case BgfxBackend::Direct3D12: return "Direct3D12";
-			case BgfxBackend::OpenGL:     return "OpenGL";
+			case RenderBackend::Auto:       return "Auto";
+			case RenderBackend::Vulkan:     return "Vulkan";
+			case RenderBackend::Direct3D11: return "Direct3D11";
+			case RenderBackend::Direct3D12: return "Direct3D12";
+			case RenderBackend::OpenGL:     return "OpenGL";
 		}
 		return "Auto";
 	}
 
-	AxiomProject::BgfxBackend AxiomProject::BgfxBackendFromString(std::string_view value) {
+	AxiomProject::RenderBackend AxiomProject::RenderBackendFromString(std::string_view value) {
 		// Accept the canonical PascalCase token plus a few common
 		// spellings so a hand-edited project file doesn't bite users
 		// who type "vulkan" or "d3d11".
-		if (value == "Vulkan"     || value == "vulkan"  || value == "VK")    return BgfxBackend::Vulkan;
-		if (value == "Direct3D11" || value == "DX11"    || value == "d3d11") return BgfxBackend::Direct3D11;
-		if (value == "Direct3D12" || value == "DX12"    || value == "d3d12") return BgfxBackend::Direct3D12;
-		if (value == "OpenGL"     || value == "opengl"  || value == "GL")    return BgfxBackend::OpenGL;
-		return BgfxBackend::Auto;
+		if (value == "Vulkan"     || value == "vulkan"  || value == "VK")    return RenderBackend::Vulkan;
+		if (value == "Direct3D11" || value == "DX11"    || value == "d3d11") return RenderBackend::Direct3D11;
+		if (value == "Direct3D12" || value == "DX12"    || value == "d3d12") return RenderBackend::Direct3D12;
+		if (value == "OpenGL"     || value == "opengl"  || value == "GL")    return RenderBackend::OpenGL;
+		return RenderBackend::Auto;
 	}
 
 	std::string AxiomProject::GetNativeDllPath() const {
@@ -1102,6 +1077,18 @@ endforeach()
 					if (const Json::Value* v = splashValue->FindMember("backgroundB")) {
 						project.SplashScreen.BackgroundB = static_cast<float>(v->AsDoubleOr(0.07));
 					}
+					if (const Json::Value* v = splashValue->FindMember("fontColorR")) {
+						project.SplashScreen.FontColorR = static_cast<float>(v->AsDoubleOr(1.0));
+					}
+					if (const Json::Value* v = splashValue->FindMember("fontColorG")) {
+						project.SplashScreen.FontColorG = static_cast<float>(v->AsDoubleOr(1.0));
+					}
+					if (const Json::Value* v = splashValue->FindMember("fontColorB")) {
+						project.SplashScreen.FontColorB = static_cast<float>(v->AsDoubleOr(1.0));
+					}
+					if (const Json::Value* v = splashValue->FindMember("fontSize")) {
+						project.SplashScreen.FontSize = static_cast<float>(v->AsDoubleOr(16.0));
+					}
 				}
 				if (const Json::Value* buildScenesValue = root.FindMember("buildScenes")) {
 					project.BuildSceneList.clear();
@@ -1190,10 +1177,8 @@ endforeach()
 					project.UIInteractableCursorImagePath = v->AsStringOr();
 				if (const Json::Value* v = root.FindMember("buildProfile"))
 					project.ActiveBuildProfile = AxiomProject::BuildProfileFromString(v->AsStringOr("Development"));
-				if (const Json::Value* v = root.FindMember("renderingApi"))
-					project.ActiveRenderingApi = AxiomProject::RenderingApiFromString(v->AsStringOr("Bgfx"));
-				if (const Json::Value* v = root.FindMember("bgfxBackend"))
-					project.ActiveBgfxBackend = AxiomProject::BgfxBackendFromString(v->AsStringOr("Auto"));
+				if (const Json::Value* v = root.FindMember("renderBackend"))
+					project.ActiveRenderBackend = AxiomProject::RenderBackendFromString(v->AsStringOr("Auto"));
 				if (const Json::Value* v = root.FindMember("customDefines"); v && v->IsArray()) {
 					project.CustomDefines.clear();
 					for (const Json::Value& item : v->GetArray()) {

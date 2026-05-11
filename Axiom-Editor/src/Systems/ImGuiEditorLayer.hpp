@@ -73,9 +73,7 @@ namespace Axiom {
 
 		// Per-panel render targets are RAII-managed Framebuffers — see
 		// `Graphics/Framebuffer.hpp`. Resize is `m_*FBO.Recreate(w, h)`,
-		// destruction is automatic on layer teardown. The historical
-		// `EnsureFBO`/`DestroyFBO` helpers were carved out as part of Stage 0
-		// of the bgfx port so the editor doesn't include glad anywhere.
+		// destruction is automatic on layer teardown.
 		void EnsureViewportFramebuffer(int width, int height);
 		void DestroyViewportFramebuffer();
 

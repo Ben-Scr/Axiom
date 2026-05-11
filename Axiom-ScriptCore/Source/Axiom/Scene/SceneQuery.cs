@@ -90,6 +90,71 @@ public class Scene
 
     public int EntityCount => IsLoaded ? InternalCalls.Scene_GetEntityCount(Name) : 0;
 
+    // ── Singletons ─────────────────────────────────────────────
+    // Singleton lookups search every entity carrying the component, regardless
+    // of enabled state — matching native Scene::GetSingletonComponent<T>().
+    // A disabled "singleton" is still the one instance; if the caller cares
+    // about activity they should check `entity.IsEnabled` after the lookup.
+    //
+    // Non-Try variants log on anomalies (Error when missing, Warn when
+    // multiple) and return the first match. Try* variants are silent.
+
+    public T? GetSingleton<T>() where T : Component, new()
+    {
+        if (!TryFindSingletonId<T>(out ulong id, warnOnMissing: true, warnOnMultiple: true))
+            return null;
+        return new Entity(id).GetComponent<T>();
+    }
+
+    public Entity? GetSingletonEntity<T>() where T : Component, new()
+    {
+        if (!TryFindSingletonId<T>(out ulong id, warnOnMissing: true, warnOnMultiple: true))
+            return null;
+        return new Entity(id);
+    }
+
+    public bool TryGetSingleton<T>(out T? component) where T : Component, new()
+    {
+        component = null;
+        if (!TryFindSingletonId<T>(out ulong id, warnOnMissing: false, warnOnMultiple: false))
+            return false;
+        component = new Entity(id).GetComponent<T>();
+        return component != null;
+    }
+
+    public bool TryGetSingletonEntity<T>(out Entity? entity) where T : Component, new()
+    {
+        entity = null;
+        if (!TryFindSingletonId<T>(out ulong id, warnOnMissing: false, warnOnMultiple: false))
+            return false;
+        entity = new Entity(id);
+        return true;
+    }
+
+    private bool TryFindSingletonId<T>(out ulong id, bool warnOnMissing, bool warnOnMultiple)
+        where T : Component, new()
+    {
+        id = 0;
+        if (string.IsNullOrEmpty(Name))
+            return false;
+        string? compName = GetNativeName<T>();
+        if (string.IsNullOrEmpty(compName))
+            return false;
+
+        ulong[] ids = ExecuteQuery(Name, compName);
+        if (ids.Length == 0)
+        {
+            if (warnOnMissing)
+                Log.Error($"Singleton component '{typeof(T).Name}' not found in scene '{Name}'");
+            return false;
+        }
+        if (ids.Length > 1 && warnOnMultiple)
+            Log.Warn($"Multiple ({ids.Length}) instances of singleton component '{typeof(T).Name}' in scene '{Name}', returning first");
+
+        id = ids[0];
+        return true;
+    }
+
     public bool EnableSystem<T>() where T : GameSystem
         => SetSystemEnabled<T>(true);
 
@@ -286,7 +351,10 @@ internal struct QueryFilter
     internal string WithNames;
     internal string WithoutNames;
     internal string MustHaveNames;
-    internal int EnableFilter; // 0=all, 1=enabled, 2=disabled
+    // 0=all, 1=enabled only, 2=disabled only. Default is 1 — queries
+    // skip disabled entities unless the caller opts in via IncludeDisabled()
+    // or switches to DisabledOnly().
+    internal int EnableFilter;
     internal List<Func<Entity, bool>>? Conditions;
 
     internal QueryFilter(string sceneName, string withNames)
@@ -295,7 +363,7 @@ internal struct QueryFilter
         WithNames = withNames;
         WithoutNames = "";
         MustHaveNames = "";
-        EnableFilter = 0;
+        EnableFilter = 1;
         Conditions = null;
     }
 
@@ -367,6 +435,7 @@ public struct QueryBuilder<T1> : IEnumerable<T1>
 
     public QueryBuilder<T1> EnabledOnly() { _filter.EnableFilter = 1; return this; }
     public QueryBuilder<T1> DisabledOnly() { _filter.EnableFilter = 2; return this; }
+    public QueryBuilder<T1> IncludeDisabled() { _filter.EnableFilter = 0; return this; }
 
     public QueryBuilder<T1> WithCondition(Func<T1, bool> predicate)
     {
@@ -446,6 +515,7 @@ public struct QueryBuilder<T1, T2> : IEnumerable<(T1 C1, T2 C2)>
 
     public QueryBuilder<T1, T2> EnabledOnly() { _filter.EnableFilter = 1; return this; }
     public QueryBuilder<T1, T2> DisabledOnly() { _filter.EnableFilter = 2; return this; }
+    public QueryBuilder<T1, T2> IncludeDisabled() { _filter.EnableFilter = 0; return this; }
 
     public QueryBuilder<T1, T2> WithCondition<TC>(Func<TC, bool> predicate) where TC : Component, new()
     {
@@ -525,6 +595,7 @@ public struct QueryBuilder<T1, T2, T3> : IEnumerable<(T1 C1, T2 C2, T3 C3)>
 
     public QueryBuilder<T1, T2, T3> EnabledOnly() { _filter.EnableFilter = 1; return this; }
     public QueryBuilder<T1, T2, T3> DisabledOnly() { _filter.EnableFilter = 2; return this; }
+    public QueryBuilder<T1, T2, T3> IncludeDisabled() { _filter.EnableFilter = 0; return this; }
 
     public QueryBuilder<T1, T2, T3> WithCondition<TC>(Func<TC, bool> predicate) where TC : Component, new()
     {
@@ -607,6 +678,7 @@ public struct QueryBuilder<T1, T2, T3, T4> : IEnumerable<(T1 C1, T2 C2, T3 C3, T
 
     public QueryBuilder<T1, T2, T3, T4> EnabledOnly() { _filter.EnableFilter = 1; return this; }
     public QueryBuilder<T1, T2, T3, T4> DisabledOnly() { _filter.EnableFilter = 2; return this; }
+    public QueryBuilder<T1, T2, T3, T4> IncludeDisabled() { _filter.EnableFilter = 0; return this; }
 
     public QueryBuilder<T1, T2, T3, T4> WithCondition<TC>(Func<TC, bool> predicate) where TC : Component, new()
     {
@@ -689,6 +761,7 @@ public struct QueryBuilder<T1, T2, T3, T4, T5> : IEnumerable<(T1 C1, T2 C2, T3 C
 
     public QueryBuilder<T1, T2, T3, T4, T5> EnabledOnly() { _filter.EnableFilter = 1; return this; }
     public QueryBuilder<T1, T2, T3, T4, T5> DisabledOnly() { _filter.EnableFilter = 2; return this; }
+    public QueryBuilder<T1, T2, T3, T4, T5> IncludeDisabled() { _filter.EnableFilter = 0; return this; }
 
     public QueryBuilder<T1, T2, T3, T4, T5> WithCondition<TC>(Func<TC, bool> predicate) where TC : Component, new()
     {
@@ -773,6 +846,7 @@ public struct QueryBuilder<T1, T2, T3, T4, T5, T6> : IEnumerable<(T1 C1, T2 C2, 
 
     public QueryBuilder<T1, T2, T3, T4, T5, T6> EnabledOnly() { _filter.EnableFilter = 1; return this; }
     public QueryBuilder<T1, T2, T3, T4, T5, T6> DisabledOnly() { _filter.EnableFilter = 2; return this; }
+    public QueryBuilder<T1, T2, T3, T4, T5, T6> IncludeDisabled() { _filter.EnableFilter = 0; return this; }
 
     public QueryBuilder<T1, T2, T3, T4, T5, T6> WithCondition<TC>(Func<TC, bool> predicate) where TC : Component, new()
     {
@@ -860,6 +934,7 @@ public struct QueryBuilder<T1, T2, T3, T4, T5, T6, T7> : IEnumerable<(T1 C1, T2 
 
     public QueryBuilder<T1, T2, T3, T4, T5, T6, T7> EnabledOnly() { _filter.EnableFilter = 1; return this; }
     public QueryBuilder<T1, T2, T3, T4, T5, T6, T7> DisabledOnly() { _filter.EnableFilter = 2; return this; }
+    public QueryBuilder<T1, T2, T3, T4, T5, T6, T7> IncludeDisabled() { _filter.EnableFilter = 0; return this; }
 
     public QueryBuilder<T1, T2, T3, T4, T5, T6, T7> WithCondition<TC>(Func<TC, bool> predicate) where TC : Component, new()
     {
@@ -949,6 +1024,7 @@ public struct QueryBuilder<T1, T2, T3, T4, T5, T6, T7, T8> : IEnumerable<(T1 C1,
 
     public QueryBuilder<T1, T2, T3, T4, T5, T6, T7, T8> EnabledOnly() { _filter.EnableFilter = 1; return this; }
     public QueryBuilder<T1, T2, T3, T4, T5, T6, T7, T8> DisabledOnly() { _filter.EnableFilter = 2; return this; }
+    public QueryBuilder<T1, T2, T3, T4, T5, T6, T7, T8> IncludeDisabled() { _filter.EnableFilter = 0; return this; }
 
     public QueryBuilder<T1, T2, T3, T4, T5, T6, T7, T8> WithCondition<TC>(Func<TC, bool> predicate) where TC : Component, new()
     {

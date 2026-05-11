@@ -11,21 +11,17 @@
 #include <utility>
 
 // =============================================================================
-// TextureManager — real bgfx implementation.
+// TextureManager — slot table + handle-generation pool.
 // -----------------------------------------------------------------------------
-// Real slot table + handle-generation pool, mirroring the OpenGL impl's
-// shape. Texture loading routes through Texture2D's bgfx Load() (decoded
-// via stbi_load + uploaded via bgfx::createTexture2D), so callers get a
-// real GPU resource per LoadTexture/LoadTextureByUUID call.
+// Texture loading routes through Texture2D::Load() (decoded via stbi_load +
+// uploaded via the active backend), so callers get a real GPU resource per
+// LoadTexture/LoadTextureByUUID call.
 //
 // Default textures (Square / Pixel / Circle / etc.) are pre-loaded from
 // AxiomAssets/Textures/Default/*.png at Initialize. Sprite + UI fallback
 // paths look these up via GetDefaultTexture so a SpriteRendererComponent
-// or ImageComponent with no user-assigned texture still produces a
-// visible white quad — Stage 2.1's "render nothing instead of magenta"
-// behaviour broke even the simplest scenes (a default Square + Image
-// pair would render blank because bgfx samples zero from an unbound
-// s_albedo, multiplied by the per-instance color = transparent black).
+// or ImageComponent with no user-assigned texture still produces a visible
+// white quad.
 // =============================================================================
 
 namespace Axiom {
@@ -96,8 +92,17 @@ namespace Axiom {
 			s_Textures.emplace_back();
 		}
 		TextureEntry& slot = s_Textures[idx];
+		// flipVertical=false: WebGPU's texture-coordinate origin is
+		// top-left (matching stb_image's default decode order), and the
+		// sprite shader's UV calc (`0.5 - in.position.y` in Shader.cpp
+		// k_SpriteWGSL) already maps quad-up to texture-row-0. Loading
+		// with stb's vertical flip on top of that produced a net flip
+		// — sprites and UI Image components rendered upside-down. This
+		// path is the OpenGL-legacy default that the WebGPU port
+		// inherited; turning it off makes textures display right-side-
+		// up without touching the shader.
 		if (!slot.Texture.Load(pathStr.c_str(), /*generateMipmaps=*/true,
-			/*srgb=*/false, /*flipVertical=*/true))
+			/*srgb=*/false, /*flipVertical=*/false))
 		{
 			s_FreeIndices.push(idx);
 			return TextureHandle{};
@@ -186,13 +191,12 @@ namespace Axiom {
 	}
 
 	size_t TextureManager::PurgeUnreferenced() {
-		// Stage 2.1: trust the registered providers + scene scan. Without
-		// the default-texture exemption (we don't load defaults under
-		// bgfx yet), every entry not held by a live ECS component or a
-		// registered provider gets evicted.
+		// Trust the registered providers + scene scan: every entry not
+		// held by a live ECS component or a registered provider gets
+		// evicted.
 		// Real impl walks every loaded scene; we approximate by having
 		// every provider opt in to keeping its handles alive.
-		// TODO(bgfx-stage-2-followup): mirror the OpenGL impl's scene walk.
+		// TODO: walk every loaded scene to drop stale handles.
 		return 0;
 	}
 

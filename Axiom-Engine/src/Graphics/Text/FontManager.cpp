@@ -12,22 +12,21 @@
 #include <utility>
 
 // =============================================================================
-// FontManager — real bgfx implementation. Stage 2.1 of the bgfx port.
+// FontManager — slot table + lookup-by-(uuid, quantized px).
 // -----------------------------------------------------------------------------
-// Mirrors FontManager.cpp's slot-table + lookup-by-(uuid, quantized px)
-// pattern but constructs Font objects that bake their atlas through
-// `bgfx::createTexture2D` (Font_Bgfx.cpp). Quantization ladder is identical
-// to the OpenGL impl so a font dragged through size-N sliders allocates the
-// same handful of atlases either way.
+// Constructs Font objects that bake their atlas through the active render
+// backend. Quantization ladder is identical to the legacy OpenGL impl so a
+// font dragged through size-N sliders allocates the same handful of
+// atlases.
 //
-// What's intentionally lighter than the OpenGL impl:
-//   * No TTF-byte cache — Stage 2.1 re-reads each .ttf on every Load. The
-//     OpenGL path's `s_TtfBufferCache` saves disk I/O across pixel-size
-//     bakes but is independent of the backend; if we measure it as a real
-//     hot path we can lift it into a shared helper. Today UI rebuilds
-//     are infrequent so the simpler path stays.
-//   * No PurgeUnreferenced equivalent — the UnloadAll path frees everything
-//     on shutdown / project switch, which matches the runtime case.
+// What's intentionally lighter:
+//   * No TTF-byte cache — re-reads each .ttf on every Load. The legacy
+//     `s_TtfBufferCache` saves disk I/O across pixel-size bakes; if we
+//     measure it as a real hot path we can lift it into a shared helper.
+//     Today UI rebuilds are infrequent so the simpler path stays.
+//   * No PurgeUnreferenced equivalent — the UnloadAll path frees
+//     everything on shutdown / project switch, which matches the runtime
+//     case.
 // =============================================================================
 
 namespace Axiom {

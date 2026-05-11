@@ -26,6 +26,22 @@ internal unsafe struct NativeBindingsStruct
     public delegate* unmanaged<int> Application_GetVsyncEnabled;
     public delegate* unmanaged<int, void> Application_SetVsyncEnabled;
 
+    // ── Window ───────────────────────────────────────────────────
+    // Layout must match the Window_* block in ScriptGlue.hpp exactly.
+    public delegate* unmanaged<int> Window_GetWidth;
+    public delegate* unmanaged<int> Window_GetHeight;
+    public delegate* unmanaged<byte*, int, int> Window_GetTitleBuffer;
+    public delegate* unmanaged<byte*, void> Window_SetTitle;
+    public delegate* unmanaged<void> Window_Minimize;
+    public delegate* unmanaged<void> Window_Maximize;
+    public delegate* unmanaged<int> Window_IsMaximized;
+    public delegate* unmanaged<int> Window_IsFullScreen;
+    public delegate* unmanaged<int, void> Window_SetFullScreen;
+    public delegate* unmanaged<int*, int*, void> Window_GetPosition;
+    public delegate* unmanaged<int, int, void> Window_SetPosition;
+    public delegate* unmanaged<void> Window_Focus;
+    public delegate* unmanaged<int*, int*, void> Window_GetScreenSize;
+
     // ── Engine ───────────────────────────────────────────────────
     public delegate* unmanaged<byte*, int, int> Engine_GetVersionBuffer;
     public delegate* unmanaged<byte*, int, int> Engine_GetVersionLongBuffer;

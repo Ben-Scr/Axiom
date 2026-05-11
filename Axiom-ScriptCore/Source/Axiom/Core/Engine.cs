@@ -41,14 +41,14 @@ public static class Engine
     public static string Platform => InternalCalls.Engine_GetPlatform();
 
     /// <summary>
-    /// Graphics backend label, e.g. "bgfx Vulkan" or "bgfx Direct3D11". Empty
-    /// string before the renderer is initialized.
+    /// Graphics backend label, e.g. "WebGPU Vulkan" or "WebGPU Direct3D12".
+    /// Empty string before the renderer is initialized.
     /// </summary>
     public static string GraphicsApi => InternalCalls.Engine_GetGraphicsApi();
 
     /// <summary>GPU vendor name, e.g. "NVIDIA", "AMD", "Intel".</summary>
     public static string GpuVendor => InternalCalls.Engine_GetGpuVendor();
 
-    /// <summary>Active bgfx renderer backend name, e.g. "Vulkan", "Direct3D11", "OpenGL".</summary>
+    /// <summary>Active renderer backend name, e.g. "Vulkan", "Direct3D12", "Metal".</summary>
     public static string GpuRenderer => InternalCalls.Engine_GetGpuRenderer();
 }

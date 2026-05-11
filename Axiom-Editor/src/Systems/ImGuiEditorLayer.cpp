@@ -582,6 +582,24 @@ namespace Axiom {
 	}
 
 	void ImGuiEditorLayer::RenderMainMenu(Scene& scene) {
+		// Layout preset state. Kept TU-static (not in the layer header)
+		// so the editor's ImGuiEditorLayer.hpp surface doesn't grow for
+		// what is purely a popup-internal scratch area. `Application::
+		// Reload` already resets editor TU-static state on its restart
+		// path, so this won't outlive a reload.
+		static char s_SaveLayoutAsBuffer[64] = {};
+		static std::string s_PendingDeleteLayoutName;
+		// Deferred OpenPopup triggers. ImGui::OpenPopup hashes the
+		// popup id against the *current window's* id stack — which
+		// inside a BeginMenu/MenuItem is the menu's own pop-up window,
+		// not the dockspace. The matching BeginPopupModal runs at
+		// dockspace scope after EndMenuBar and never sees the popup
+		// because the ids don't match. Setting a flag here and calling
+		// OpenPopup at dockspace scope below (where BeginPopupModal
+		// also lives) keeps both ends in the same id namespace.
+		static bool s_OpenSaveLayoutAsRequest = false;
+		static bool s_OpenDeleteLayoutRequest = false;
+
 		if (!ImGui::BeginMenuBar()) {
 			return;
 		}
@@ -591,8 +609,43 @@ namespace Axiom {
 			if (ImGui::MenuItem("Reload App")) {
 				Application::Reload();
 			}
-			if (ImGui::MenuItem("Reset Layout")) {
-				ImGuiContextLayer::ResetLayoutToBundledDefault();
+			if (ImGui::BeginMenu("Layout")) {
+				if (ImGui::MenuItem("Save Layout As...")) {
+					s_SaveLayoutAsBuffer[0] = '\0';
+					s_OpenSaveLayoutAsRequest = true;
+				}
+
+				const std::vector<std::string> presets =
+					ImGuiContextLayer::ListLayoutPresets();
+
+				// "Load Layout" / "Delete Layout" submenus are disabled
+				// when there are no presets so the dropdown still shows
+				// (with a greyed-out arrow) — clearer than hiding the
+				// item, which would silently change the menu shape.
+				if (ImGui::BeginMenu("Load Layout", !presets.empty())) {
+					for (const std::string& name : presets) {
+						if (ImGui::MenuItem(name.c_str())) {
+							ImGuiContextLayer::LoadLayoutPreset(name);
+						}
+					}
+					ImGui::EndMenu();
+				}
+
+				if (ImGui::BeginMenu("Delete Layout", !presets.empty())) {
+					for (const std::string& name : presets) {
+						if (ImGui::MenuItem(name.c_str())) {
+							s_PendingDeleteLayoutName = name;
+							s_OpenDeleteLayoutRequest = true;
+						}
+					}
+					ImGui::EndMenu();
+				}
+
+				ImGui::Separator();
+				if (ImGui::MenuItem("Reset Layout")) {
+					ImGuiContextLayer::ResetLayoutToBundledDefault();
+				}
+				ImGui::EndMenu();
 			}
 			if (ImGui::MenuItem("Quit")) {
 				Application::RequestQuit();
@@ -669,6 +722,84 @@ namespace Axiom {
 		}
 
 		ImGui::EndMenuBar();
+
+		// ── Layout preset modals ───────────────────────────────────
+		// Rendered inside the dockspace window (the Begin/End for
+		// the dockspace brackets this whole OnPreRender flow), after
+		// EndMenuBar so they're not nested inside the menubar context.
+		// ImGui's modal stack handles the rest — only one will be open
+		// at a time, both are dismissed on success / cancel.
+		//
+		// OpenPopup must run at the SAME id-stack scope as the matching
+		// BeginPopupModal (see deferred-trigger comment up top). Running
+		// it here, dockspace-scope, makes the popup actually appear.
+		if (s_OpenSaveLayoutAsRequest) {
+			ImGui::OpenPopup("Save Layout As");
+			s_OpenSaveLayoutAsRequest = false;
+		}
+		if (s_OpenDeleteLayoutRequest) {
+			ImGui::OpenPopup("Delete Layout");
+			s_OpenDeleteLayoutRequest = false;
+		}
+
+		if (ImGui::BeginPopupModal("Save Layout As", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+			ImGui::TextUnformatted("Save current editor layout as preset:");
+			ImGui::Spacing();
+			ImGui::SetNextItemWidth(320);
+			// Auto-focus on first frame so the user can type without
+			// reaching for the mouse.
+			if (ImGui::IsWindowAppearing()) {
+				ImGui::SetKeyboardFocusHere();
+			}
+			const bool enterPressed = ImGui::InputText("##LayoutName",
+				s_SaveLayoutAsBuffer, sizeof(s_SaveLayoutAsBuffer),
+				ImGuiInputTextFlags_EnterReturnsTrue);
+
+			const std::string nameStr(s_SaveLayoutAsBuffer);
+			const bool nameValid = ImGuiContextLayer::IsValidLayoutPresetName(nameStr);
+			if (!nameStr.empty() && !nameValid) {
+				ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f),
+					"Invalid name (no / \\ : * ? \" < > |, no trailing dot/space, max 64 chars).");
+			}
+			else {
+				ImGui::TextDisabled("Stored under %%LOCALAPPDATA%%\\Axiom\\Editor\\Layouts.");
+			}
+
+			ImGui::Spacing();
+			ImGui::BeginDisabled(!nameValid);
+			const bool saveClicked = ImGui::Button("Save", ImVec2(100, 0));
+			ImGui::EndDisabled();
+			if ((saveClicked || enterPressed) && nameValid) {
+				ImGuiContextLayer::SaveLayoutPreset(nameStr);
+				s_SaveLayoutAsBuffer[0] = '\0';
+				ImGui::CloseCurrentPopup();
+			}
+			ImGui::SameLine();
+			if (ImGui::Button("Cancel", ImVec2(100, 0)) ||
+				ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+				s_SaveLayoutAsBuffer[0] = '\0';
+				ImGui::CloseCurrentPopup();
+			}
+			ImGui::EndPopup();
+		}
+
+		if (ImGui::BeginPopupModal("Delete Layout", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+			ImGui::Text("Delete layout preset '%s'?", s_PendingDeleteLayoutName.c_str());
+			ImGui::TextDisabled("This cannot be undone.");
+			ImGui::Spacing();
+			if (ImGui::Button("Delete", ImVec2(100, 0))) {
+				ImGuiContextLayer::DeleteLayoutPreset(s_PendingDeleteLayoutName);
+				s_PendingDeleteLayoutName.clear();
+				ImGui::CloseCurrentPopup();
+			}
+			ImGui::SameLine();
+			if (ImGui::Button("Cancel", ImVec2(100, 0)) ||
+				ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+				s_PendingDeleteLayoutName.clear();
+				ImGui::CloseCurrentPopup();
+			}
+			ImGui::EndPopup();
+		}
 	}
 
 	static bool IconButton(const char* id, const char* iconName, float iconSize, const ImVec2& btnSize) {

@@ -1,7 +1,8 @@
 #include "pch.hpp"
 #include "Graphics/QuadMesh.hpp"
 
-// QuadMesh bgfx stub. See Shader_Bgfx.cpp for the Stage 2 rationale.
+// QuadMesh stub — the per-shader vertex layout lives in the renderer
+// pipeline now; this header-side helper collapses to no-ops.
 
 namespace Axiom {
 

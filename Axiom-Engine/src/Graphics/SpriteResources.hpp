@@ -10,7 +10,6 @@
 // =============================================================================
 // WebGPUSpriteResources — shared WebGPU state for the sprite + UI submit paths.
 // -----------------------------------------------------------------------------
-// Sibling to BgfxSpriteResources (which is the --rhi=bgfx implementation).
 // Both Renderer2D (world-space sprites) and GuiRenderer (screen-space UI quads)
 // pull their core GPU state from here so engine.dll owns one copy of:
 //   * The sprite WGSL ShaderModule (vs_main / fs_main entry points)
@@ -20,10 +19,10 @@
 //     format / FBO format the engine actually renders to in a session, lazily
 //     built on first request)
 //
-// Lifecycle is reference-counted, matching BgfxSpriteResources: Acquire() in
-// each renderer's Initialize, Release() in each renderer's Shutdown. The
-// counter exists so engine.dll holds the resources exactly once even when
-// multiple renderers init independently in different orders.
+// Lifecycle is reference-counted: Acquire() in each renderer's Initialize,
+// Release() in each renderer's Shutdown. The counter exists so engine.dll
+// holds the resources exactly once even when multiple renderers init
+// independently in different orders.
 //
 // Why this isn't in WebGPUBackend.hpp: that header is for cross-cutting
 // resource-pool access (texture lookup, FBO lookup) used by many TUs. The
@@ -33,12 +32,7 @@
 
 namespace Axiom::WebGPUSpriteResources {
 
-	// Per-instance layout written into the instance VBO. Identical CPU layout
-	// to BgfxSpriteResources::SpriteInstance — pack/encode is the same math.
-	// Kept duplicate (not shared via a backend-neutral header) because each
-	// backend's emitter may diverge slightly: WebGPU's vertex layout has
-	// different padding requirements than bgfx in future revisions, so a
-	// shared struct would force cross-backend lockstep on changes.
+	// Per-instance layout written into the instance VBO.
 	struct AXIOM_API SpriteInstance {
 		float Pos[2];        // matches i_data0.xy in vs_main
 		float Scale[2];      // matches i_data0.zw
@@ -81,9 +75,9 @@ namespace Axiom::WebGPUSpriteResources {
 		wgpu::TextureFormat colorFormat,
 		bool                hasDepth);
 
-	// CPU-side encode helper — same math as the bgfx side. Out-parameter
-	// so callers can write directly into a transient instance buffer's
-	// mapped range with a single memcpy-free assignment.
+	// CPU-side encode helper. Out-parameter so callers can write directly
+	// into a transient instance buffer's mapped range with a single
+	// memcpy-free assignment.
 	AXIOM_API void EncodeInstance44(const Instance44& src, SpriteInstance& dst);
 
 }  // namespace Axiom::WebGPUSpriteResources

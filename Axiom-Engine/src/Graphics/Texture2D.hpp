@@ -48,6 +48,18 @@ namespace Axiom {
 		bool IsValid() const { return m_Tex != 0; }
 
 		std::unique_ptr<ImageData> GetImageData() const;
+
+		// CPU-side image decode helper. Goes straight from disk → RGBA8
+		// pixels in an ImageData, never touching the GPU — for callers
+		// that need raw pixels and don't want to pay GPU-readback cost
+		// (icon ICO encoder, mip pre-processors, tool code). The live
+		// Texture2D::GetImageData() path requires async wgpu::Queue
+		// readback that hasn't been wired yet, so any tool path that
+		// asked for it back via the instance silently failed; this
+		// static reads the file again via stb_image instead.
+		// Returns nullptr if stb_image can't decode the file.
+		static std::unique_ptr<ImageData> DecodeFileToCpu(const char* path,
+			bool flipVertical = false);
 		// Returns the WGPU texture-view raw pointer cast to uint64_t under
 		// the WebGPU backend. ImGui's imgui_impl_wgpu reinterpret-casts
 		// ImTextureID directly to WGPUTextureView and dereferences it, so

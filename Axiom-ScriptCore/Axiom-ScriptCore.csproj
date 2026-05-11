@@ -91,10 +91,10 @@
     <Compile Include="Source\Axiom\Collections\Range.cs" />
     <Compile Include="Source\Axiom\Components\ComponentTypes.cs" />
     <Compile Include="Source\Axiom\Components\IComponent.cs" />
+    <Compile Include="Source\Axiom\Components\NativeSpriteRenderer.cs" />
+    <Compile Include="Source\Axiom\Components\NativeTransform2D.cs" />
     <Compile Include="Source\Axiom\Components\Ref.cs" />
-    <Compile Include="Source\Axiom\Components\SpriteRenderer.cs" />
     <Compile Include="Source\Axiom\Components\TextureHandle.cs" />
-    <Compile Include="Source\Axiom\Components\Transform2D.cs" />
     <Compile Include="Source\Axiom\Core\Application.cs" />
     <Compile Include="Source\Axiom\Core\AssetManager.cs" />
     <Compile Include="Source\Axiom\Core\Engine.cs" />
@@ -104,6 +104,7 @@
     <Compile Include="Source\Axiom\Core\KeyCodes.cs" />
     <Compile Include="Source\Axiom\Core\Log.cs" />
     <Compile Include="Source\Axiom\Core\Time.cs" />
+    <Compile Include="Source\Axiom\Core\Window.cs" />
     <Compile Include="Source\Axiom\Coroutines\Awaiters.cs" />
     <Compile Include="Source\Axiom\Coroutines\AxiomSynchronizationContext.cs" />
     <Compile Include="Source\Axiom\Coroutines\CoroutineScheduler.cs" />

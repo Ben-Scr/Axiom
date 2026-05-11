@@ -4,6 +4,7 @@
 
 #include <chrono>
 #include <string>
+#include <vector>
 
 namespace Axiom {
 
@@ -29,6 +30,24 @@ namespace Axiom {
 		// from the editor's Application → Reset Layout menu item; safe to
 		// call from any frame inside the editor's render scope.
 		static void ResetLayoutToBundledDefault();
+
+		// Layout preset API — user-named .ini snapshots stored under
+		// %LOCALAPPDATA%\Axiom\Editor\Layouts\<name>.ini. Each preset
+		// is a stand-alone imgui.ini file produced by ImGui's normal
+		// save path, so swapping presets is just a Clear + Load + Save-
+		// to-user-ini sequence (same shape as ResetLayoutToBundledDefault).
+		//
+		// All four are safe to call from any frame inside the editor's
+		// render scope. Errors are logged via AIM_CORE_*_TAG("ImGui",
+		// ...) and surfaced through the bool return.
+		static std::vector<std::string> ListLayoutPresets();
+		static bool SaveLayoutPreset(const std::string& name);
+		static bool LoadLayoutPreset(const std::string& name);
+		static bool DeleteLayoutPreset(const std::string& name);
+		// True iff `name` is a non-empty, filesystem-safe preset name
+		// (no path separators, no Windows-reserved chars, not "." / "..",
+		// length ≤ 64). Used by the Save-As popup to gate the OK button.
+		static bool IsValidLayoutPresetName(const std::string& name);
 
 	private:
 		static void ApplyAxiomTheme();

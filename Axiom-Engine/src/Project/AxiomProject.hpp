@@ -153,43 +153,21 @@ namespace Axiom {
 		};
 		BuildProfile ActiveBuildProfile = BuildProfile::Development;
 
-		// Rendering backend the project should be built against. Mirrors the
-		// premake `--rhi=opengl|bgfx` build-time flag — the editor exposes a
-		// "Graphics" tab in Project Settings that writes this and offers an
-		// "Apply & Restart" action that regenerates the engine solution with
-		// the matching --rhi value, rebuilds, and re-launches the editor.
-		// Default Bgfx because that's the modern multi-backend path; the
-		// legacy direct-OpenGL path remains available via the dropdown.
-		//
-		// IMPORTANT: this is a build-time choice. Changing it without
-		// regenerating + rebuilding the engine has no effect at runtime —
-		// the running binary stays on whatever backend it was compiled
-		// against. The Project Settings UI surfaces both values (persisted
-		// vs. running) and warns when they diverge.
-		enum class RenderingApi : uint8_t {
-			OpenGL = 0,
-			Bgfx   = 1,
-		};
-		RenderingApi ActiveRenderingApi = RenderingApi::Bgfx;
-
-		// When ActiveRenderingApi == Bgfx, this controls which backend
-		// bgfx::init picks at runtime — passed to `bgfx::Init::type`
-		// (Vulkan / Direct3D11 / Direct3D12 / OpenGL). Auto =
-		// `RendererType::Count`, which lets bgfx pick the most capable
-		// backend the platform supports (D3D11 on Windows, Metal on
-		// macOS, Vulkan/GL on Linux). Selecting an unsupported backend
-		// (e.g. D3D11 on Linux) falls back to Auto with a warning so
+		// Preferred native backend WebGPU (Dawn) routes through at
+		// adapter-request time. Auto lets Dawn pick the most capable
+		// backend for the host platform (D3D12 on Windows, Metal on
+		// macOS, Vulkan on Linux). Selecting an unsupported backend
+		// (e.g. D3D12 on Linux) falls back to Auto with a warning so
 		// users can carry a project across machines without it failing
-		// to boot. Ignored when ActiveRenderingApi == OpenGL (the
-		// legacy direct-GL path doesn't use bgfx).
-		enum class BgfxBackend : uint8_t {
+		// to boot.
+		enum class RenderBackend : uint8_t {
 			Auto       = 0,
 			Vulkan     = 1,
 			Direct3D11 = 2,
 			Direct3D12 = 3,
 			OpenGL     = 4,
 		};
-		BgfxBackend ActiveBgfxBackend = BgfxBackend::Auto;
+		RenderBackend ActiveRenderBackend = RenderBackend::Auto;
 
 		// Splash screen — shown briefly before the first scene loads in
 		// shipped builds. Disabled = no splash, scene loads immediately.
@@ -218,6 +196,14 @@ namespace Axiom {
 			float BackgroundR = 0.05f;
 			float BackgroundG = 0.05f;
 			float BackgroundB = 0.07f;
+			// Subtitle text styling. FontSize is in pixels — ImGui draw-list
+			// AddText accepts a custom size on top of the current font. Zero
+			// or negative values fall back to the active ImGui font's
+			// default size.
+			float FontColorR = 1.0f;
+			float FontColorG = 1.0f;
+			float FontColorB = 1.0f;
+			float FontSize = 16.0f;
 		} SplashScreen;
 
 		// User-defined preprocessor symbols. Get baked into BOTH the C#
@@ -239,19 +225,12 @@ namespace Axiom {
 		static const char* BuildProfileToString(BuildProfile profile);
 		static BuildProfile BuildProfileFromString(std::string_view value);
 
-		static const char* RenderingApiToString(RenderingApi api);
-		static RenderingApi RenderingApiFromString(std::string_view value);
-		// Premake's `--rhi` flag value matching `api` (lowercase form: "opengl"
-		// or "bgfx"). Used by the editor's "Apply & Restart" path when it
-		// re-invokes premake to switch backends.
-		static const char* RenderingApiToPremakeFlag(RenderingApi api);
-
-		// String <-> enum conversion for the runtime bgfx backend choice.
-		// Used by serialization + the Player Settings UI dropdown. The
-		// "FromString" form accepts a few common spellings ("vulkan",
+		// String <-> enum conversion for the preferred render-backend
+		// choice. Used by serialization + the Player Settings UI dropdown.
+		// The "FromString" form accepts a few common spellings ("vulkan",
 		// "VK", etc.) so manually-edited project files are forgiving.
-		static const char* BgfxBackendToString(BgfxBackend backend);
-		static BgfxBackend BgfxBackendFromString(std::string_view value);
+		static const char* RenderBackendToString(RenderBackend backend);
+		static RenderBackend RenderBackendFromString(std::string_view value);
 
 		std::string GetNativeDllPath() const;
 		std::string GetSceneFilePath(const std::string& sceneName) const;

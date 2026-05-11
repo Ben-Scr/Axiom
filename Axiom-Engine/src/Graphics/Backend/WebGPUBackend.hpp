@@ -3,19 +3,16 @@
 // =============================================================================
 // WebGPUBackend — private engine-internal interface to the WebGPU backend.
 // -----------------------------------------------------------------------------
-// Mirror of the BgfxBackend:: helpers defined inside Backend/BgfxApi.cpp: a
-// small namespace that lets resource files (Texture2D_WebGPU.cpp,
-// Framebuffer_WebGPU.cpp, future Shader_WebGPU.cpp / Renderer2D_WebGPU.cpp /
-// etc.) talk to the active wgpu::Device + Queue + surface without depending on
-// the singleton-style globals living in WebGPUApi.cpp's anonymous namespace.
+// Small namespace that lets resource files (Texture2D.cpp, Framebuffer.cpp,
+// Shader.cpp, Renderer2D.cpp, etc.) talk to the active wgpu::Device + Queue +
+// surface without depending on the singleton-style globals living in
+// WebGPUApi.cpp's anonymous namespace.
 //
-// This header is ONLY safe to include from TUs compiled under --rhi=webgpu —
-// it includes <webgpu/webgpu_cpp.h>, which is only on the include path when
-// Dawn is wired in. Files needing backend-neutral types should use
-// Graphics/RenderApi.hpp instead.
+// This header includes <webgpu/webgpu_cpp.h>; files needing backend-neutral
+// types should use Graphics/RenderApi.hpp instead.
 //
 // Pool model: each resource type that wraps a wgpu:: handle (Texture2D,
-// Framebuffer, future Shader / RenderPipeline, ...) keeps a TU-local pool of
+// Framebuffer, Shader, RenderPipeline, ...) keeps a TU-local pool of
 // its GPU objects, indexed by the same opaque uint32_t IDs the resource's
 // header already exposes via `GetBackendId()` / `GetHandle()`. The header
 // declarations here are the LOOKUP surface — the storage stays inside each
@@ -43,7 +40,7 @@ namespace Axiom::WebGPUBackend {
 	// End-of-frame: close any active pass, submit the command buffer, present
 	// the surface. Routed to from RenderApi::Present(). Safe to call when
 	// nothing was rendered this frame — issues a touch-clear so the swap
-	// chain still advances (mirror of bgfx::touch).
+	// chain still advances.
 	void Present();
 
 	// Accessors for resource TUs that need to create GPU objects on the same
@@ -112,11 +109,11 @@ namespace Axiom::WebGPUBackend {
 
 	// ── Shader pool (defined in Graphics/Shader_WebGPU.cpp) ──────────────────
 
-	// WebGPU collapses bgfx's vs+fs pair into a single wgpu::ShaderModule
-	// with named entry points (vs_main / fs_main). Each Shader instance
-	// holds one module; the engine's `unsigned m_Program` field is its
-	// lookup key here. The renderers (Stage 4+) request the module
-	// alongside the entry-point names when building a wgpu::RenderPipeline.
+	// Each Shader instance compiles to a single wgpu::ShaderModule with
+	// named entry points (vs_main / fs_main). The engine's `unsigned
+	// m_Program` field is its lookup key here. The renderers request the
+	// module alongside the entry-point names when building a
+	// wgpu::RenderPipeline.
 	struct ShaderLookup {
 		wgpu::ShaderModule Module;
 		bool               Valid = false;
@@ -134,9 +131,7 @@ namespace Axiom::WebGPUBackend {
 	// ── Render-pass plumbing (defined in Backend/WebGPUApi.cpp) ──────────────
 	//
 	// Renderers (Renderer2D / GuiRenderer / TextRenderer / GizmoRenderer)
-	// open their own wgpu::RenderPassEncoder per submit batch — bgfx's
-	// submission-driven model gets translated into WebGPU's immediate-
-	// recording model by having each renderer drive its own pass with
+	// open their own wgpu::RenderPassEncoder per submit batch, with
 	// LoadOp::Load semantics (preserves whatever a prior RenderApi::Clear
 	// painted). The backend owns the frame-wide CommandEncoder + the
 	// surface-texture acquisition; the renderer asks for both via
@@ -180,5 +175,20 @@ namespace Axiom::WebGPUBackend {
 	// (and corrupting) whatever the renderer just drew. Renderers call this
 	// when their pass targets `IsSwapChain == true`.
 	void MarkSwapChainRendered();
+
+	// Submit whatever's been recorded on the per-frame encoder so far and
+	// reset the encoder. Per-frame swap-chain acquisition and presented-
+	// flag tracking stay alive across the flush. Use this between distinct
+	// render sequences in the same frame that share a buffer via
+	// queue.WriteBuffer (Dawn's uploader flushes all pending copies before
+	// every user submit, so two WriteBuffer calls to the same buffer
+	// between two recorded passes collapse to the most recent value —
+	// causing the first pass to read the second pass's data). Already
+	// invoked automatically on render-target switches via BindFramebuffer/
+	// BindDefaultFramebuffer; renderers call it directly when a single
+	// target hosts multiple sequences that each rewrite a shared buffer
+	// (e.g. TextRenderer's vertex buffer across interleaved text/image
+	// phases inside a GuiRenderer pass).
+	void FlushCommands();
 
 }  // namespace Axiom::WebGPUBackend

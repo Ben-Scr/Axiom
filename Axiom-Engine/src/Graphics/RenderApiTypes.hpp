@@ -5,12 +5,12 @@
 // =============================================================================
 // Backend-neutral rendering enums.
 // -----------------------------------------------------------------------------
-// These types mediate between the engine and a concrete graphics backend
-// (OpenGL today, bgfx tomorrow). They MUST NOT include any backend headers
-// (glad, bgfx, vulkan, d3d) so callers in renderer / UI / editor code can be
-// compiled against the abstract `RenderApi` without leaking GL types into
-// their headers. Translation to backend constants happens inside the backend
-// .cpp file (see Backend/OpenGLApi.cpp).
+// These types mediate between the engine and the graphics backend. They
+// MUST NOT include any backend headers (glad, vulkan, d3d, webgpu) so
+// callers in renderer / UI / editor code can be compiled against the
+// abstract `RenderApi` without leaking backend types into their headers.
+// Translation to backend constants happens inside the backend .cpp file
+// (see Backend/WebGPUApi.cpp).
 // =============================================================================
 
 namespace Axiom {

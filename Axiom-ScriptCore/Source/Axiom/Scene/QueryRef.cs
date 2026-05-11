@@ -18,10 +18,14 @@ namespace Axiom;
 // stays available for code that needs mid-iteration mutation — it works
 // by snapshotting entity IDs and re-resolving per row.
 //
-// Entry point: `scene.QueryRef<Transform2D>()` (extension method on Scene).
+// Entry point: `scene.QueryRef<NativeTransform2D>()` (extension method on Scene).
 // Chain `.Without<T>()`, `.With<T>()`, `.EnabledOnly()`/`.DisabledOnly()`,
 // `.Readonly<T>()` (adds a readonly component). v1 supports 1 write + 0 or 1
 // readonly types; higher arities are straightforward generalization.
+//
+// All `T` parameters here are the `Native*` structs from `Axiom.Components` —
+// the constraint `where T : unmanaged, IComponent` only admits those, the
+// managed wrapper classes (`Axiom.Transform2D` etc.) won't compile here.
 
 internal struct QueryRefFilters
 {

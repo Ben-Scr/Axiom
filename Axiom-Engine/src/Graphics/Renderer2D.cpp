@@ -2,9 +2,11 @@
 #include "Graphics/Renderer2D.hpp"
 
 #include "Components/General/Transform2DComponent.hpp"
+#include "Components/Graphics/Camera2DComponent.hpp"
 #include "Components/Graphics/SpriteRendererComponent.hpp"
 #include "Core/Log.hpp"
 #include "Graphics/Backend/WebGPUBackend.hpp"
+#include "Graphics/RenderApi.hpp"
 #include "Graphics/SpriteResources.hpp"
 #include "Graphics/Texture2D.hpp"
 #include "Graphics/TextureManager.hpp"
@@ -25,30 +27,25 @@
 #include <vector>
 
 // =============================================================================
-// Renderer2D — WebGPU (Dawn) implementation. Stage 4 of the WebGPU port.
+// Renderer2D — WebGPU (Dawn) implementation.
 // -----------------------------------------------------------------------------
-// Sibling to Renderer2D.cpp (the bgfx implementation). Public Renderer2D.hpp
-// stays unchanged across backends; only the submit path is replaced.
-//
 // Flow:
 //   1. Initialize / Shutdown reference-count WebGPUSpriteResources (shared
-//      with GuiRenderer once that ports — same pattern as the bgfx side).
+//      with GuiRenderer).
 //   2. RenderSceneWithVP collects Transform2D + SpriteRenderer pairs, sorts
-//      by (SortingLayer, SortingOrder, DrawIndex) so the GL/bgfx z-stack
-//      contract holds, then issues one wgpu::RenderPipeline + one render
-//      pass + N DrawIndexed calls (one per texture run).
+//      by (SortingLayer, SortingOrder, DrawIndex) so the z-stack contract
+//      holds, then issues one wgpu::RenderPipeline + one render pass + N
+//      DrawIndexed calls (one per texture run).
 //
 // Architecture notes:
 //   * One persistent instance VBO grown geometrically on demand
-//     (queue.WriteBuffer each frame, never frees once grown — matches bgfx's
-//     transient instance buffer's amortised behaviour at higher heap
-//     residency).
+//     (queue.WriteBuffer each frame, never frees once grown).
 //   * One persistent uniform VBO (64 bytes for the viewProj mat4), updated
 //     once per RenderSceneWithVP via queue.WriteBuffer.
 //   * Bind groups cached PER FRAME, keyed by texture pool ID. The cache
 //     clears in BeginFrame so a Texture2D::Destroy mid-session doesn't
 //     leave dangling TextureView refs in a stale bind group. Promoting to
-//     a permanent cache is a Stage 5+ optimisation — requires a
+//     a permanent cache is a later optimisation — requires a
 //     TextureManager-side eviction notification.
 //   * One render pass per RenderSceneWithVP call with LoadOp::Load — so a
 //     prior RenderApi::Clear's clear-only pass result is preserved. The
@@ -59,12 +56,12 @@
 //     BGRA8Unorm on Windows / Linux) and FBO targets (RGBA8Unorm) with
 //     two cached pipelines per session.
 //
-// Still pending (out of scope for Stage 4):
+// Still pending:
 //   * Particle / external instance contributors — RegisterInstanceContributor
-//     stays a stub (matches bgfx side until that hook is rebuilt).
+//     stays a stub until that hook is rebuilt.
 //   * Premultiplied-alpha and alpha-cutoff per-instance toggles — the WGSL
 //     sprite shader's fragment body is the simplest possible texel * color.
-//   * GpuTimer integration — Stage 6 once wgpu::QuerySet plumbs in.
+//   * GpuTimer integration — pending wgpu::QuerySet plumbing.
 // =============================================================================
 
 namespace Axiom {
@@ -115,6 +112,14 @@ namespace Axiom {
 			return outInstances.size();
 		}
 
+		// Persistent scratch for the rearranged output. We swap into the
+		// "live" g_*Scratch globals at the end so capacity moves between
+		// the live and scratch vectors — across calls capacity stabilises
+		// at the high-water mark, and the sort no longer allocates two
+		// fresh vectors per RenderSceneWithVP call.
+		std::vector<Instance44>    g_SortedInstScratch;
+		std::vector<TextureHandle> g_SortedTexScratch;
+
 		void SortInstancesInPlace(size_t n) {
 			if (n < 2) return;
 			g_SortIndexScratch.resize(n);
@@ -127,14 +132,15 @@ namespace Axiom {
 					if (ia.SortingOrder != ib.SortingOrder) return ia.SortingOrder < ib.SortingOrder;
 					return ia.DrawIndex < ib.DrawIndex;
 				});
-			std::vector<Instance44>    sortedInst(n);
-			std::vector<TextureHandle> sortedTex(n);
+
+			g_SortedInstScratch.resize(n);
+			g_SortedTexScratch.resize(n);
 			for (size_t k = 0; k < n; ++k) {
-				sortedInst[k] = g_InstancesScratch[g_SortIndexScratch[k]];
-				sortedTex[k]  = g_TexturesScratch[g_SortIndexScratch[k]];
+				g_SortedInstScratch[k] = g_InstancesScratch[g_SortIndexScratch[k]];
+				g_SortedTexScratch[k]  = g_TexturesScratch[g_SortIndexScratch[k]];
 			}
-			g_InstancesScratch.swap(sortedInst);
-			g_TexturesScratch.swap(sortedTex);
+			g_InstancesScratch.swap(g_SortedInstScratch);
+			g_TexturesScratch.swap(g_SortedTexScratch);
 		}
 
 		// ── GPU resource helpers ────────────────────────────────────────────
@@ -245,6 +251,35 @@ namespace Axiom {
 		// or explicit Texture2D::Destroy. A fresh per-frame build keeps the
 		// pool clean without needing a destroy-notification hook.
 		g_BindGroupsThisFrame.clear();
+
+		// Runtime auto-render path. Editors set SkipBeginFrameRender=true
+		// and drive RenderSceneWithVP themselves into per-panel FBOs; the
+		// runtime (Axiom-Runtime / Axiom-Launcher) leaves the flag false
+		// and expects BeginFrame to do the work against the swap chain.
+		// Without this, the Axiom-Runtime window stays whatever colour
+		// `g_ClearColor` defaulted to at Init and no SpriteRenderer2D
+		// quads ever appear — the symptom of the renderer's auto-path
+		// being a leftover stub from the bgfx era.
+		if (m_SkipBeginFrameRender) return;
+		if (!m_SceneProvider) return;
+
+		Camera2DComponent* cam = Camera2DComponent::Main();
+		if (!cam || !cam->IsValid()) return;
+
+		RenderApi::BindDefaultFramebuffer();
+
+		// Pull the per-frame clear colour from the active main camera so
+		// the runtime visually matches what the Game View panel shows in
+		// the editor (which threads the same camera's GetClearColor()
+		// into RenderSceneIntoFBO).
+		RenderApi::SetClearColor(cam->GetClearColor());
+		RenderApi::Clear(ClearFlags::Color | ClearFlags::Depth);
+
+		const glm::mat4 vp = cam->GetViewProjectionMatrix();
+		const AABB viewAABB = cam->GetViewportAABB();
+		m_SceneProvider([&](Scene& scene) {
+			RenderSceneWithVP(scene, vp, viewAABB);
+		});
 	}
 
 	void Renderer2D::EndFrame() {
@@ -253,11 +288,9 @@ namespace Axiom {
 	}
 
 	void Renderer2D::RenderScene(Scene& /*scene*/) {
-		// Touch-equivalent (bgfx-side uses bgfx::touch on the current view
-		// to make sure its clear runs even with no draws). For WebGPU the
-		// equivalent already happened in RenderApi::Clear (or will happen
-		// in Present's touch-fallback), so this is genuinely a no-op when
-		// no VP / no instances are available.
+		// Touch-equivalent already happened in RenderApi::Clear (or will
+		// happen in Present's touch-fallback), so this is genuinely a
+		// no-op when no VP / no instances are available.
 	}
 
 	void Renderer2D::RenderSceneWithVP(Scene& scene,
@@ -339,8 +372,8 @@ namespace Axiom {
 
 		// Group instances by resolved texture and issue one DrawIndexed
 		// per run with firstInstance offsetting into the same instance
-		// buffer — mirrors the bgfx-side batching but uses WebGPU's
-		// firstInstance parameter rather than per-batch buffer rebinding.
+		// buffer — uses WebGPU's firstInstance parameter rather than
+		// per-batch buffer rebinding.
 		const TextureHandle defaultTexture = TextureManager::GetDefaultTexture(DefaultTexture::Square);
 		auto resolveHandle = [&](TextureHandle h) {
 			return TextureManager::IsValid(h) ? h : defaultTexture;
@@ -385,9 +418,8 @@ namespace Axiom {
 	}
 
 	void Renderer2D::RenderScenes() {
-		// SceneProvider iteration mirrors the bgfx-side scaffolding — a
-		// no-op until SceneProvider is wired into the WebGPU renderer in a
-		// later stage.
+		// SceneProvider iteration scaffolding — a no-op until SceneProvider
+		// is wired into the WebGPU renderer in a later stage.
 	}
 
 	void Renderer2D::CollectAndRenderInstances(Scene& /*scene*/,

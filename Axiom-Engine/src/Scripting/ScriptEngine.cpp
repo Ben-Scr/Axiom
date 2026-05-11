@@ -378,6 +378,11 @@ namespace Axiom {
 		if (s_Initialized && s_Callbacks.RaiseUiEventDispatch) s_Callbacks.RaiseUiEventDispatch();
 	}
 
+	void ScriptEngine::RaiseWindowResize()
+	{
+		if (s_Initialized && s_Callbacks.RaiseWindowResize) s_Callbacks.RaiseWindowResize();
+	}
+
 	uint32_t ScriptEngine::CreateGameSystemInstance(const std::string& className, const std::string& sceneName)
 	{
 		if (!s_Initialized || !s_Callbacks.CreateGameSystemInstance) return 0;

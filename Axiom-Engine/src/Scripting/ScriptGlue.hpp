@@ -25,6 +25,30 @@ namespace Axiom {
 		int    (*Application_GetVsyncEnabled)();
 		void   (*Application_SetVsyncEnabled)(int enabled);
 
+		// ── Window ───────────────────────────────────────────────────
+		// Direct accessors for the engine's OS window (title bar, size,
+		// position, fullscreen state, focus). The C# `Axiom.Window` static
+		// class wraps these. Strings cross via the two-call buffer
+		// pattern; bools are int 1/0; Vector2Int comes back via two
+		// out-int pointers (same shape as Input_GetMousePosition's float
+		// pair) and goes in as two ints.
+		int    (*Window_GetWidth)();
+		int    (*Window_GetHeight)();
+		int    (*Window_GetTitleBuffer)(char* outBuffer, int capacity);
+		void   (*Window_SetTitle)(const char* title);
+		void   (*Window_Minimize)();
+		void   (*Window_Maximize)();
+		int    (*Window_IsMaximized)();
+		int    (*Window_IsFullScreen)();
+		void   (*Window_SetFullScreen)(int enabled);
+		void   (*Window_GetPosition)(int* outX, int* outY);
+		void   (*Window_SetPosition)(int x, int y);
+		void   (*Window_Focus)();
+		// Returns the primary monitor's video-mode dimensions. Used by
+		// `Window.ScreenCenter` to compute the desktop centre; mirrors
+		// `Window::GetScreenCenter()`'s engine-side data source.
+		void   (*Window_GetScreenSize)(int* outWidth, int* outHeight);
+
 		// ── Engine ───────────────────────────────────────────────────
 		// Build identity + GPU caps. Two-call buffer pattern for strings:
 		// pass (null, 0) to learn required size, then a sized buffer.
@@ -689,6 +713,13 @@ namespace Axiom {
 		int         (*GetInvokableMethodsBuffer)(const char* className, char* outBuffer, int capacity);
 		int         (*InvokeScriptMethodByName)(int32_t handle, const char* methodName,
 			uint8_t argKind, const char* argValue);
+
+		// ── Window events (appended for binary compat) ──
+		// Native Window::SetWindowResizedCallback routes the resize event
+		// through Application's dispatcher; the dispatcher fires this so
+		// `Axiom.Window.OnResize` subscribers run on the same frame the
+		// GLFW callback delivered the new framebuffer size.
+		void        (*RaiseWindowResize)();
 	};
 
 } // namespace Axiom

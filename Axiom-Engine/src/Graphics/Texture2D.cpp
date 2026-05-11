@@ -10,20 +10,16 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
 
+#include <cstring>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 // =============================================================================
-// Texture2D — WebGPU (Dawn) implementation. Stage 2 of the WebGPU port.
+// Texture2D — WebGPU (Dawn) implementation.
 // -----------------------------------------------------------------------------
-// Sibling to Texture2D.cpp (which is the bgfx implementation). Premake selects
-// this file under --rhi=webgpu and excludes Texture2D.cpp; under --rhi=bgfx
-// the opposite happens. Texture2D.hpp is shared between the two and stays
-// backend-neutral — it only owns an opaque `unsigned m_Tex` ID that each
-// backend interprets independently.
-//
-// On the WebGPU side, `m_Tex` is the raw WGPUTextureView pointer (cast to
-// uint64_t) for this texture, and indexes into a TU-local pool of
+// `m_Tex` is the raw WGPUTextureView pointer (cast to uint64_t) for this
+// texture, and indexes into a TU-local pool of
 //   { wgpu::Texture, wgpu::TextureView, wgpu::Sampler, width, height,
 //     filter, wrap-u, wrap-v }
 // keyed by that same pointer value. 0 stays reserved as the "unset"
@@ -34,8 +30,8 @@
 // imgui_impl_wgpu would reinterpret_cast and dereference as a pointer
 // (crashing with 0xC0000005 at addresses like 0x1, 0x2, ...).
 //
-// What this DOES (Stage 2):
-//   * Decodes file via stbi_load (same as bgfx impl), forces RGBA8.
+// What this DOES:
+//   * Decodes file via stbi_load, forces RGBA8.
 //   * Creates a 2D wgpu::Texture with TextureBinding | CopyDst usage so it
 //     can be sampled and uploaded into.
 //   * Uploads via wgpu::Queue::WriteTexture — one upload per Load(); no
@@ -48,12 +44,12 @@
 // What this does NOT do yet:
 //   * Mipmap chain. Mipmap-gen on Dawn is "render to each mip level" or
 //     "use a compute shader" — neither is in the engine yet. Single-mip
-//     uploads are correct for Stage 2's scope; Stage 4 (renderer ports)
-//     can revisit when actual scenes start needing minification quality.
-//   * sRGB. The bgfx side also defers this; same TODO.
+//     uploads are correct for now; revisit when actual scenes start
+//     needing minification quality.
+//   * sRGB. Deferred.
 //   * GetImageData. wgpu::Queue::OnSubmittedWorkDone + buffer readback is
 //     async; the only inline caller (editor thumbnail preview) is fine
-//     without it for now and returns nullptr like the bgfx impl.
+//     without it for now and returns nullptr.
 // =============================================================================
 
 namespace Axiom {
@@ -352,10 +348,10 @@ namespace Axiom {
 	}
 
 	// Renderer-side submit path is per-pipeline in WebGPU (BindGroup +
-	// SetPipeline before the draw); Texture2D::Submit is a no-op on this
-	// backend, matching the bgfx impl. The renderer ports (Stage 3+) call
-	// `WebGPUBackend::LookupTexture2D(m_Tex)` themselves at submit time
-	// to fetch the view + sampler for the active bind group.
+	// SetPipeline before the draw); Texture2D::Submit is a no-op. The
+	// renderers call `WebGPUBackend::LookupTexture2D(m_Tex)` themselves
+	// at submit time to fetch the view + sampler for the active bind
+	// group.
 	void Texture2D::Submit(uint8_t /*unit*/) const {}
 
 	// Sampler mutations rebuild the wgpu::Sampler on the pool entry — the
@@ -399,8 +395,27 @@ namespace Axiom {
 	std::unique_ptr<ImageData> Texture2D::GetImageData() const {
 		// Async-readback via Queue.OnSubmittedWorkDone + Buffer mapping is
 		// multi-frame; the inline editor thumbnail caller is fine without
-		// it for Stage 2. Same TODO as the bgfx impl.
+		// it for now. TODO.
 		return nullptr;
+	}
+
+	std::unique_ptr<ImageData> Texture2D::DecodeFileToCpu(const char* path,
+		bool flipVertical)
+	{
+		if (path == nullptr || *path == '\0') return nullptr;
+
+		stbi_set_flip_vertically_on_load(flipVertical);
+		int w = 0, h = 0, n = 0;
+		unsigned char* pixels = stbi_load(path, &w, &h, &n, 4);
+		stbi_set_flip_vertically_on_load(false);
+		if (!pixels) return nullptr;
+
+		const size_t byteCount = static_cast<size_t>(w) * static_cast<size_t>(h) * 4u;
+		std::vector<unsigned char> owned(byteCount);
+		std::memcpy(owned.data(), pixels, byteCount);
+		stbi_image_free(pixels);
+
+		return std::make_unique<ImageData>(w, h, std::move(owned));
 	}
 
 }  // namespace Axiom

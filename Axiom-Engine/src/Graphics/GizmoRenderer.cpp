@@ -15,17 +15,12 @@
 #include <unordered_map>
 
 // =============================================================================
-// GizmoRenderer2D — WebGPU (Dawn) implementation. Stage 7 of the WebGPU port.
+// GizmoRenderer2D — WebGPU (Dawn) implementation.
 // -----------------------------------------------------------------------------
-// Sibling to GizmoRenderer.cpp (the bgfx implementation). Public static API
-// in GizmoRenderer.hpp stays unchanged across backends; only the submit path
-// is replaced.
-//
 // CPU side (BuildGeometry — squares→4 edges, circles→N segments, lines
-// pass-through) is preserved verbatim from the bgfx version. GPU side
-// swaps bgfx's transient vertex buffer + line-list submit for a persistent
-// dynamic wgpu::Buffer + one wgpu::RenderPipeline (LineList topology) +
-// one render pass with LoadOp::Load.
+// pass-through) drives a persistent dynamic wgpu::Buffer + one
+// wgpu::RenderPipeline (LineList topology) + one render pass with
+// LoadOp::Load.
 //
 // All state is TU-local because GizmoRenderer2D is a fully static class
 // (single global instance). No per-`this` map needed.
@@ -70,8 +65,7 @@ namespace Axiom {
 				return static_cast<uint32_t>(v * 255.0f + 0.5f);
 			};
 			// WebGPU's Unorm8x4 vertex format decodes bytes in little-endian
-			// order as (r, g, b, a) → vec4 — matches the bgfx side's
-			// `r | (g<<8) | (b<<16) | (a<<24)` packing exactly.
+			// order as (r, g, b, a) → vec4.
 			return u8(c.r)
 				| (u8(c.g) << 8)
 				| (u8(c.b) << 16)
@@ -317,10 +311,9 @@ namespace Axiom {
 	void GizmoRenderer2D::OnResize(int /*w*/, int /*h*/) {}
 
 	void GizmoRenderer2D::BeginFrame(uint16_t viewId) {
-		// viewId is a bgfx-era concept (the editor passes its FBO's view-id);
-		// WebGPU has no equivalent — the active framebuffer is set by
-		// RenderApi::BindFramebuffer before this call. Stored for ABI but
-		// not consulted at submit time.
+		// viewId is unused under WebGPU — the active framebuffer is set
+		// by RenderApi::BindFramebuffer before this call. Stored for ABI
+		// but not consulted at submit time.
 		m_GizmoViewId = viewId;
 	}
 
@@ -334,8 +327,8 @@ namespace Axiom {
 	}
 
 	void GizmoRenderer2D::BuildGeometry(GizmoLayerMask layerMask) {
-		// CPU geometry build is backend-neutral — identical to the bgfx side.
-		// Squares fan into 4 edges; circles into N segments; lines pass-through.
+		// CPU geometry build — squares fan into 4 edges; circles into N
+		// segments; lines pass-through.
 		m_GizmoVertices.clear();
 
 		for (const Square& sq : Gizmo::s_Squares) {

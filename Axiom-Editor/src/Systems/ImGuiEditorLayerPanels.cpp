@@ -16,6 +16,7 @@
 #include "Packages/NuGetSource.hpp"
 #include "Project/AxiomProject.hpp"
 #include "Project/ProjectManager.hpp"
+#include "Project/SplashAssetResolve.hpp"
 #include "Scene/Scene.hpp"
 #include "Scene/SceneManager.hpp"
 #include "Scripting/ScriptDiscovery.hpp"
@@ -259,21 +260,16 @@ namespace Axiom {
 			};
 #pragma pack(pop)
 
+			// Pure CPU decode — we never need the pixels on the GPU, and
+			// Texture2D::GetImageData() is a stub that returns null under
+			// the current WebGPU backend (async readback isn't wired).
 			// flipVertical=false so we read pixels in the PNG's natural
-			// top-down order; we'll flip + BGRA-swizzle on the way into the
-			// DIB. generateMipmaps=false because we only need level 0.
-			Texture2D tex(imagePath.string().c_str(), Filter::Point,
-				Wrap::Clamp, Wrap::Clamp,
-				/*generateMipmaps*/ false,
-				/*srgb*/ false,
-				/*flipVertical*/ false);
-			if (!tex.IsValid()) {
-				return "failed to decode image";
-			}
-
-			std::unique_ptr<ImageData> img = tex.GetImageData();
+			// top-down order; we'll flip + BGRA-swizzle on the way into
+			// the DIB below.
+			std::unique_ptr<ImageData> img = Texture2D::DecodeFileToCpu(
+				imagePath.string().c_str(), /*flipVertical*/ false);
 			if (!img) {
-				return "failed to read decoded pixels";
+				return "failed to decode image";
 			}
 
 			const int width = img->Width;
@@ -1561,14 +1557,8 @@ namespace Axiom {
 				else {
 					std::string absPath = AssetRegistry::ResolvePath(pickedId);
 					if (!absPath.empty()) {
-						std::filesystem::path absFs(absPath);
-						std::filesystem::path assetsDir(project->AssetsDirectory);
-						if (absFs.string().find(assetsDir.string()) == 0) {
-							project->SplashScreen.ImagePath = std::filesystem::relative(absFs, assetsDir.parent_path()).string();
-						}
-						else {
-							project->SplashScreen.ImagePath = absFs.filename().string();
-						}
+						project->SplashScreen.ImagePath =
+							SplashAssetResolve::NormalizeForStorage(absPath, project);
 						changed = true;
 					}
 				}
@@ -1601,27 +1591,37 @@ namespace Axiom {
 					changed = true;
 				}
 
+				float fontColor[3] = {
+					project->SplashScreen.FontColorR,
+					project->SplashScreen.FontColorG,
+					project->SplashScreen.FontColorB,
+				};
+				if (ImGui::ColorEdit3("Font Color##Splash", fontColor)) {
+					project->SplashScreen.FontColorR = fontColor[0];
+					project->SplashScreen.FontColorG = fontColor[1];
+					project->SplashScreen.FontColorB = fontColor[2];
+					changed = true;
+				}
+				if (ImGui::DragFloat("Font Size##Splash", &project->SplashScreen.FontSize,
+						0.5f, 6.0f, 96.0f, "%.0f px")) {
+					if (project->SplashScreen.FontSize < 1.0f) project->SplashScreen.FontSize = 1.0f;
+					changed = true;
+				}
+
 				ImGui::Spacing();
 				ImGui::TextUnformatted("Image (optional, replaces default Axiom logo):");
 				if (project->SplashScreen.ImagePath.empty()) {
 					// Render the engine default logo as a placeholder so
 					// the user sees what'll ship. Same source the runtime
-					// splash falls back to (RuntimeSplashLayer's
-					// ResolveDefaultLogoPath uses
-					// `<AxiomAssets>/Textures/icon.png`).
-					const std::string root = Path::ResolveAxiomAssets("Textures");
-					std::string defaultLogoPath;
-					if (!root.empty()) {
-						const std::filesystem::path c = std::filesystem::path(root) / "icon.png";
-						if (std::filesystem::exists(c)) defaultLogoPath = c.string();
-					}
+					// splash falls back to.
+					const std::string defaultLogoPath = SplashAssetResolve::DefaultLogoPath();
 					if (!defaultLogoPath.empty()) {
 						TextureHandle h = TextureManager::LoadTexture(defaultLogoPath);
 						Texture2D* tex = TextureManager::GetTexture(h);
 						if (tex && tex->IsValid()) {
 							ImGui::Image(
 								static_cast<ImTextureID>(static_cast<intptr_t>(tex->GetHandle())),
-								ImVec2(48, 48), ImVec2(0, 1), ImVec2(1, 0));
+								ImVec2(48, 48));
 							ImGui::SameLine();
 						}
 					}
@@ -1637,7 +1637,7 @@ namespace Axiom {
 				}
 				if (BrowseAcceptImageDrop(k_ImageExts, [&](const std::string& dropped) {
 					project->SplashScreen.ImagePath =
-						ToProjectRelativeAssetPath(dropped, project->AssetsDirectory);
+						SplashAssetResolve::NormalizeForStorage(dropped, project);
 					changed = true;
 				})) {}
 				if (!project->SplashScreen.ImagePath.empty()) {
@@ -1666,15 +1666,8 @@ namespace Axiom {
 					else {
 						std::string absPath = AssetRegistry::ResolvePath(pickedId);
 						if (!absPath.empty()) {
-							std::filesystem::path absFs(absPath);
-							std::filesystem::path assetsDir(project->AssetsDirectory);
-							if (absFs.string().find(assetsDir.string()) == 0) {
-								project->SplashScreen.BackgroundImagePath =
-									std::filesystem::relative(absFs, assetsDir.parent_path()).string();
-							}
-							else {
-								project->SplashScreen.BackgroundImagePath = absFs.filename().string();
-							}
+							project->SplashScreen.BackgroundImagePath =
+								SplashAssetResolve::NormalizeForStorage(absPath, project);
 							changed = true;
 						}
 					}
@@ -1693,7 +1686,7 @@ namespace Axiom {
 				}
 				if (BrowseAcceptImageDrop(k_ImageExts, [&](const std::string& dropped) {
 					project->SplashScreen.BackgroundImagePath =
-						ToProjectRelativeAssetPath(dropped, project->AssetsDirectory);
+						SplashAssetResolve::NormalizeForStorage(dropped, project);
 					changed = true;
 				})) {}
 				if (!project->SplashScreen.BackgroundImagePath.empty()) {
@@ -1740,37 +1733,6 @@ namespace Axiom {
 
 			constexpr const char* k_AppIconPickerKey = "ProjectSettings.AppIcon";
 
-			// AppIconPath is stored as a project-relative path (e.g.
-			// "Assets/icon.png") so the project file stays portable, but
-			// TextureManager::ResolveTexturePath only searches CWD,
-			// engine AxiomAssets, and <exe>/Assets/Textures — none of
-			// which match a path-relative-to-project-root once the editor
-			// is launched from somewhere other than the project dir.
-			// Prepending project->RootDirectory turns it into a path the
-			// `File::Exists(rawPath)` first branch of ResolveTexturePath
-			// accepts.
-			auto resolveProjectRelative = [&](const std::string& rel) -> std::string {
-				std::filesystem::path p(rel);
-				if (p.is_absolute()) return rel;
-				return (std::filesystem::path(project->RootDirectory) / p).string();
-			};
-
-			// Engine-shipped default icon — `<axiomBin>/AxiomAssets/Textures/icon.png`.
-			// Same payload the runtime's splash falls back to (see
-			// `RuntimeSplashLayer::ResolveDefaultLogoPath`) and what gets
-			// embedded into the runtime exe's RT_GROUP_ICON resource at
-			// compile time. Presented as a placeholder thumbnail when the
-			// project hasn't picked its own icon, so the user sees
-			// exactly what their build would ship without any
-			// configuration.
-			auto resolveDefaultEngineIcon = []() -> std::string {
-				const std::string root = Path::ResolveAxiomAssets("Textures");
-				if (root.empty()) return {};
-				const std::filesystem::path candidate = std::filesystem::path(root) / "icon.png";
-				if (!std::filesystem::exists(candidate)) return {};
-				return candidate.string();
-			};
-
 			// Apply a pending picker selection from a previous frame.
 			//
 			// AppIconPath is the SHIPPED game's window icon (and what the
@@ -1791,26 +1753,21 @@ namespace Axiom {
 				else {
 					std::string absPath = AssetRegistry::ResolvePath(pickedId);
 					if (!absPath.empty()) {
-						std::filesystem::path absFs(absPath);
-						std::filesystem::path assetsDir(project->AssetsDirectory);
-						if (absFs.string().find(assetsDir.string()) == 0) {
-							project->AppIconPath = std::filesystem::relative(absFs, assetsDir.parent_path()).string();
-						}
-						else {
-							project->AppIconPath = absFs.filename().string();
-						}
+						project->AppIconPath =
+							SplashAssetResolve::NormalizeForStorage(absPath, project);
 						changed = true;
 					}
 				}
 			}
 
 			if (!project->AppIconPath.empty()) {
-				TextureHandle iconHandle = TextureManager::LoadTexture(resolveProjectRelative(project->AppIconPath));
+				TextureHandle iconHandle = TextureManager::LoadTexture(
+					SplashAssetResolve::Resolve(project->AppIconPath, project));
 				Texture2D* iconTex = TextureManager::GetTexture(iconHandle);
 				if (iconTex && iconTex->IsValid()) {
 					ImGui::Image(
 						static_cast<ImTextureID>(static_cast<intptr_t>(iconTex->GetHandle())),
-						ImVec2(64, 64), ImVec2(0, 1), ImVec2(1, 0));
+						ImVec2(64, 64));
 					ImGui::SameLine();
 				}
 				else {
@@ -1826,7 +1783,7 @@ namespace Axiom {
 				}
 				if (BrowseAcceptImageDrop(k_ImageExts, [&](const std::string& dropped) {
 					project->AppIconPath =
-						ToProjectRelativeAssetPath(dropped, project->AssetsDirectory);
+						SplashAssetResolve::NormalizeForStorage(dropped, project);
 					changed = true;
 				})) {}
 				ImGui::SameLine();
@@ -1845,14 +1802,14 @@ namespace Axiom {
 				// so the user sees what'll ship by default. Falls through to
 				// the disabled "No icon set" text only if AxiomAssets isn't
 				// installed (development environment without `Setup.bat`).
-				const std::string defaultIconPath = resolveDefaultEngineIcon();
+				const std::string defaultIconPath = SplashAssetResolve::DefaultLogoPath();
 				if (!defaultIconPath.empty()) {
 					TextureHandle defIconHandle = TextureManager::LoadTexture(defaultIconPath);
 					Texture2D* defIconTex = TextureManager::GetTexture(defIconHandle);
 					if (defIconTex && defIconTex->IsValid()) {
 						ImGui::Image(
 							static_cast<ImTextureID>(static_cast<intptr_t>(defIconTex->GetHandle())),
-							ImVec2(64, 64), ImVec2(0, 1), ImVec2(1, 0));
+							ImVec2(64, 64));
 						ImGui::SameLine();
 					}
 				}
@@ -1880,7 +1837,7 @@ namespace Axiom {
 				// icon, not the editor's window icon.
 				if (BrowseAcceptImageDrop(k_ImageExts, [&](const std::string& dropped) {
 					project->AppIconPath =
-						ToProjectRelativeAssetPath(dropped, project->AssetsDirectory);
+						SplashAssetResolve::NormalizeForStorage(dropped, project);
 					changed = true;
 				})) {}
 				ImGui::SameLine();
@@ -2003,75 +1960,8 @@ namespace Axiom {
 			ImGui::Unindent(8);
 		}
 
-		if (ImGui::CollapsingHeader("Global Systems", ImGuiTreeNodeFlags_DefaultOpen)) {
-			ImGui::Indent(8);
-			ImGui::SetNextItemWidth(-1);
-			ImGui::InputTextWithHint("##GlobalSystemSearch", "Search global systems...",
-				m_GlobalSystemSearchBuffer, sizeof(m_GlobalSystemSearchBuffer));
-
-			std::string filter(m_GlobalSystemSearchBuffer);
-			std::transform(filter.begin(), filter.end(), filter.begin(), ::tolower);
-
-			std::vector<EditorScriptDiscovery::ScriptEntry> scriptEntries;
-			EditorScriptDiscovery::CollectProjectScriptEntries(scriptEntries);
-
-			std::unordered_set<std::string> discoveredGlobalSystems;
-			for (const auto& scriptEntry : scriptEntries) {
-				if (!scriptEntry.IsGlobalSystem) {
-					continue;
-				}
-
-				discoveredGlobalSystems.insert(scriptEntry.ClassName);
-				if (!filter.empty()) {
-					std::string lowerClassName = EditorScriptDiscovery::ToLowerCopy(scriptEntry.ClassName);
-					std::string lowerPath = EditorScriptDiscovery::ToLowerCopy(scriptEntry.Path.string());
-					if (lowerClassName.find(filter) == std::string::npos
-						&& lowerPath.find(filter) == std::string::npos) {
-						continue;
-					}
-				}
-
-				auto it = std::find_if(project->GlobalSystems.begin(), project->GlobalSystems.end(),
-					[&](const AxiomProject::GlobalSystemRegistration& registration) {
-						return registration.ClassName == scriptEntry.ClassName;
-					});
-				bool active = it != project->GlobalSystems.end() ? it->Active : false;
-				if (ImGui::Checkbox(scriptEntry.ClassName.c_str(), &active)) {
-					if (it == project->GlobalSystems.end()) {
-						project->GlobalSystems.push_back({ scriptEntry.ClassName, active });
-					}
-					else {
-						it->Active = active;
-					}
-					changed = true;
-				}
-			}
-
-			for (auto& registration : project->GlobalSystems) {
-				if (discoveredGlobalSystems.contains(registration.ClassName)) {
-					continue;
-				}
-				bool active = registration.Active;
-				std::string label = registration.ClassName + " (missing)";
-				if (ImGui::Checkbox(label.c_str(), &active)) {
-					registration.Active = active;
-					changed = true;
-				}
-			}
-
-			ImGui::Unindent(8);
-		}
-
 		if (changed) {
 			project->Save();
-			std::vector<std::string> activeGlobalSystems;
-			for (const auto& registration : project->GlobalSystems) {
-				if (registration.Active && !registration.ClassName.empty()) {
-					activeGlobalSystems.push_back(registration.ClassName);
-				}
-			}
-			ScriptEngine::ShutdownGlobalSystems();
-			ScriptEngine::InitializeGlobalSystems(activeGlobalSystems);
 		}
 
 		// Render any reference picker popup opened from this panel
@@ -2135,43 +2025,114 @@ namespace Axiom {
 			ImGui::Unindent(8);
 		}
 
-		// Graphics — runtime rendering API selector. bgfx is the only
-		// supported render backend, so the only choice exposed here is
-		// which native API bgfx routes through at startup
+		// Graphics — runtime rendering API selector. The engine renders
+		// through WebGPU (Dawn); the choice exposed here is which native
+		// API Dawn routes through at adapter-request time
 		// (Auto/Vulkan/D3D11/D3D12/OpenGL). The selection is applied at
-		// bgfx::init, so it takes effect on the next editor / game launch.
+		// engine startup, so it takes effect on the next editor / game
+		// launch. NOTE: this value is persisted to axiom-project.json
+		// but not yet plumbed into WebGPUApi.cpp::RequestAdapterSync —
+		// wiring it through is a separate change.
 		if (ImGui::CollapsingHeader("Graphics", ImGuiTreeNodeFlags_DefaultOpen)) {
 			ImGui::Indent(8);
 
-			const char* const bgfxBackendLabels[] = {
+			const char* const backendLabels[] = {
 				"Auto (platform best)",
 				"Vulkan",
 				"Direct3D 11",
 				"Direct3D 12",
 				"OpenGL"
 			};
-			int bgfxBackendIndex = static_cast<int>(project->ActiveBgfxBackend);
+			int backendIndex = static_cast<int>(project->ActiveRenderBackend);
 			ImGui::SetNextItemWidth(220.0f);
-			if (ImGui::Combo("Rendering API", &bgfxBackendIndex,
-					bgfxBackendLabels, IM_ARRAYSIZE(bgfxBackendLabels))) {
-				project->ActiveBgfxBackend =
-					static_cast<AxiomProject::BgfxBackend>(bgfxBackendIndex);
+			if (ImGui::Combo("Rendering API", &backendIndex,
+					backendLabels, IM_ARRAYSIZE(backendLabels))) {
+				project->ActiveRenderBackend =
+					static_cast<AxiomProject::RenderBackend>(backendIndex);
 				changed = true;
 			}
 			if (ImGui::IsItemHovered()) {
 				ImGui::SetTooltip(
-					"Which native API bgfx uses at runtime. The choice is\n"
-					"applied at bgfx::init time, so the change only takes\n"
-					"effect after restarting the editor / built game.\n"
+					"Which native API Dawn (WebGPU) uses at runtime. The\n"
+					"choice is applied when the engine requests its GPU\n"
+					"adapter at startup, so the change only takes effect\n"
+					"after restarting the editor / built game.\n"
 					"\n"
-					"  • Auto: bgfx picks the most capable backend for the\n"
-					"    host platform (D3D11 on Windows, Metal on macOS,\n"
-					"    Vulkan/GL on Linux).\n"
+					"  • Auto: Dawn picks the most capable backend for\n"
+					"    the host platform (D3D12 on Windows, Metal on\n"
+					"    macOS, Vulkan on Linux).\n"
 					"  • Vulkan / D3D11 / D3D12 / OpenGL: explicit backend.\n"
 					"    Selecting one not supported by the host platform\n"
-					"    (e.g. D3D11 on Linux) makes bgfx::init fail at\n"
-					"    startup; the log line says exactly which backend\n"
-					"    was requested.");
+					"    (e.g. D3D12 on Linux) makes adapter-request fail\n"
+					"    at startup; the log line says exactly which\n"
+					"    backend was requested.");
+			}
+
+			ImGui::Unindent(8);
+		}
+
+		// Global Systems — managed (C#) GameSystems registered at the
+		// project scope (run for every loaded scene). Editor-side
+		// configuration, not a runtime knob: the toggle list drives
+		// ScriptEngine::InitializeGlobalSystems on edit so the editor's
+		// next play-mode session uses the new set without a restart.
+		bool globalSystemsChanged = false;
+		if (ImGui::CollapsingHeader("Global Systems", ImGuiTreeNodeFlags_DefaultOpen)) {
+			ImGui::Indent(8);
+			ImGui::SetNextItemWidth(-1);
+			ImGui::InputTextWithHint("##GlobalSystemSearch", "Search global systems...",
+				m_GlobalSystemSearchBuffer, sizeof(m_GlobalSystemSearchBuffer));
+
+			std::string filter(m_GlobalSystemSearchBuffer);
+			std::transform(filter.begin(), filter.end(), filter.begin(), ::tolower);
+
+			std::vector<EditorScriptDiscovery::ScriptEntry> scriptEntries;
+			EditorScriptDiscovery::CollectProjectScriptEntries(scriptEntries);
+
+			std::unordered_set<std::string> discoveredGlobalSystems;
+			for (const auto& scriptEntry : scriptEntries) {
+				if (!scriptEntry.IsGlobalSystem) {
+					continue;
+				}
+
+				discoveredGlobalSystems.insert(scriptEntry.ClassName);
+				if (!filter.empty()) {
+					std::string lowerClassName = EditorScriptDiscovery::ToLowerCopy(scriptEntry.ClassName);
+					std::string lowerPath = EditorScriptDiscovery::ToLowerCopy(scriptEntry.Path.string());
+					if (lowerClassName.find(filter) == std::string::npos
+						&& lowerPath.find(filter) == std::string::npos) {
+						continue;
+					}
+				}
+
+				auto it = std::find_if(project->GlobalSystems.begin(), project->GlobalSystems.end(),
+					[&](const AxiomProject::GlobalSystemRegistration& registration) {
+						return registration.ClassName == scriptEntry.ClassName;
+					});
+				bool active = it != project->GlobalSystems.end() ? it->Active : false;
+				if (ImGui::Checkbox(scriptEntry.ClassName.c_str(), &active)) {
+					if (it == project->GlobalSystems.end()) {
+						project->GlobalSystems.push_back({ scriptEntry.ClassName, active });
+					}
+					else {
+						it->Active = active;
+					}
+					changed = true;
+					globalSystemsChanged = true;
+				}
+			}
+
+			for (auto& registration : project->GlobalSystems) {
+				if (discoveredGlobalSystems.contains(registration.ClassName)) {
+					continue;
+				}
+				bool active = registration.Active;
+				std::string label = registration.ClassName + " (missing)";
+				if (ImGui::Checkbox(label.c_str(), &active)) {
+					registration.Active = active;
+					changed = true;
+					globalSystemsChanged = true;
+				}
 			}
 
 			ImGui::Unindent(8);
@@ -2179,6 +2140,16 @@ namespace Axiom {
 
 		if (changed) {
 			project->Save();
+			if (globalSystemsChanged) {
+				std::vector<std::string> activeGlobalSystems;
+				for (const auto& registration : project->GlobalSystems) {
+					if (registration.Active && !registration.ClassName.empty()) {
+						activeGlobalSystems.push_back(registration.ClassName);
+					}
+				}
+				ScriptEngine::ShutdownGlobalSystems();
+				ScriptEngine::InitializeGlobalSystems(activeGlobalSystems);
+			}
 		}
 
 		ImGui::End();
@@ -2203,36 +2174,25 @@ namespace Axiom {
 			m_SplashPreviewActive = true;
 			m_SplashPreviewElapsed = 0.0f;
 
-			// Resolve foreground + background paths the same way the
-			// runtime splash does so the preview matches the shipped
-			// game's behaviour. AppIconPath / SplashScreen.ImagePath
-			// are stored project-relative; prepend RootDirectory.
-			auto resolveProjectRelative = [&](const std::string& rel) -> std::string {
-				if (rel.empty()) return {};
-				std::filesystem::path p(rel);
-				if (p.is_absolute() && std::filesystem::exists(p)) return p.string();
-				std::filesystem::path projectRel = std::filesystem::path(project->RootDirectory) / p;
-				if (std::filesystem::exists(projectRel)) return projectRel.string();
-				std::filesystem::path assetsRel = std::filesystem::path(project->AssetsDirectory) / p.filename();
-				if (std::filesystem::exists(assetsRel)) return assetsRel.string();
-				return rel;
-			};
-
-			// Logo
-			std::string logoPath = resolveProjectRelative(project->SplashScreen.ImagePath);
+			// Logo — same resolution rules as the runtime splash so
+			// "Show Preview" matches what the build will ship: stored
+			// path (which may be an "axiom:Textures/…" reference to an
+			// engine-shipped asset, a project-relative "Assets/foo.png",
+			// or an absolute path) → SplashAssetResolve::Resolve, then
+			// fall back to the engine-shipped default logo when the
+			// project hasn't set one.
+			std::string logoPath = SplashAssetResolve::Resolve(
+				project->SplashScreen.ImagePath, project);
 			if (logoPath.empty()) {
-				const std::string axiomTexRoot = Path::ResolveAxiomAssets("Textures");
-				if (!axiomTexRoot.empty()) {
-					std::filesystem::path candidate = std::filesystem::path(axiomTexRoot) / "Axiom64.png";
-					if (std::filesystem::exists(candidate)) logoPath = candidate.string();
-				}
+				logoPath = SplashAssetResolve::DefaultLogoPath();
 			}
 			m_SplashPreviewLogo = logoPath.empty()
 				? TextureHandle::Invalid()
 				: TextureManager::LoadTexture(logoPath);
 
 			// Background
-			const std::string bgPath = resolveProjectRelative(project->SplashScreen.BackgroundImagePath);
+			const std::string bgPath = SplashAssetResolve::Resolve(
+				project->SplashScreen.BackgroundImagePath, project);
 			m_SplashPreviewBackground = bgPath.empty()
 				? TextureHandle::Invalid()
 				: TextureManager::LoadTexture(bgPath);
@@ -2321,7 +2281,7 @@ namespace Axiom {
 				draw->AddImage(
 					static_cast<ImTextureID>(static_cast<intptr_t>(bg->GetHandle())),
 					bgMin, bgMax,
-					ImVec2(0, 1), ImVec2(1, 0),
+					ImVec2(0, 0), ImVec2(1, 1),
 					packColor(1.0f, 1.0f, 1.0f, alpha));
 			}
 		}
@@ -2342,19 +2302,27 @@ namespace Axiom {
 				draw->AddImage(
 					static_cast<ImTextureID>(static_cast<intptr_t>(logo->GetHandle())),
 					imgMin, imgMax,
-					ImVec2(0, 1), ImVec2(1, 0),
+					ImVec2(0, 0), ImVec2(1, 1),
 					packColor(1.0f, 1.0f, 1.0f, alpha));
 			}
 		}
 
 		const std::string subtitle = project->SplashScreen.CustomText.empty()
-			? std::string("Axiom ") + AIM_VERSION
+			? SplashAssetResolve::DefaultSubtitleLine()
 			: project->SplashScreen.CustomText;
 		if (!subtitle.empty()) {
-			const ImVec2 textSize = ImGui::CalcTextSize(subtitle.c_str());
+			ImFont* font = ImGui::GetFont();
+			const float fontSize = (project->SplashScreen.FontSize > 0.0f)
+				? project->SplashScreen.FontSize : ImGui::GetFontSize();
+			const ImVec2 textSize = font->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, subtitle.c_str());
 			const ImVec2 textPos(centerX - textSize.x * 0.5f,
 				centerY + std::min(width, height) * 0.18f);
-			draw->AddText(textPos, packColor(1.0f, 1.0f, 1.0f, alpha * 0.85f), subtitle.c_str());
+			draw->AddText(font, fontSize, textPos,
+				packColor(project->SplashScreen.FontColorR,
+					project->SplashScreen.FontColorG,
+					project->SplashScreen.FontColorB,
+					alpha * 0.85f),
+				subtitle.c_str());
 		}
 	}
 

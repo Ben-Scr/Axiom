@@ -314,15 +314,15 @@ public class Entity : IEquatable<Entity>
     // Chains exactly like today's `entity.Transform.Position` — ref-returns are
     // lvalues, so `+= v` writes through to EnTT storage. Skips the per-frame
     // GetComponent<Transform2D>() class-wrapper alloc + dictionary lookup.
-    public unsafe ref Components.Transform2D TransformRef
+    public unsafe ref Components.NativeTransform2D TransformRef
     {
         get
         {
-            void* p = InternalCalls.Entity_GetComponentPtr(ID, Components.Transform2D.NativeName);
+            void* p = InternalCalls.Entity_GetComponentPtr(ID, Components.NativeTransform2D.NativeName);
             if (p == null)
                 throw new InvalidOperationException(
                     $"Entity {ID} has no Transform 2D component.");
-            return ref Unsafe.AsRef<Components.Transform2D>(p);
+            return ref Unsafe.AsRef<Components.NativeTransform2D>(p);
         }
     }
 

@@ -24,8 +24,8 @@ public class PlayerController : EntityScript
 
         if (velocity == Vector2.Zero) return;
 
-        // ECS ref-API: TransformRef returns `ref Transform2D` (the struct in
-        // Axiom.Components) pointing directly at this entity's slot in the
+        // ECS ref-API: TransformRef returns `ref NativeTransform2D` (the struct
+        // in Axiom.Components) pointing directly at this entity's slot in the
         // EnTT pool. The += writes through to native storage with zero
         // per-property P/Invoke. Writes go to LocalPosition because
         // TransformHierarchySystem recomputes world Position from it each

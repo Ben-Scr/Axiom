@@ -56,8 +56,8 @@ namespace Axiom {
 		// (valid range [0, 1]) considers behind the near plane and culls.
 		// A symmetric (-1, 1) range maps z=0 to NDC z=0 — inside [0, 1] for
 		// Vulkan AND inside [-1, 1] for OpenGL, so the matrix is portable
-		// across every backend bgfx supports without needing to branch on
-		// caps->homogeneousDepth here.
+		// across every backend the engine targets without needing to
+		// branch on homogeneous-depth here.
 		m_ProjMat = glm::ortho(-halfW, halfW, -halfH, halfH, -1.0f, 1.0f);
 	}
 

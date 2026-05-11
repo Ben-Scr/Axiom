@@ -181,6 +181,108 @@ namespace Axiom {
 		return requiredBytes;
 	}
 
+	// ── Window Bindings ─────────────────────────────────────────────────
+	// All Window_* thunks share the same null-window safety: if the
+	// engine hasn't created a window yet (early init / headless test
+	// host), getters return zero / empty and setters silently no-op.
+
+	static int Axiom_Window_GetWidth()
+	{
+		auto* window = Application::GetWindow();
+		return window ? window->GetWidth() : 0;
+	}
+
+	static int Axiom_Window_GetHeight()
+	{
+		auto* window = Application::GetWindow();
+		return window ? window->GetHeight() : 0;
+	}
+
+	// Two-call buffer pattern — see Axiom_Application_GetClipboardStringBuffer
+	// for the protocol. The thread-local s_StringReturnBuffer stages the
+	// value between the size-probe call and the copy call so the reported
+	// byte count matches what the second call writes.
+	static int Axiom_Window_GetTitleBuffer(char* outBuffer, int capacity)
+	{
+		auto* window = Application::GetWindow();
+		const std::string title = window ? window->GetTitle() : std::string{};
+		return CopyToManagedBuffer(title, outBuffer, capacity);
+	}
+
+	static void Axiom_Window_SetTitle(const char* title)
+	{
+		auto* window = Application::GetWindow();
+		if (!window) return;
+		window->SetTitle(title ? std::string(title) : std::string{});
+	}
+
+	static void Axiom_Window_Minimize()
+	{
+		auto* window = Application::GetWindow();
+		if (window) window->MinimizeWindow();
+	}
+
+	static void Axiom_Window_Maximize()
+	{
+		auto* window = Application::GetWindow();
+		if (window) window->MaximizeWindow();
+	}
+
+	static int Axiom_Window_IsMaximized()
+	{
+		auto* window = Application::GetWindow();
+		return (window && window->IsMaximized()) ? 1 : 0;
+	}
+
+	static int Axiom_Window_IsFullScreen()
+	{
+		auto* window = Application::GetWindow();
+		return (window && window->IsFullScreen()) ? 1 : 0;
+	}
+
+	static void Axiom_Window_SetFullScreen(int enabled)
+	{
+		auto* window = Application::GetWindow();
+		if (window) window->SetFullScreen(enabled != 0);
+	}
+
+	static void Axiom_Window_GetPosition(int* outX, int* outY)
+	{
+		auto* window = Application::GetWindow();
+		const Vec2Int pos = window ? window->GetPosition() : Vec2Int{ 0, 0 };
+		if (outX) *outX = pos.x;
+		if (outY) *outY = pos.y;
+	}
+
+	static void Axiom_Window_SetPosition(int x, int y)
+	{
+		auto* window = Application::GetWindow();
+		if (window) window->SetPosition(Vec2Int{ x, y });
+	}
+
+	static void Axiom_Window_Focus()
+	{
+		auto* window = Application::GetWindow();
+		if (window) window->Focus();
+	}
+
+	// Primary monitor's video-mode dimensions — Window.ScreenCenter
+	// derives its value from this (mirroring Window::GetScreenCenter on
+	// the engine side, which reads the same k_Videomode field).
+	static void Axiom_Window_GetScreenSize(int* outWidth, int* outHeight)
+	{
+		auto* window = Application::GetWindow();
+		int w = 0, h = 0;
+		if (window) {
+			if (const GLFWvidmode* mode = window->GetVideomode()) {
+				w = mode->width;
+				h = mode->height;
+			}
+		}
+		if (outWidth)  *outWidth  = w;
+		if (outHeight) *outHeight = h;
+	}
+
 	static int Axiom_Engine_GetVersionBuffer(char* outBuffer, int capacity)
 	{
 		return CopyToManagedBuffer(AIM_VERSION, outBuffer, capacity);
@@ -217,7 +319,7 @@ namespace Axiom {
 
 	static int Axiom_Engine_GetGraphicsApiBuffer(char* outBuffer, int capacity)
 	{
-		// Returns the version string set by the active backend (e.g. "bgfx Vulkan").
+		// Returns the version string set by the active backend.
 		// Empty until the renderer initializes.
 		return CopyToManagedBuffer(OpenGL::GetVersionString(), outBuffer, capacity);
 	}
@@ -381,6 +483,20 @@ namespace Axiom {
 		b.Application_SetClipboardString = &Axiom_Application_SetClipboardString;
 		b.Application_GetVsyncEnabled = &Axiom_Application_GetVsyncEnabled;
 		b.Application_SetVsyncEnabled = &Axiom_Application_SetVsyncEnabled;
+
+		b.Window_GetWidth = &Axiom_Window_GetWidth;
+		b.Window_GetHeight = &Axiom_Window_GetHeight;
+		b.Window_GetTitleBuffer = &Axiom_Window_GetTitleBuffer;
+		b.Window_SetTitle = &Axiom_Window_SetTitle;
+		b.Window_Minimize = &Axiom_Window_Minimize;
+		b.Window_Maximize = &Axiom_Window_Maximize;
+		b.Window_IsMaximized = &Axiom_Window_IsMaximized;
+		b.Window_IsFullScreen = &Axiom_Window_IsFullScreen;
+		b.Window_SetFullScreen = &Axiom_Window_SetFullScreen;
+		b.Window_GetPosition = &Axiom_Window_GetPosition;
+		b.Window_SetPosition = &Axiom_Window_SetPosition;
+		b.Window_Focus = &Axiom_Window_Focus;
+		b.Window_GetScreenSize = &Axiom_Window_GetScreenSize;
 
 		b.Engine_GetVersionBuffer = &Axiom_Engine_GetVersionBuffer;
 		b.Engine_GetVersionLongBuffer = &Axiom_Engine_GetVersionLongBuffer;

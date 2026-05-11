@@ -16,12 +16,9 @@
 #include <utility>
 
 // =============================================================================
-// Shader — WebGPU (Dawn) implementation. Stage 3 of the WebGPU port.
+// Shader — WebGPU (Dawn) implementation.
 // -----------------------------------------------------------------------------
-// Sibling to Shader.cpp (the bgfx implementation). Premake selects this file
-// under --rhi=webgpu and excludes Shader.cpp; the shared Shader.hpp keeps the
-// public API stable across both — `unsigned m_Program` is still an opaque ID
-// with 0 = invalid, callers just don't reach for a bgfx::ProgramHandle out of it.
+// `unsigned m_Program` is an opaque ID with 0 = invalid.
 //
 // Two ways a shader name comes in here:
 //   1. Built-in (sprite, gizmo, text, ...). Resolved via the static table
@@ -30,20 +27,19 @@
 //   2. User / project (.wgsl on disk). Path is the vsPath argument's stem —
 //      e.g. `AxiomAssets/Shaders/SpriteShader.vs` -> lookup
 //      `AxiomAssets/Shaders/webgpu/sprite.wgsl` first under the executable
-//      dir, then under the source tree. Same precedence as the bgfx side's
-//      .bin lookup, just a different on-disk format.
+//      dir, then under the source tree.
 //
 // Why one module per Shader (not vs+fs separately):
 // WGSL is multi-entry-point. The sprite module here has both `vs_main` and
 // `fs_main`; we don't pre-split it into two modules because Dawn's pipeline
 // creation takes (module, entry_point) per stage and can re-use the same
-// module across stages. The renderer side (Stage 4) knows the entry-point
-// names; this class only owns the module.
+// module across stages. The renderer side knows the entry-point names; this
+// class only owns the module.
 //
-// The Stage 4 renderer ports (Renderer2D, GuiRenderer, TextRenderer,
-// GizmoRenderer) will look up the wgpu::ShaderModule via
-// WebGPUBackend::LookupShader(m_Program) and feed it into a
-// wgpu::RenderPipeline along with the bind-group layout + target format.
+// The renderer ports (Renderer2D, GuiRenderer, TextRenderer, GizmoRenderer)
+// look up the wgpu::ShaderModule via WebGPUBackend::LookupShader(m_Program)
+// and feed it into a wgpu::RenderPipeline along with the bind-group layout
+// + target format.
 // =============================================================================
 
 namespace Axiom {
@@ -51,12 +47,11 @@ namespace Axiom {
 	namespace {
 		// ── Built-in WGSL registry ──────────────────────────────────────────
 		// Sprite shader — used by Renderer2D (world-space sprites) and
-		// GuiRenderer (screen-space UI quads). Mirrors the bgfx-side
-		// vs_sprite/fs_sprite semantics:
+		// GuiRenderer (screen-space UI quads):
 		//   * Vertex inputs: unit-quad position (loc 0) + 3 instance vec4s
 		//     (loc 1..3) carrying (Pos.xy, Scale.xy), (Color RGBA), and
-		//     (cos, sin, _, _) — packed identically to BgfxSpriteResources's
-		//     SpriteInstance / WebGPUSpriteResources's matching layout.
+		//     (cos, sin, _, _) — packed identically to
+		//     WebGPUSpriteResources's SpriteInstance layout.
 		//   * Bind group 0: { 0: u_ViewProj (mat4 uniform), 1: albedo
 		//     texture, 2: albedo sampler }. The matrix uses column-major
 		//     storage — matches how the engine's math layer pushes it.
@@ -195,11 +190,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 			std::string_view Name;
 			const char*      WGSL;
 		};
-		// Each entry maps a "name" (the stem of vsPath after stripping the
-		// "Shader" suffix and lowercasing — matches the bgfx ExtractName
-		// convention) to its embedded WGSL source. Stage 3 = sprite,
-		// Stage 6 = text, Stage 7 = gizmo. Future renderer ports register
-		// here as they land.
+		// Each entry maps a "name" (the stem of vsPath after stripping
+		// the "Shader" suffix and lowercasing) to its embedded WGSL
+		// source. Future renderer ports register here as they land.
 		constexpr BuiltIn k_BuiltIns[] = {
 			{ "sprite", k_SpriteWGSL },
 			{ "text",   k_TextWGSL   },
@@ -226,10 +219,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 			g_Shaders.erase(id);
 		}
 
-		// Stem extraction — matches Shader.cpp::ExtractName's behaviour so
-		// the same callers (BgfxSpriteResources / WebGPUSpriteResources /
-		// GizmoRenderer / TextRenderer) hit the same name regardless of
-		// backend. Strips path + extension, drops "Shader" suffix, lowercases.
+		// Stem extraction — strips path + extension, drops "Shader"
+		// suffix, lowercases. Callers (WebGPUSpriteResources /
+		// GizmoRenderer / TextRenderer) hit this to look up by name.
 		std::string ExtractName(const std::string& path) {
 			std::filesystem::path p(path);
 			std::string stem = p.stem().string();
@@ -305,9 +297,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
 	Shader::Shader(const std::string& vsPath, const std::string& /*fsPath*/) {
 		// vsPath / fsPath were the two-source-files convention from the
-		// OpenGL era and carried through to the bgfx side (which also
-		// extracts a stem and ignores fsPath). The WebGPU side does the
-		// same — one module covers both stages.
+		// OpenGL era. WebGPU collapses both stages into a single module,
+		// so fsPath is ignored and the stem is extracted from vsPath.
 		const std::string name = ExtractName(vsPath);
 
 		std::string wgslHolder;          // owns the on-disk source if loaded
@@ -373,12 +364,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 	}
 
 	Shader Shader::FromBinary(const std::string& binaryPath) {
-		// WebGPU has no pre-compiled binary format equivalent to bgfx's
-		// .bin (.wgsl is the canonical authoring format; SPIR-V via Tint
-		// is an option but the engine doesn't ship a SPIR-V build step).
-		// Treat the input as a stem and re-route through the regular
-		// Shader(vsPath, fsPath) constructor — matches the bgfx behaviour
-		// where FromBinary also re-derives the lookup from the stem.
+		// WebGPU has no pre-compiled binary format — .wgsl is the
+		// canonical authoring format (SPIR-V via Tint is an option but
+		// the engine doesn't ship a SPIR-V build step). Treat the input
+		// as a stem and re-route through the regular constructor.
 		return Shader{ binaryPath, binaryPath };
 	}
 
@@ -396,13 +385,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
 	void Shader::Submit() const {
 		// WebGPU binds shader modules via wgpu::RenderPipeline at
-		// pipeline-creation time, not per-draw. Renderers do that in
-		// Stage 4; Submit stays a no-op like the bgfx side.
+		// pipeline-creation time, not per-draw. Submit stays a no-op.
 	}
 
 	GLuint Shader::LoadAndCompile(GLenum /*type*/, const std::string& /*path*/) {
-		// Legacy single-stage helper from the OpenGL era — unused under
-		// both bgfx and WebGPU. Stub mirrors the bgfx impl.
+		// Legacy single-stage helper from the OpenGL era — unused.
 		return 0;
 	}
 

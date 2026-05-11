@@ -65,6 +65,15 @@ namespace Axiom::ReferencePicker {
 			// This counter tracks the last ImGui frame the popup actually
 			// rendered so subsequent calls in the same frame return early.
 			int LastRenderedFrame = -1;
+
+			// Deferred thumbnail discard. Set when the picker closes or
+			// reopens with new entries; processed at the start of the next
+			// RenderPopup frame. Inline discard is unsafe because ImGui's
+			// draw list for the current frame still references the cached
+			// textures via drawList->AddImage(ImTextureID=raw view ptr).
+			// Releasing them mid-frame leaves dangling pointers that crash
+			// imgui_impl_wgpu when it walks the draw data in OnPostRender.
+			bool DiscardPending = false;
 		};
 
 		PickerState s_State;
@@ -316,12 +325,16 @@ namespace Axiom::ReferencePicker {
 		s_State.Entries = std::move(entries);
 		s_State.Search[0] = '\0';
 		s_State.Style = style;
-		// Thumbnail style: drop any stale entries from the previous open so
-		// thumbnails refresh against the new entry list. The cache itself
-		// stays initialised so we don't pay the GL setup cost again.
+		// Thumbnail style: queue the previous open's stale entries for
+		// discard at the start of the next RenderPopup frame. We can't
+		// discard inline — if a panel earlier in this same frame already
+		// rendered the picker, its drawList->AddImage calls still
+		// reference those textures, and freeing them now would dangle
+		// the pointers (crashes imgui_impl_wgpu's draw walk). The cache
+		// itself stays initialised so we don't pay the setup cost again.
 		if (style == Style::Thumbnails) {
 			EnsureThumbnailCacheInitialized();
-			DiscardThumbnails();
+			s_State.DiscardPending = true;
 		}
 	}
 
@@ -342,15 +355,22 @@ namespace Axiom::ReferencePicker {
 		if (s_State.LastRenderedFrame == frame) return;
 		s_State.LastRenderedFrame = frame;
 
+		// Process any deferred thumbnail discard. Runs BEFORE we begin
+		// rendering this frame, so the prior frame's ImGui draw list
+		// (which referenced the cached texture pointers) has already
+		// been consumed by imgui_impl_wgpu — releasing the textures
+		// now is safe. See DiscardPending comment in PickerState.
+		if (s_State.DiscardPending) {
+			DiscardThumbnails();
+			s_State.DiscardPending = false;
+		}
+
 		// Mirror the SpriteRenderer texture picker's UX: a regular window
 		// (not a modal) with its own [X] close button. RequestOpen is the
 		// "appear this frame" pulse from OpenForFieldKey; IsOpen is the
 		// living visibility state ImGui::Begin reads + writes via the
-		// title-bar X. Once the window closes (user picked or clicked X),
-		// drop the thumbnail cache so we don't keep GPU memory tied up
-		// for textures the user is no longer browsing.
+		// title-bar X.
 		if (!s_State.IsOpen) {
-			if (s_State.ThumbnailsInitialized) DiscardThumbnails();
 			return;
 		}
 
@@ -374,7 +394,9 @@ namespace Axiom::ReferencePicker {
 			ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoDocking))
 		{
 			ImGui::End();
-			if (!s_State.IsOpen) DiscardThumbnails();
+			// Queue the thumbnail cache discard for the next frame —
+			// see DiscardPending comment for the crash this avoids.
+			if (!s_State.IsOpen) s_State.DiscardPending = true;
 			return;
 		}
 
@@ -585,7 +607,12 @@ namespace Axiom::ReferencePicker {
 		ImGui::EndChild();
 		ImGui::End();
 
-		if (!s_State.IsOpen) DiscardThumbnails();
+		// The user just clicked the title-bar [X] or picked an entry
+		// (applySelection sets IsOpen=false). The thumbnails they
+		// rendered this frame are still referenced by ImGui's draw
+		// list — defer the actual release to the next RenderPopup
+		// frame so imgui_impl_wgpu doesn't walk dangling pointers.
+		if (!s_State.IsOpen) s_State.DiscardPending = true;
 	}
 
 	bool DrawReferenceField(const char* label, const std::string& displayValue,

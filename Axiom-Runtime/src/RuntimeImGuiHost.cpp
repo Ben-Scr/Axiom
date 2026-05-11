@@ -34,11 +34,12 @@ namespace Axiom {
 		IMGUI_CHECKVERSION();
 		ImGui::CreateContext();
 
-		// Engine.dll has its own static-linked copy of ImGui under --rhi=bgfx
-		// (so it can host ImGuiImplBgfx alongside bgfx::init). Publish our
-		// context + allocators here so engine.dll's ImGui state can sync to
-		// our context on every backend entry point. See Axiom-Engine/src/
-		// Gui/ImGuiImplBgfx.cpp `SyncImGuiContextFromBridge`.
+		// Engine.dll has its own static-linked copy of ImGui (so it can
+		// host the ImGui WebGPU backend alongside wgpu::Device). Publish
+		// our context + allocators here so engine.dll's ImGui state can
+		// sync to our context on every backend entry point. See
+		// Axiom-Engine/src/Gui/ImGuiImplWebGPU.cpp
+		// `SyncImGuiContextFromBridge`.
 		{
 			ImGuiMemAllocFunc allocFn = nullptr;
 			ImGuiMemFreeFunc  freeFn  = nullptr;

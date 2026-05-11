@@ -275,6 +275,12 @@ internal static class ScriptInstanceManager
     }
 
     [UnmanagedCallersOnly]
+    public static void RaiseWindowResize()
+    {
+        Window.InvokeResize();
+    }
+
+    [UnmanagedCallersOnly]
     public static void RaiseKeyDown(int key)
     {
         KeyCode keyCode = (KeyCode)key;

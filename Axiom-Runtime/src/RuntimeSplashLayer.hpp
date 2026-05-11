@@ -40,6 +40,11 @@ namespace Axiom {
 		float m_BackgroundG = 0.05f;
 		float m_BackgroundB = 0.07f;
 
+		float m_FontColorR = 1.0f;
+		float m_FontColorG = 1.0f;
+		float m_FontColorB = 1.0f;
+		float m_FontSize = 16.0f;
+
 		std::string m_Subtitle;
 		TextureHandle m_Logo;
 		// Optional full-screen background image. Loaded from

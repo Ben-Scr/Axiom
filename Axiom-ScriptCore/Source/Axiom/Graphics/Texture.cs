@@ -77,9 +77,9 @@ public sealed class Texture : IEquatable<Texture>
     // `FromAssetUUID` would return for an absent user asset, so callers
     // already null-checking inspector-bound textures don't need a
     // separate path.
-    public static Texture? GetDefault(DefaultTexture which)
+    public static Texture? GetDefault(DefaultTexture defaultTexture)
     {
-        ulong assetId = InternalCalls.Texture_GetDefaultAssetUUID((byte)which);
+        ulong assetId = InternalCalls.Texture_GetDefaultAssetUUID((byte)defaultTexture);
         return FromAssetUUID(assetId);
     }
 

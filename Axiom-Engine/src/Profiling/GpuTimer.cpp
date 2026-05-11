@@ -2,13 +2,10 @@
 #include "Profiling/GpuTimer.hpp"
 
 // =============================================================================
-// GpuTimer — WebGPU stub. Stage 8 of the WebGPU port.
+// GpuTimer — WebGPU stub.
 // -----------------------------------------------------------------------------
-// Sibling to GpuTimer.cpp. Under bgfx, this class was already a thin wrapper
-// around `bgfx::getStats()` — bgfx ran a per-frame GPU timer internally and
-// exposed (gpuTimeBegin / gpuTimeEnd / gpuTimerFreq) values that GpuTimer
-// just converted to milliseconds. WebGPU has no equivalent built-in timer;
-// getting per-frame GPU times requires:
+// WebGPU has no built-in per-frame GPU timer; getting per-frame GPU times
+// requires:
 //
 //   1. Request the `wgpu::FeatureName::TimestampQuery` feature when the
 //      device is created (in WebGPUApi.cpp::RequestDeviceSync). Not all
@@ -28,15 +25,10 @@
 //      "read frame N's result during frame N+3" pattern the header
 //      documents).
 //
-// Stage 8 ships the stub: GpuTimer compiles cleanly under --rhi=webgpu so
-// the engine links, but it pushes no samples into the profiler's GPU
-// module — the panel renders "N/A", matching the documented behaviour
-// when no GPU timer is available (e.g. bgfx noop backend, hardware
-// without the timer extension). The full implementation is its own
-// substantial diff that touches every renderer's pass descriptor; doing
-// it as a fast-follow keeps Stage 8 scoped to "the engine links" rather
-// than "the engine links AND profiler shows real GPU times AND four
-// other files change."
+// For now this is a stub: GpuTimer compiles cleanly so the engine links,
+// but it pushes no samples into the profiler's GPU module — the panel
+// renders "N/A", matching the documented behaviour when no GPU timer is
+// available.
 //
 // To wire the real implementation later:
 //   * Add TimestampQuery to the requiredFeatures array in RequestDeviceSync,
@@ -66,17 +58,15 @@ namespace Axiom {
 	void GpuTimer::PollAndPublish() {
 #ifdef AXIOM_PROFILER_ENABLED
 		// No-op until wgpu::QuerySet timestamp plumbing lands (see file
-		// header). Profiler's GPU panel renders "N/A" — same path it takes
-		// when bgfx returns gpuTimerFreq=0 from a noop backend.
+		// header). Profiler's GPU panel renders "N/A".
 #endif
 	}
 
 	long long GpuTimer::QueryGpuMemoryMb() {
 		// WebGPU has no standard surface for reporting GPU memory usage.
 		// Dawn exposes some Vulkan/D3D12 stats via internal toggles but
-		// nothing portable across backends; returning -1 surfaces as
-		// "N/A" in the editor's stats overlay (same value the bgfx side
-		// returns when the adapter doesn't report gpuMemoryUsed).
+		// nothing portable; returning -1 surfaces as "N/A" in the
+		// editor's stats overlay.
 		return -1;
 	}
 

@@ -196,11 +196,14 @@ namespace Axiom::ImGuiUtils {
 		);
 		const ImVec2 imageMax = ImVec2(imageMin.x + drawWidth, imageMin.y + drawHeight);
 
-		drawList->AddImage(
-			(ImTextureID)(intptr_t)rendererId,
-			imageMin, imageMax,
-			ImVec2(0.0f, 1.0f), ImVec2(1.0f, 0.0f)
-		);
+		// Default UV (0..1) — TextureManager now loads sprite/UI textures
+		// in their natural top-down orientation (stb's default), so
+		// sampling with the default UV displays them right-side-up. The
+		// old (0,1)/(1,0) flip was the visual compensation for the
+		// previous flipVertical=true load path; it's been removed in
+		// lockstep with TextureManager.cpp.
+		drawList->AddImage((ImTextureID)(intptr_t)rendererId,
+			imageMin, imageMax);
 
 		ImGui::Dummy(ImVec2(previewSize, previewSize));
 	}

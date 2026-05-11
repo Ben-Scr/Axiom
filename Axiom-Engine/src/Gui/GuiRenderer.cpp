@@ -43,33 +43,31 @@
 #include <vector>
 
 // =============================================================================
-// GuiRenderer — WebGPU (Dawn) implementation. Stage 5 of the WebGPU port.
+// GuiRenderer — WebGPU (Dawn) implementation.
 // -----------------------------------------------------------------------------
-// Sibling to GuiRenderer.cpp. CPU-side collection (hierarchy walk, dropdown
-// popups, input-field overlays, mask-based clip resolve, sort by Layer/Order/
-// DrawIndex) is preserved verbatim from the bgfx implementation — only the
-// final submit replaces bgfx views + transient instance buffers with a single
-// wgpu::RenderPassEncoder + persistent instance VBO + per-batch SetScissorRect.
+// CPU-side collection (hierarchy walk, dropdown popups, input-field overlays,
+// mask-based clip resolve, sort by Layer/Order/DrawIndex) drives a single
+// wgpu::RenderPassEncoder + persistent instance VBO + per-batch
+// SetScissorRect.
 //
-// Stage 5 scope: image quads (RectTransform2D + ImageComponent), dropdown
-// option rows, circular slider geometry, input-field caret/selection overlays.
-// Text is NOT rendered in Stage 5 — the m_TextScratch collection still runs
-// for sort ordering, but the TextRenderer::RenderInstances call is a no-op
-// stub (Stage 6 lands the real text path). The visible result: every UI
+// Scope: image quads (RectTransform2D + ImageComponent), dropdown option
+// rows, circular slider geometry, input-field caret/selection overlays.
+// Text is NOT rendered yet — the m_TextScratch collection still runs for
+// sort ordering, but the TextRenderer::RenderInstances call is a no-op
+// stub (the real text path lands later). The visible result: every UI
 // widget shows its background + interactive elements, labels are blank.
 //
 // Per-GuiRenderer GPU state (instance buffer, uniform buffer, per-frame
 // bind-group cache) lives in a TU-local side table keyed by `this`. The
-// editor instantiates two GuiRenderers (Game View + Editor View FBOs), each
-// with its own state entry — same isolation the bgfx side gets via per-FBO
-// view-ids.
+// editor instantiates two GuiRenderers (Game View + Editor View FBOs),
+// each with its own state entry.
 // =============================================================================
 
 namespace Axiom {
 
 	namespace {
-		// ── Input field overlay helpers — copied from bgfx GuiRenderer.cpp ──
-		// Pure CPU, no backend deps. Same byte-walk + MeasureUpToByteUI logic
+		// ── Input field overlay helpers ─────────────────────────────────────
+		// Pure CPU, no backend deps. Byte-walk + MeasureUpToByteUI logic
 		// drives the caret/selection rect placement.
 
 		bool Utf8DecodeAt(std::string_view s, int idx, uint32_t& outCp, int& outLen) {
@@ -236,7 +234,14 @@ namespace Axiom {
 			// Keyed by Texture2D::GetHandle() (the raw WGPUTextureView pointer
 			// cast to uint64_t under WebGPU). Matches Renderer2D's per-frame
 			// cache shape so cache lookups are stable across renderer types.
+			// Persisted across multiple RenderScene calls within a single
+			// frame so the editor's two FBO renders (which both call
+			// RenderScene with the same loaded scenes' textures) don't pay
+			// CreateBindGroup twice per texture. LastClearFrameCount tracks
+			// when we last invalidated the cache; the per-frame counter
+			// flips on Application::GetTime().GetFrameCount() rolling over.
 			std::unordered_map<uint64_t, wgpu::BindGroup> BindGroupsThisFrame;
+			uint64_t LastClearFrameCount = static_cast<uint64_t>(-1);
 			std::vector<WebGPUSpriteResources::SpriteInstance> EncodedScratch;
 		};
 		std::unordered_map<const GuiRenderer*, GuiRendererWebGPUState> g_State;
@@ -887,7 +892,12 @@ namespace Axiom {
 			(void)tc;
 		}
 
-		// ── 5. Sort image instances ──────────────────────────────────
+		// ── 5. Sort image and text instances by unified key ──────────
+		// (SortingLayer, SortingOrder, DrawIndex). DrawIndex comes from
+		// the hierarchy walk above, so equal (layer, order) pairs fall
+		// back to hierarchy order — earlier-in-hierarchy renders behind
+		// later. We need BOTH lists sorted by the same key before the
+		// merge walk below interleaves their phases.
 		std::sort(m_InstancesScratch.begin(), m_InstancesScratch.end(),
 			[](const Instance44& a, const Instance44& b) {
 				if (a.SortingLayer != b.SortingLayer)
@@ -896,17 +906,36 @@ namespace Axiom {
 					return a.SortingOrder < b.SortingOrder;
 				return a.DrawIndex < b.DrawIndex;
 			});
+		std::sort(m_TextScratch.begin(), m_TextScratch.end(),
+			[](const TextDrawCmd& a, const TextDrawCmd& b) {
+				if (a.SortingLayer != b.SortingLayer)
+					return a.SortingLayer < b.SortingLayer;
+				if (a.SortingOrder != b.SortingOrder)
+					return a.SortingOrder < b.SortingOrder;
+				return a.DrawIndex < b.DrawIndex;
+			});
 
-		if (m_InstancesScratch.empty()) {
-			// No UI image quads this frame. Stage 5 has no text submit, so
-			// nothing else to do. Stage 6 will keep going here to flush the
-			// text spans.
+		if (m_InstancesScratch.empty() && m_TextScratch.empty()) {
 			return;
 		}
 
 		// ── WebGPU submit setup ──────────────────────────────────────
 		auto& state = GetState(this);
-		state.BindGroupsThisFrame.clear();
+		// Clear the bind-group cache only when we cross a frame boundary,
+		// not on every RenderScene call. The editor invokes RenderScene
+		// twice per frame (once per FBO) plus once per loaded scene, so
+		// per-call clearing forced CreateBindGroup to fire for each
+		// texture on every call — a ~Nx multiplier for texture-heavy UI.
+		// Per-frame clearing still releases the cache so a texture
+		// destroyed between frames can't be sampled via a zombie bind
+		// group: a Texture2D::Destroy mid-frame is caught by the
+		// IsValid() guard inside ResolveBindGroup, and any stale entry
+		// is dropped by the next frame's clear.
+		const uint64_t currentFrame = app ? app->GetTime().GetFrameCount() : state.LastClearFrameCount;
+		if (state.LastClearFrameCount != currentFrame) {
+			state.BindGroupsThisFrame.clear();
+			state.LastClearFrameCount = currentFrame;
+		}
 
 		auto target = WebGPUBackend::BeginRenderToCurrentTarget();
 		if (!target.Valid) return;
@@ -916,154 +945,202 @@ namespace Axiom {
 		wgpu::Queue  queue  = WebGPUBackend::GetQueue();
 		if (!device || !queue) return;
 
-		wgpu::RenderPipeline pipeline = WebGPUSpriteResources::GetSpritePipeline(
-			target.ColorFormat, target.HasDepth);
-		if (!pipeline) {
-			AIM_CORE_WARN_TAG("GuiRenderer",
-				"No pipeline for color-format {} hasDepth={} — UI not submitted",
-				static_cast<int>(target.ColorFormat), target.HasDepth);
-			return;
-		}
-
-		if (!EnsureUniformBuffer(device, state)) return;
-		queue.WriteBuffer(state.UniformBuffer, 0, glm::value_ptr(mvp), 64);
-
 		const size_t n = m_InstancesScratch.size();
-		if (!EnsureInstanceBuffer(device, state, static_cast<uint32_t>(n))) return;
+		wgpu::RenderPipeline pipeline;
+		if (n > 0) {
+			pipeline = WebGPUSpriteResources::GetSpritePipeline(
+				target.ColorFormat, target.HasDepth);
+			if (!pipeline) {
+				AIM_CORE_WARN_TAG("GuiRenderer",
+					"No pipeline for color-format {} hasDepth={} — image quads skipped",
+					static_cast<int>(target.ColorFormat), target.HasDepth);
+				// Don't return — text might still want to render below.
+			} else {
+				if (!EnsureUniformBuffer(device, state)) return;
+				queue.WriteBuffer(state.UniformBuffer, 0, glm::value_ptr(mvp), 64);
 
-		state.EncodedScratch.resize(n);
-		for (size_t k = 0; k < n; ++k) {
-			WebGPUSpriteResources::EncodeInstance44(m_InstancesScratch[k], state.EncodedScratch[k]);
+				if (!EnsureInstanceBuffer(device, state, static_cast<uint32_t>(n))) return;
+				state.EncodedScratch.resize(n);
+				for (size_t k = 0; k < n; ++k) {
+					WebGPUSpriteResources::EncodeInstance44(m_InstancesScratch[k], state.EncodedScratch[k]);
+				}
+				queue.WriteBuffer(state.InstanceBuffer, 0,
+					state.EncodedScratch.data(),
+					n * sizeof(WebGPUSpriteResources::SpriteInstance));
+			}
 		}
-		queue.WriteBuffer(state.InstanceBuffer, 0,
-			state.EncodedScratch.data(),
-			n * sizeof(WebGPUSpriteResources::SpriteInstance));
-
-		wgpu::CommandEncoder encoder = WebGPUBackend::GetFrameEncoder();
-		if (!encoder) return;
-
-		wgpu::RenderPassColorAttachment colorAtt{};
-		colorAtt.view       = target.ColorView;
-		colorAtt.loadOp     = wgpu::LoadOp::Load;
-		colorAtt.storeOp    = wgpu::StoreOp::Store;
-		colorAtt.depthSlice = wgpu::kDepthSliceUndefined;
-
-		wgpu::RenderPassDepthStencilAttachment depthAtt{};
-		if (target.HasDepth) {
-			depthAtt.view              = target.DepthView;
-			depthAtt.depthLoadOp       = wgpu::LoadOp::Load;
-			depthAtt.depthStoreOp      = wgpu::StoreOp::Store;
-			depthAtt.stencilLoadOp     = wgpu::LoadOp::Load;
-			depthAtt.stencilStoreOp    = wgpu::StoreOp::Store;
-		}
-
-		wgpu::RenderPassDescriptor passDesc{};
-		passDesc.label                  = "guirenderer-ui";
-		passDesc.colorAttachmentCount   = 1;
-		passDesc.colorAttachments       = &colorAtt;
-		passDesc.depthStencilAttachment = target.HasDepth ? &depthAtt : nullptr;
-
-		wgpu::RenderPassEncoder pass = encoder.BeginRenderPass(&passDesc);
-		pass.SetPipeline(pipeline);
-		pass.SetVertexBuffer(0, WebGPUSpriteResources::GetQuadVertexBuffer());
-		pass.SetVertexBuffer(1, state.InstanceBuffer);
-		pass.SetIndexBuffer(WebGPUSpriteResources::GetQuadIndexBuffer(),
-			wgpu::IndexFormat::Uint16);
-
-		// Default scissor = full attachment. Each batch with a clip rect
-		// overrides this; runs without a clip rect call SetScissorRect
-		// back to full so a prior clipped batch's rect doesn't leak.
-		pass.SetScissorRect(0, 0, target.Width, target.Height);
 
 		const TextureHandle defaultTexture = TextureManager::GetDefaultTexture(DefaultTexture::Square);
 		auto resolveHandle = [&](TextureHandle h) {
 			return TextureManager::IsValid(h) ? h : defaultTexture;
 		};
 
-		bool scissorIsFull = true;
-		size_t i = 0;
-		while (i < n) {
-			const TextureHandle runHandle = resolveHandle(m_InstancesScratch[i].TextureHandle);
-			const bool runHasClip = m_InstancesScratch[i].HasClip;
-			const Vec2 runClipMin = m_InstancesScratch[i].ClipMin;
-			const Vec2 runClipMax = m_InstancesScratch[i].ClipMax;
+		// ── Helper: submit one image-quad phase covering [start, end) ─
+		// Opens a fresh render pass — multiple phases per frame are how
+		// the merge walk interleaves image runs with text runs while
+		// still letting each phase batch by texture run-length.
+		auto submitImagePhase = [&](size_t start, size_t end) {
+			if (!pipeline || start >= end) return;
 
-			size_t runEnd = i + 1;
-			while (runEnd < n) {
-				const TextureHandle h = resolveHandle(m_InstancesScratch[runEnd].TextureHandle);
-				if (!(h.index == runHandle.index && h.generation == runHandle.generation)) break;
-				if (!ClipsEqual(runHasClip, runClipMin, runClipMax,
-					m_InstancesScratch[runEnd].HasClip,
-					m_InstancesScratch[runEnd].ClipMin,
-					m_InstancesScratch[runEnd].ClipMax)) break;
-				++runEnd;
-			}
-			const uint32_t count = static_cast<uint32_t>(runEnd - i);
+			wgpu::CommandEncoder enc = WebGPUBackend::GetFrameEncoder();
+			if (!enc) return;
 
-			wgpu::BindGroup bg = ResolveBindGroup(device, state, runHandle);
-			if (!bg) {
-				// Default texture also missing — skip the run. Same fallback
-				// the bgfx side takes when TextureManager has no live handle.
-				i = runEnd;
-				continue;
+			wgpu::RenderPassColorAttachment colorAtt{};
+			colorAtt.view       = target.ColorView;
+			colorAtt.loadOp     = wgpu::LoadOp::Load;
+			colorAtt.storeOp    = wgpu::StoreOp::Store;
+			colorAtt.depthSlice = wgpu::kDepthSliceUndefined;
+
+			wgpu::RenderPassDepthStencilAttachment depthAtt{};
+			if (target.HasDepth) {
+				depthAtt.view              = target.DepthView;
+				depthAtt.depthLoadOp       = wgpu::LoadOp::Load;
+				depthAtt.depthStoreOp      = wgpu::StoreOp::Store;
+				depthAtt.stencilLoadOp     = wgpu::LoadOp::Load;
+				depthAtt.stencilStoreOp    = wgpu::StoreOp::Store;
 			}
 
-			// Per-batch scissor: either project the clip rect or reset to
-			// full attachment if no clip applies.
-			if (runHasClip) {
-				const ScissorPx sc = ComputeScissor(mvp, runClipMin, runClipMax,
-					target.Width, target.Height);
-				if (sc.Valid) {
-					pass.SetScissorRect(sc.X, sc.Y, sc.W, sc.H);
-					scissorIsFull = false;
-				} else {
-					// Degenerate / fully-outside clip — skip the run rather
-					// than draw with the previous batch's scissor stuck.
+			wgpu::RenderPassDescriptor passDesc{};
+			passDesc.label                  = "guirenderer-ui";
+			passDesc.colorAttachmentCount   = 1;
+			passDesc.colorAttachments       = &colorAtt;
+			passDesc.depthStencilAttachment = target.HasDepth ? &depthAtt : nullptr;
+
+			wgpu::RenderPassEncoder pass = enc.BeginRenderPass(&passDesc);
+			pass.SetPipeline(pipeline);
+			pass.SetVertexBuffer(0, WebGPUSpriteResources::GetQuadVertexBuffer());
+			pass.SetVertexBuffer(1, state.InstanceBuffer);
+			pass.SetIndexBuffer(WebGPUSpriteResources::GetQuadIndexBuffer(),
+				wgpu::IndexFormat::Uint16);
+			pass.SetScissorRect(0, 0, target.Width, target.Height);
+
+			bool scissorIsFull = true;
+			size_t i = start;
+			while (i < end) {
+				const TextureHandle runHandle = resolveHandle(m_InstancesScratch[i].TextureHandle);
+				const bool runHasClip = m_InstancesScratch[i].HasClip;
+				const Vec2 runClipMin = m_InstancesScratch[i].ClipMin;
+				const Vec2 runClipMax = m_InstancesScratch[i].ClipMax;
+
+				size_t runEnd = i + 1;
+				while (runEnd < end) {
+					const TextureHandle h = resolveHandle(m_InstancesScratch[runEnd].TextureHandle);
+					if (!(h.index == runHandle.index && h.generation == runHandle.generation)) break;
+					if (!ClipsEqual(runHasClip, runClipMin, runClipMax,
+						m_InstancesScratch[runEnd].HasClip,
+						m_InstancesScratch[runEnd].ClipMin,
+						m_InstancesScratch[runEnd].ClipMax)) break;
+					++runEnd;
+				}
+				const uint32_t count = static_cast<uint32_t>(runEnd - i);
+
+				wgpu::BindGroup bg = ResolveBindGroup(device, state, runHandle);
+				if (!bg) {
 					i = runEnd;
 					continue;
 				}
-			} else if (!scissorIsFull) {
-				pass.SetScissorRect(0, 0, target.Width, target.Height);
-				scissorIsFull = true;
+
+				if (runHasClip) {
+					const ScissorPx sc = ComputeScissor(mvp, runClipMin, runClipMax,
+						target.Width, target.Height);
+					if (sc.Valid) {
+						pass.SetScissorRect(sc.X, sc.Y, sc.W, sc.H);
+						scissorIsFull = false;
+					} else {
+						i = runEnd;
+						continue;
+					}
+				} else if (!scissorIsFull) {
+					pass.SetScissorRect(0, 0, target.Width, target.Height);
+					scissorIsFull = true;
+				}
+
+				pass.SetBindGroup(0, bg);
+				pass.DrawIndexed(/*indexCount=*/6,
+					/*instanceCount=*/count,
+					/*firstIndex=*/0,
+					/*baseVertex=*/0,
+					/*firstInstance=*/static_cast<uint32_t>(i));
+
+				i = runEnd;
 			}
 
-			pass.SetBindGroup(0, bg);
-			pass.DrawIndexed(/*indexCount=*/6,
-				/*instanceCount=*/count,
-				/*firstIndex=*/0,
-				/*baseVertex=*/0,
-				/*firstInstance=*/static_cast<uint32_t>(i));
+			pass.End();
 
-			i = runEnd;
-		}
+			if (target.IsSwapChain) {
+				WebGPUBackend::MarkSwapChainRendered();
+			}
+		};
 
-		pass.End();
+		// ── Helper: submit one text phase covering [start, end) ──────
+		auto submitTextPhase = [&](size_t start, size_t end) {
+			if (!m_TextRenderer || !m_TextRenderer->IsInitialized() || start >= end) return;
+			std::span<const TextDrawCmd> sub(m_TextScratch.data() + start, end - start);
+			m_TextRenderer->RenderInstances(sub, mvp, /*viewId*/ 0xFFFFu, /*scissorCache*/ 0xFFFFu);
+		};
 
-		if (target.IsSwapChain) {
-			WebGPUBackend::MarkSwapChainRendered();
-		}
+		// ── Merge walk: interleave image / text phases ───────────────
+		// The hierarchy panel shows entities top-to-bottom in DrawIndex
+		// order, with later siblings drawn ON TOP. Splitting into
+		// "all images, then all text" passes broke that: text always
+		// painted last regardless of where the TextRenderer entity sat
+		// in the hierarchy. Walking the two pre-sorted lists in tandem
+		// produces a sequence of contiguous-same-type phases that
+		// preserves hierarchy order. Equal sort keys prefer images
+		// (`<=`) so a text + image at identical DrawIndex still has
+		// text behind, matching the design intent that text labels
+		// underneath an image overlay get covered.
+		auto imgKey = [&](size_t k) {
+			const auto& inst = m_InstancesScratch[k];
+			return std::make_tuple(inst.SortingLayer, inst.SortingOrder, inst.DrawIndex);
+		};
+		auto txtKey = [&](size_t k) {
+			const auto& cmd = m_TextScratch[k];
+			return std::make_tuple(cmd.SortingLayer, cmd.SortingOrder, cmd.DrawIndex);
+		};
 
-		// ── Text submission ─────────────────────────────────────────
-		// Stage 5: TextRenderer_WebGPU.cpp's RenderInstances is a no-op
-		// stub. The m_TextScratch collection ran above (kept for the
-		// hierarchy walk's side effects on m_DrawIndexByEntity) but the
-		// commands aren't sent. Stage 6 wires this back in with the real
-		// WebGPU text pipeline. The viewId / scissorCache parameters here
-		// are vestigial under WebGPU — the implementation ignores them.
-		if (m_TextRenderer && m_TextRenderer->IsInitialized() && !m_TextScratch.empty()) {
-			std::sort(m_TextScratch.begin(), m_TextScratch.end(),
-				[](const TextDrawCmd& a, const TextDrawCmd& b) {
-					if (a.SortingLayer != b.SortingLayer)
-						return a.SortingLayer < b.SortingLayer;
-					if (a.SortingOrder != b.SortingOrder)
-						return a.SortingOrder < b.SortingOrder;
-					return a.DrawIndex < b.DrawIndex;
-				});
-			m_TextRenderer->RenderInstances(
-				std::span<const TextDrawCmd>(m_TextScratch.data(), m_TextScratch.size()),
-				mvp,
-				/*viewId*/ 0xFFFFu,
-				/*scissorCache*/ 0xFFFFu);
+		const size_t nTxt = m_TextScratch.size();
+		size_t imgPos = 0;
+		size_t txtPos = 0;
+		bool   anyTextPhaseSubmitted = false;
+
+		while (imgPos < n || txtPos < nTxt) {
+			bool drawImage;
+			if (imgPos >= n)        drawImage = false;
+			else if (txtPos >= nTxt) drawImage = true;
+			else drawImage = imgKey(imgPos) <= txtKey(txtPos);
+
+			if (drawImage) {
+				size_t imgEnd = imgPos + 1;
+				while (imgEnd < n
+					&& (txtPos >= nTxt || imgKey(imgEnd) <= txtKey(txtPos)))
+				{
+					++imgEnd;
+				}
+				submitImagePhase(imgPos, imgEnd);
+				imgPos = imgEnd;
+			} else {
+				size_t txtEnd = txtPos + 1;
+				while (txtEnd < nTxt
+					&& (imgPos >= n || txtKey(txtEnd) < imgKey(imgPos)))
+				{
+					++txtEnd;
+				}
+				// Second-or-later text phase: flush so the earlier text
+				// pass's vertex buffer write isn't clobbered by this
+				// one's. TextRenderer reuses one vertex buffer per
+				// PerInstance and rewrites it via queue.WriteBuffer on
+				// every RenderInstances call — Dawn's uploader flushes
+				// all pending copies before user submits, so two
+				// recorded text passes without a submit between them
+				// both end up reading the second write's vertices.
+				if (anyTextPhaseSubmitted) {
+					WebGPUBackend::FlushCommands();
+				}
+				submitTextPhase(txtPos, txtEnd);
+				anyTextPhaseSubmitted = true;
+				txtPos = txtEnd;
+			}
 		}
 	}
 

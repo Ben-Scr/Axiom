@@ -64,6 +64,10 @@ namespace Axiom {
 		static void RaiseBeforeSceneUnloaded(const std::string& sceneName);
 		static void RaiseSceneUnloaded(const std::string& sceneName);
 		static void RaiseUiEventDispatch();
+		// Fired by Application::DispatchEvent on WindowResizeEvent — the
+		// managed `Axiom.Window.OnResize` event runs same-frame as GLFW's
+		// framebuffer-size callback.
+		static void RaiseWindowResize();
 
 		static uint32_t CreateGameSystemInstance(const std::string& className, const std::string& sceneName);
 		static void DestroyGameSystemInstance(uint32_t handle);

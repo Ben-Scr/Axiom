@@ -24,8 +24,8 @@ internal static class ComponentTypes
     // reachable through GetRef<T>.
     private static readonly Dictionary<Type, string> s_NativeNames = new()
     {
-        { typeof(Transform2D),    Transform2D.NativeName },
-        { typeof(SpriteRenderer), SpriteRenderer.NativeName },
+        { typeof(NativeTransform2D),    NativeTransform2D.NativeName },
+        { typeof(NativeSpriteRenderer), NativeSpriteRenderer.NativeName },
     };
 
     internal static string? TryGetNativeName(Type t)

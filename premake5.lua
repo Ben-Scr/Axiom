@@ -55,24 +55,9 @@ newoption
     description = "Strip the Axiom profiler entirely from the build. Without this flag, Tracy is compiled into the engine, AXIOM_PROFILER_ENABLED is defined for engine/editor/runtime, and the in-engine ImGui Profiler panel is available. Pass --no-profiler for shipped runtime builds with strict size budgets."
 }
 
--- Render-hardware-interface (RHI): WebGPU via Dawn, period.
---
--- The bgfx-era `--rhi` premake flag was retired on Stage 10 of the WebGPU
--- port (along with the bgfx submodules at External/bgfx, External/bx,
--- External/bimg and every Backend/Bgfx*.cpp / *_WebGPU.cpp sibling). The
--- engine has exactly one graphics backend now; the runtime D3D12/Vulkan/
--- Metal choice underneath Dawn is selected by Dawn itself based on the
--- adapter request in WebGPUApi.cpp::RequestAdapterSync.
---
--- AxiomRhi stays as a constant table so the few downstream consumers that
--- still consult `AxiomRhi.IsBgfx` / `AxiomRhi.IsWebGPU` resolve cleanly
--- without a coordinated rewrite. A future cleanup can delete the table
--- once those branches are pruned.
-AxiomRhi = {}
-AxiomRhi.Backend  = "webgpu"
-AxiomRhi.IsBgfx   = false
-AxiomRhi.IsWebGPU = true
-AxiomRhi.IsOpenGL = false  -- retired 2026-05
+-- The engine has exactly one graphics backend (WebGPU via Dawn); the
+-- runtime D3D12/Vulkan/Metal choice underneath Dawn is selected by Dawn
+-- itself based on the adapter request in WebGPUApi.cpp::RequestAdapterSync.
 
 -- Resolved early so subsequent dep-set wiring can branch on it. Default ON;
 -- explicit --no-profiler turns it off. The single boolean drives:
@@ -204,15 +189,8 @@ function UseAxiomEngineModuleDependencies()
 end
 
 -- Shared postbuild command: copy AxiomAssets into each target output
--- directory. The single source tree is `Axiom-Runtime/AxiomAssets/` —
--- it holds both the OpenGL `Shader/` (singular, .glsl) and bgfx
--- `Shaders/` (plural, .sc + compiled bin/<profile>/*.bin) trees so one
--- {COPYDIR} stages every render-backend's runtime payload next to the
--- consumer exe. Earlier layouts split the bgfx shaders into a
--- repo-root AxiomAssets/ alongside Axiom-Runtime/AxiomAssets/, which
--- meant a `--rhi=bgfx` build silently shipped without its shader
--- binaries; consolidating fixes that without needing a second copy
--- step.
+-- directory. The single source tree is `Axiom-Runtime/AxiomAssets/`,
+-- staged via one {COPYDIR} next to the consumer exe.
 CopyAxiomAssets = '{COPYDIR} "' .. path.join(ROOT_DIR, "Axiom-Runtime/AxiomAssets") .. '" "%{cfg.targetdir}/AxiomAssets"'
 
 -- Shared postbuild command: copy the engine SharedLib next to each consumer executable
@@ -227,10 +205,10 @@ CopyGlfwDll = '{COPYFILE} "' ..
     path.join(ROOT_DIR, "bin/" .. outputdir, "GLFW", "GLFW.dll") ..
     '" "%{cfg.targetdir}/GLFW.dll"'
 
--- Glad has been removed from the engine build (bgfx handles its own GL
--- context). CopyGladDll stays defined as a no-op so consumer postbuild
--- lists referencing it don't have to be edited in lockstep — the bgfx-
--- only cleanup (2026-05) leaves it as harmless noise.
+-- Glad has been removed from the engine build (the render backend
+-- handles its own GPU context). CopyGladDll stays defined as a no-op so
+-- consumer postbuild lists referencing it don't have to be edited in
+-- lockstep.
 CopyGladDll = ""
 
 -- Tracy is a SharedLib too (one client per process). Consumers ship the DLL.

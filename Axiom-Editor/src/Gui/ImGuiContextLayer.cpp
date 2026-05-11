@@ -19,11 +19,51 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <filesystem>
 
 namespace Axiom {
 	namespace {
 		constexpr const char* k_ImGuiIniFileName = "imgui.ini";
+
+		// Set by Reset/Load preset paths; consumed at the very start
+		// of the next OnPreRender, BEFORE NewFrame. ImGui's mid-frame
+		// ClearIniSettings + LoadIniSettingsFromDisk fights the dock
+		// context: dock nodes touched earlier in the frame (notably
+		// the dockspace's own root, which was bound during
+		// RenderDockspaceRoot) don't get properly re-attached when
+		// the new dock tree is built, leaving every dockable window
+		// visually floating. Deferring the reload to the start of
+		// the next frame side-steps that — by then EndFrame has
+		// torn down per-frame dock state, so Clear + Load gets a
+		// clean slate to apply the tree into and Begin() picks up
+		// the new DockId on each window's first call this frame.
+		std::string s_PendingLayoutReloadPath;
+
+		// Defensive DockId sync. ImGui's docking branch has a state
+		// divergence we've reproduced: window->DockNode can stay
+		// pointing at a live dock node while window->DockId gets
+		// cleared to 0 (we've observed it specifically for Inspector
+		// / Settings / Debug Info, which are submitted from overlay
+		// layers running after the dockspace's host window; suspect
+		// the path is one of BeginDocked's undock branches that
+		// clears DockId without nulling DockNode in this particular
+		// submission order). WindowSettingsHandler_WriteAll reads
+		// window->DockId verbatim, so in the diverged state the ini
+		// gets a [Window] section with no DockId= line — the next
+		// launch loads it as floating. Force the two back into sync
+		// from the live DockNode pointer right before each save.
+		void SyncDockIdsFromLiveNodes() {
+			ImGuiContext* ctx = ImGui::GetCurrentContext();
+			if (ctx == nullptr) return;
+			for (int n = 0; n < ctx->Windows.Size; n++) {
+				ImGuiWindow* window = ctx->Windows[n];
+				if (window->DockNode != nullptr &&
+					window->DockId != window->DockNode->ID) {
+					window->DockId = window->DockNode->ID;
+				}
+			}
+		}
 
 		std::filesystem::path GetCanonicalFileIfExists(const std::filesystem::path& path) {
 			std::error_code ec;
@@ -89,6 +129,23 @@ namespace Axiom {
 
 			return userIniFile.make_preferred().string();
 		}
+
+		std::filesystem::path GetLayoutPresetsDirectory() {
+			// Co-located with the live imgui.ini so a user nuking
+			// %LOCALAPPDATA%\Axiom\Editor for a clean-slate test wipes
+			// presets in the same gesture (matches user expectation:
+			// "I reset the editor → all my layout state went with it").
+			try {
+				return std::filesystem::path(Path::GetSpecialFolderPath(SpecialFolder::LocalAppData))
+					/ "Axiom" / "Editor" / "Layouts";
+			} catch (...) {
+				return std::filesystem::path("Layouts");
+			}
+		}
+
+		std::filesystem::path GetLayoutPresetPath(const std::string& name) {
+			return GetLayoutPresetsDirectory() / (name + ".ini");
+		}
 	}
 
 	void ImGuiContextLayer::OnAttach(Application& app) {
@@ -135,6 +192,16 @@ namespace Axiom {
 		// (ImGui only re-evaluates layout state on widget completion,
 		// not on every mouse move).
 		io.IniSavingRate = 1.0f;
+		// Enable docking BEFORE LoadIniSettingsFromDisk. The ini's
+		// [Docking][Data] section parses its dock-node tree through
+		// the SettingsHandler that's only registered when the docking
+		// config flag is set. Loading first leaves every window's
+		// saved DockId orphaned — the windows fall back to floating
+		// placement and the next save scrubs the [Docking][Data]
+		// section, silently destroying the persisted layout. This
+		// must run before the load below; the rest of the docking-
+		// adjacent config (resize grips, etc.) can stay where it is.
+		io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
 		// Belt-and-suspenders load. ImGui's NewFrame would auto-load
 		// on the first frame anyway, but doing it explicitly here
 		// (a) makes it easy to confirm via the log whether the file
@@ -155,7 +222,6 @@ namespace Axiom {
 			m_IniFilePath,
 			iniFileExists ? "loaded" : "missing — defaults will be used",
 			iniFileSize);
-		io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
 		// Edge-resize left at default (true). Forcing it false combined with the
 		// transparent ResizeGrip colors below made undocked floating windows
 		// effectively non-resizable.
@@ -226,6 +292,7 @@ namespace Axiom {
 		// produced a file).
 		const ImGuiIO& io = ImGui::GetIO();
 		if (io.IniFilename != nullptr && *io.IniFilename != '\0') {
+			SyncDockIdsFromLiveNodes();
 			ImGui::SaveIniSettingsToDisk(io.IniFilename);
 			std::error_code ec;
 			const bool exists = std::filesystem::is_regular_file(io.IniFilename, ec);
@@ -248,6 +315,29 @@ namespace Axiom {
 		if (!m_IsInitialized) {
 			return;
 		}
+
+		// Consume pending Reset / Load-preset request BEFORE NewFrame.
+		// The previous frame's EndFrame has already torn down per-
+		// frame dock state, so ClearIniSettings + LoadIniSettings here
+		// gets to populate the dock context cleanly; the panels that
+		// Begin() later in this frame then pick up their new DockId
+		// on first use and attach into the freshly-built tree.
+		if (!s_PendingLayoutReloadPath.empty()) {
+			const std::string path = std::move(s_PendingLayoutReloadPath);
+			s_PendingLayoutReloadPath.clear();
+			ImGui::ClearIniSettings();
+			ImGui::LoadIniSettingsFromDisk(path.c_str());
+			// LoadIniSettingsFromDisk silently flips WantSaveIniSettings
+			// off; suppress the next periodic-save trigger so it doesn't
+			// immediately re-save the freshly-loaded state (which would
+			// also reset our save-timer baseline to "right now," masking
+			// real subsequent dirty events).
+			ImGui::GetIO().WantSaveIniSettings = false;
+			m_LastSaveTime = std::chrono::steady_clock::now();
+			AIM_CORE_INFO_TAG("ImGui",
+				"Applied deferred layout reload from '{}'.", path);
+		}
+
 		ImGuiImplWebGPU::NewFrame();
 		ImGui_ImplGlfw_NewFrame();
 		ImGui::NewFrame();
@@ -259,9 +349,9 @@ namespace Axiom {
 			return;
 		}
 		ImGui::Render();
-		// viewId is vestigial on WebGPU (preserved for ABI parity with the
-		// bgfx-era signature). ImGuiImplWebGPU::RenderDrawData uses whatever
-		// framebuffer RenderApi::BindFramebuffer last bound.
+		// viewId is vestigial on WebGPU (preserved in the API signature
+		// for ABI stability). ImGuiImplWebGPU::RenderDrawData uses
+		// whatever framebuffer RenderApi::BindFramebuffer last bound.
 		ImGuiImplWebGPU::RenderDrawData(ImGui::GetDrawData(), /*viewId*/ 0xFFFFu);
 
 		// Belt-and-suspenders settings flush — runs after ImGui::Render
@@ -297,6 +387,7 @@ namespace Axiom {
 			|| secondsSinceSave >= k_PeriodicSaveSeconds;
 		if (!shouldSave) return;
 
+		SyncDockIdsFromLiveNodes();
 		ImGui::SaveIniSettingsToDisk(io.IniFilename);
 		io.WantSaveIniSettings = false;
 		m_LastSaveTime = now;
@@ -321,11 +412,153 @@ namespace Axiom {
 		if (type == EventType::WindowLostFocus || type == EventType::WindowClose) {
 			ImGuiIO& io = ImGui::GetIO();
 			if (io.IniFilename != nullptr && *io.IniFilename != '\0') {
+				SyncDockIdsFromLiveNodes();
 				ImGui::SaveIniSettingsToDisk(io.IniFilename);
 				io.WantSaveIniSettings = false;
 				m_LastSaveTime = std::chrono::steady_clock::now();
 			}
 		}
+	}
+
+	bool ImGuiContextLayer::IsValidLayoutPresetName(const std::string& name) {
+		if (name.empty() || name.size() > 64) return false;
+		if (name == "." || name == "..") return false;
+		// Reject every char that's illegal in a Windows filename OR
+		// would let the name escape its directory. We're stricter than
+		// strictly necessary on POSIX so a preset authored on Windows
+		// keeps the same name verbatim if the user ever moves their
+		// %LOCALAPPDATA% snapshot to a Linux build.
+		for (char c : name) {
+			if (c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' ||
+				c == '"' || c == '<' || c == '>' || c == '|') {
+				return false;
+			}
+			// Reject control chars; they're never typed deliberately and
+			// produce filenames that can't be displayed in the menu.
+			if (static_cast<unsigned char>(c) < 0x20) return false;
+		}
+		// Trailing dot / space → Windows silently strips on save, then
+		// the next ListLayoutPresets() won't find the file the user
+		// just "saved". Easier to refuse up front.
+		if (name.back() == ' ' || name.back() == '.') return false;
+		return true;
+	}
+
+	std::vector<std::string> ImGuiContextLayer::ListLayoutPresets() {
+		std::vector<std::string> result;
+		const std::filesystem::path dir = GetLayoutPresetsDirectory();
+		std::error_code ec;
+		if (!std::filesystem::is_directory(dir, ec)) {
+			return result;
+		}
+		for (std::filesystem::directory_iterator it(dir, ec), end; it != end && !ec; it.increment(ec)) {
+			const std::filesystem::directory_entry& entry = *it;
+			std::error_code ec2;
+			if (!entry.is_regular_file(ec2) || ec2) continue;
+			const std::filesystem::path& p = entry.path();
+			if (p.extension() != ".ini") continue;
+			result.push_back(p.stem().string());
+		}
+		std::sort(result.begin(), result.end(), [](const std::string& a, const std::string& b) {
+			// Case-insensitive sort so "MyLayout" and "mylayout" land
+			// next to each other in the menu rather than splitting by
+			// ASCII codepoint.
+			return std::lexicographical_compare(a.begin(), a.end(), b.begin(), b.end(),
+				[](char x, char y) { return std::tolower((unsigned char)x) < std::tolower((unsigned char)y); });
+		});
+		return result;
+	}
+
+	bool ImGuiContextLayer::SaveLayoutPreset(const std::string& name) {
+		if (!IsValidLayoutPresetName(name)) {
+			AIM_CORE_WARN_TAG("ImGui",
+				"SaveLayoutPreset: rejected invalid preset name '{}'.", name);
+			return false;
+		}
+		const std::filesystem::path dir = GetLayoutPresetsDirectory();
+		std::error_code ec;
+		std::filesystem::create_directories(dir, ec);
+		if (ec) {
+			AIM_CORE_WARN_TAG("ImGui",
+				"SaveLayoutPreset: failed to create presets directory '{}': {}",
+				dir.string(), ec.message());
+			return false;
+		}
+		const std::filesystem::path presetPath = GetLayoutPresetPath(name);
+		ImGui::SaveIniSettingsToDisk(presetPath.string().c_str());
+		ec.clear();
+		const bool exists = std::filesystem::is_regular_file(presetPath, ec);
+		if (!exists) {
+			AIM_CORE_WARN_TAG("ImGui",
+				"SaveLayoutPreset: write failed (path not writable?): '{}'",
+				presetPath.string());
+			return false;
+		}
+		AIM_CORE_INFO_TAG("ImGui", "Saved layout preset '{}' → {}",
+			name, presetPath.string());
+		return true;
+	}
+
+	bool ImGuiContextLayer::LoadLayoutPreset(const std::string& name) {
+		if (!IsValidLayoutPresetName(name)) {
+			AIM_CORE_WARN_TAG("ImGui",
+				"LoadLayoutPreset: rejected invalid preset name '{}'.", name);
+			return false;
+		}
+		const std::filesystem::path presetPath = GetLayoutPresetPath(name);
+		std::error_code ec;
+		if (!std::filesystem::is_regular_file(presetPath, ec)) {
+			AIM_CORE_WARN_TAG("ImGui",
+				"LoadLayoutPreset: preset file not found at '{}'.",
+				presetPath.string());
+			return false;
+		}
+		ImGuiIO& io = ImGui::GetIO();
+		if (io.IniFilename == nullptr || *io.IniFilename == '\0') {
+			AIM_CORE_WARN_TAG("ImGui",
+				"LoadLayoutPreset: no IniFilename set; ignoring.");
+			return false;
+		}
+		// Persist the preset content to the user's imgui.ini path
+		// immediately (so a hard quit between this call and the
+		// deferred reload doesn't lose the choice), then queue the
+		// in-context reload for the start of the next frame. See the
+		// long comment on s_PendingLayoutReloadPath for the timing
+		// reason — calling ClearIniSettings + LoadIniSettingsFromDisk
+		// mid-frame leaves dockable windows floating.
+		std::filesystem::copy_file(presetPath, io.IniFilename,
+			std::filesystem::copy_options::overwrite_existing, ec);
+		if (ec) {
+			AIM_CORE_WARN_TAG("ImGui",
+				"LoadLayoutPreset: failed to copy preset to user ini: {}",
+				ec.message());
+			return false;
+		}
+		s_PendingLayoutReloadPath = io.IniFilename;
+		AIM_CORE_INFO_TAG("ImGui",
+			"Queued layout preset '{}' for reload from {}",
+			name, presetPath.string());
+		return true;
+	}
+
+	bool ImGuiContextLayer::DeleteLayoutPreset(const std::string& name) {
+		if (!IsValidLayoutPresetName(name)) {
+			AIM_CORE_WARN_TAG("ImGui",
+				"DeleteLayoutPreset: rejected invalid preset name '{}'.", name);
+			return false;
+		}
+		const std::filesystem::path presetPath = GetLayoutPresetPath(name);
+		std::error_code ec;
+		const bool removed = std::filesystem::remove(presetPath, ec) && !ec;
+		if (!removed) {
+			AIM_CORE_WARN_TAG("ImGui",
+				"DeleteLayoutPreset: remove failed for '{}': {}",
+				presetPath.string(), ec ? ec.message() : "file did not exist");
+			return false;
+		}
+		AIM_CORE_INFO_TAG("ImGui", "Deleted layout preset '{}' ({})",
+			name, presetPath.string());
+		return true;
 	}
 
 	void ImGuiContextLayer::ResetLayoutToBundledDefault() {
@@ -344,22 +577,24 @@ namespace Axiom {
 			return;
 		}
 
-		// ClearIniSettings drops the in-memory settings tree (windows, dock
-		// nodes, tables) so LoadIniSettingsFromDisk below replaces rather
-		// than merges. Without the clear, stale dock-tree fragments from the
-		// previous layout survive and produce a half-applied reset.
-		ImGui::ClearIniSettings();
-		ImGui::LoadIniSettingsFromDisk(defaultIniFile.string().c_str());
-
-		// Persist to user path so the reset survives the next launch
-		// (otherwise the next periodic flush would re-save the
-		// previous layout, since the in-memory state hasn't been
-		// re-marked dirty by user input).
-		ImGui::SaveIniSettingsToDisk(io.IniFilename);
-		io.WantSaveIniSettings = false;
+		// Copy bundled → user ini eagerly so the new layout survives a
+		// crash between this call and the deferred reload, then queue
+		// the in-context reload. See s_PendingLayoutReloadPath for why
+		// mid-frame ClearIniSettings + LoadIniSettingsFromDisk produced
+		// the "everything floats" symptom.
+		std::error_code ec;
+		std::filesystem::copy_file(defaultIniFile, io.IniFilename,
+			std::filesystem::copy_options::overwrite_existing, ec);
+		if (ec) {
+			AIM_CORE_WARN_TAG("ImGui",
+				"Reset Layout: failed to copy bundled default to user ini: {}",
+				ec.message());
+			return;
+		}
+		s_PendingLayoutReloadPath = io.IniFilename;
 
 		AIM_CORE_INFO_TAG("ImGui",
-			"Reset editor layout from bundled default '{}' → '{}'",
+			"Queued reset of editor layout from bundled default '{}' → '{}'",
 			defaultIniFile.string(),
 			io.IniFilename);
 	}

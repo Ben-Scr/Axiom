@@ -16,13 +16,12 @@
 #include <utility>
 
 // =============================================================================
-// Font — WebGPU implementation. Stage 6 of the WebGPU port.
+// Font — WebGPU implementation.
 // -----------------------------------------------------------------------------
-// Sibling to Font.cpp (the bgfx implementation). CPU-side stbtt bake is
-// preserved verbatim: same codepoint ranges, same two-tier oversample, same
-// atlas-side growth ladder. Only the GPU upload swaps — from
-// `bgfx::createTexture2D` to a wgpu::Texture (R8Unorm) + view registered in
-// a TU-local pool that WebGPUBackend::LookupFontAtlas reads back.
+// CPU-side stbtt bake: codepoint ranges, two-tier oversample, atlas-side
+// growth ladder. GPU upload writes a wgpu::Texture (R8Unorm) + view
+// registered in a TU-local pool that WebGPUBackend::LookupFontAtlas
+// reads back.
 //
 // `m_AtlasTexture` stores an opaque pool ID (1-based; 0 = unset, same
 // `IsLoaded() => m_AtlasTexture != 0` contract from the header). Owners
@@ -195,8 +194,7 @@ namespace Axiom {
 		m_LineHeight = (ascent - descent + lineGap) * scale;
 
 		// Two-tier bake: 2× oversample at sizes ≤ 48 px for sharper text,
-		// 1× otherwise. Matches the bgfx + OpenGL impls so quantization
-		// buckets stay consistent across backends.
+		// 1× otherwise.
 		std::vector<stbtt_packedchar> packed(k_CodepointCount);
 		std::vector<uint8_t> bitmap;
 		int chosenOversample = 0;
@@ -324,7 +322,7 @@ namespace Axiom {
 		atlas.View    = std::move(view);
 		m_AtlasTexture = RegisterAtlas(std::move(atlas));
 
-		// Translate stb's packed table → m_Glyphs map (identical to bgfx + GL).
+		// Translate stb's packed table → m_Glyphs map.
 		int packedIndex = 0;
 		for (int r = 0; r < k_CodepointRangeCount; ++r) {
 			const auto& cr = k_BakedRanges[r];

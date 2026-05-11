@@ -2,6 +2,11 @@ using System.Runtime.InteropServices;
 
 namespace Axiom.Components;
 
+// Native (ECS pool-resident) view of the Sprite Renderer component. The managed
+// `Axiom.SpriteRenderer` class is the script-friendly wrapper around the same
+// underlying data; this struct is the zero-marshal hot-path view used by
+// Entity.GetRef<NativeSpriteRenderer>() / scene.QueryRef<...>.
+//
 // Layout MUST match Axiom-Engine/src/Components/Graphics/SpriteRendererComponent.hpp.
 // Total size = 32 bytes (verified by Entity_GetComponentSize at script host init).
 //
@@ -22,7 +27,7 @@ namespace Axiom.Components;
 //     read-only; writing it directly will be overwritten on next refresh and
 //     can desync against TextureManager's generation tracking.
 [StructLayout(LayoutKind.Sequential)]
-public struct SpriteRenderer : IComponent
+public struct NativeSpriteRenderer : IComponent
 {
     public short SortingOrder;
     public byte  SortingLayer;

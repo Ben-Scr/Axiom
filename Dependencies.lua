@@ -170,11 +170,8 @@ Dependency["EngineCore"] =
     Links = {}
 }
 
--- Render-API dep set — WebGPU via Dawn. The legacy direct-OpenGL path was
--- retired on 2026-05; the bgfx interregnum that succeeded it was retired
--- on Stage 10 of the WebGPU port (bgfx submodules deleted from External/,
--- per-RHI dep splits collapsed into this single entry). Dawn is built
--- out-of-band by scripts/SetupDawn.bat into a monolithic webgpu_dawn.lib;
+-- Render-API dep set — WebGPU via Dawn. Dawn is built out-of-band by
+-- scripts/SetupDawn.bat into a monolithic webgpu_dawn.lib;
 -- premake/dependencies/dawn.lua exposes DawnLayout with the resulting
 -- include + lib paths. No DependsOn entry for a premake project because
 -- Dawn isn't built by premake — it's a vendored pre-built static lib.

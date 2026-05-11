@@ -10,19 +10,14 @@
 #include <utility>
 
 // =============================================================================
-// Framebuffer — WebGPU (Dawn) implementation. Stage 2 of the WebGPU port.
+// Framebuffer — WebGPU (Dawn) implementation.
 // -----------------------------------------------------------------------------
-// After Stage 10 the WebGPU implementation is the only backend; the bgfx
-// sibling and its submodules have been removed. Framebuffer.hpp keeps the
-// public API stable — only the meaning of the opaque backend-ID fields is
-// backend-specific.
-//
 // Layout per FBO:
 //   * One colour wgpu::Texture, with usage = RenderAttachment | TextureBinding
 //     so the renderer can write to it AND ImGui::Image can sample it for the
 //     editor's per-panel previews (Editor View + Game View).
-//   * One depth wgpu::Texture (always Depth24PlusStencil8 to match the bgfx
-//     impl's D24S8), usage = RenderAttachment only — nothing samples it.
+//   * One depth wgpu::Texture (always Depth24PlusStencil8), usage =
+//     RenderAttachment only — nothing samples it.
 //   * A wgpu::TextureView per attachment, cached so render-pass setup
 //     doesn't allocate a fresh view every frame.
 //
@@ -84,9 +79,8 @@ namespace Axiom {
 		}
 
 		// Map the engine's backend-neutral TextureFormat enum to a wgpu format.
-		// Matches the bgfx impl's ToBgfx — same set of three supported formats
-		// (RGBA8 / R8 / Depth24Stencil8), same constraint that anything else
-		// is a hard error rather than a silent substitution.
+		// Three supported formats (RGBA8 / R8 / Depth24Stencil8); anything
+		// else is a hard error rather than a silent substitution.
 		wgpu::TextureFormat ToWgpuFormat(TextureFormat f) noexcept {
 			switch (f) {
 				case TextureFormat::RGBA8:           return wgpu::TextureFormat::RGBA8Unorm;
@@ -217,9 +211,9 @@ namespace Axiom {
 			return false;
 		}
 
-		// Depth/stencil attachment — always D24S8 to match the bgfx impl's
-		// hardcoded depth format. Stage 5 (project settings) can add an
-		// HDR / no-stencil variant for renderers that don't need stencil.
+		// Depth/stencil attachment — always D24S8. Project settings can
+		// add an HDR / no-stencil variant later for renderers that don't
+		// need stencil.
 		wgpu::TextureDescriptor depthDesc{};
 		depthDesc.dimension       = wgpu::TextureDimension::e2D;
 		depthDesc.size            = { static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1 };

@@ -23,18 +23,16 @@
 #include <utility>
 
 // =============================================================================
-// TextRenderer — WebGPU (Dawn) implementation. Stage 6 of the WebGPU port.
+// TextRenderer — WebGPU (Dawn) implementation.
 // -----------------------------------------------------------------------------
-// Sibling to TextRenderer.cpp (the bgfx implementation). CPU-side glyph
-// emission (DecodeUtf8, MeasureLineWidth, MeasureNaturalSize, EmitText with
-// word/character wrap) is preserved verbatim — text-layout math doesn't care
-// about the GPU backend. Only the submit path is replaced.
+// CPU-side glyph emission (DecodeUtf8, MeasureLineWidth, MeasureNaturalSize,
+// EmitText with word/character wrap) is GPU-backend-agnostic.
 //
 // Process-shared GPU resources (text shader module, pipeline layout, atlas
-// sampler) live in a Globals() singleton with reference counting — same
-// pattern as the bgfx side, since multiple TextRenderer instances exist in
-// the engine (one per GuiRenderer for the editor's two FBOs, plus
-// Renderer2D's owned one for world-space text).
+// sampler) live in a Globals() singleton with reference counting, since
+// multiple TextRenderer instances exist in the engine (one per GuiRenderer
+// for the editor's two FBOs, plus Renderer2D's owned one for world-space
+// text).
 //
 // Per-instance state (dynamic vertex buffer, uniform buffer, per-frame
 // bind-group cache) is a TU-local side-table keyed by `this`. The buffers
@@ -44,12 +42,10 @@
 // hits at most ~2 formats per session (swap-chain BGRA8Unorm or FBO RGBA8
 // Unorm × {with depth, without}).
 //
-// Clip handling: TextRenderer_WebGPU groups the supplied commands by
-// (atlas, sort key, clip rect) and applies SetScissorRect per group from
-// the MVP-projected UI-space clip — so a single RenderInstances call can
-// mix unclipped + Mask-clipped text correctly. Different from the bgfx
-// side, where GuiRenderer pre-clustered by clip and made multiple
-// RenderInstances calls passing a pre-computed scissor index.
+// Clip handling: groups the supplied commands by (atlas, sort key, clip
+// rect) and applies SetScissorRect per group from the MVP-projected
+// UI-space clip — so a single RenderInstances call can mix unclipped +
+// Mask-clipped text correctly.
 // =============================================================================
 
 namespace Axiom {
@@ -58,7 +54,7 @@ namespace Axiom {
 		constexpr size_t k_VerticesPerGlyph     = 6;
 		constexpr size_t k_InitialVertexCapacity = 1024;
 
-		// CPU helpers — identical to TextRenderer.cpp's bgfx version.
+		// CPU helpers.
 
 		bool DecodeUtf8(std::string_view s, size_t idx, uint32_t& outCp, int& outLen) {
 			if (idx >= s.size()) { outCp = 0; outLen = 0; return false; }
@@ -258,9 +254,8 @@ namespace Axiom {
 			wgpu::Device device = WebGPUBackend::GetDevice();
 			if (!device) { --g.RefCount; return false; }
 
-			// Shader_WebGPU's built-in registry maps "text" -> the embedded WGSL.
-			// We pass the same vs/fs paths the bgfx side does so the stem
-			// extraction lands on the same name.
+			// Shader's built-in registry maps "text" -> the embedded WGSL.
+			// Pass vs/fs paths whose stem resolves to that name.
 			g.ShaderObj = std::make_unique<Shader>(
 				std::string("AxiomAssets/Shaders/TextShader.vs"),
 				std::string("AxiomAssets/Shaders/TextShader.fs"));
@@ -565,10 +560,10 @@ namespace Axiom {
 
 	void TextRenderer::EnsureGpuCapacity(size_t /*requiredBytes*/) {
 		// Per-frame vertex buffer growth is handled inside RenderInstances —
-		// this hook is the OpenGL holdover. Empty in both bgfx and WebGPU.
+		// this hook is the OpenGL holdover and is empty under WebGPU.
 	}
 
-	// ── Glyph emission (CPU side, identical to bgfx + GL) ────────────────────
+	// ── Glyph emission (CPU side) ────────────────────────────────────────────
 
 	void TextRenderer::EmitText(Font& font, std::string_view text,
 		float worldX, float worldY,

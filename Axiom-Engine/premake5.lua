@@ -90,9 +90,7 @@ project "Axiom-Engine"
     -- request time (see Backend/WebGPUApi.cpp::RequestAdapterSync).
     --
     -- AIM_RHI_WEBGPU is defined for compatibility with TUs that still
-    -- check the macro. The bgfx-era AIM_RHI_BGFX define is gone alongside
-    -- the bgfx submodules + every Bgfx*.cpp file (Stage 10 of the WebGPU
-    -- port, 2026-05+).
+    -- check the macro.
     defines { "AIM_RHI_WEBGPU" }
 
     RemoveFilesIfModuleDisabled(AxiomModules.Audio,
