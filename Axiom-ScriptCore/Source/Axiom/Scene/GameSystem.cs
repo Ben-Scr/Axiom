@@ -1,8 +1,21 @@
+using Axiom.Interop;
+
 namespace Axiom;
 
 public abstract class GameSystem
 {
     public Scene Scene { get; private set; } = new();
+
+    public bool Enabled
+    {
+        get => !string.IsNullOrEmpty(Scene.Name)
+            && InternalCalls.Scene_IsGameSystemEnabled(Scene.Name, GetType().Name);
+        set
+        {
+            if (!string.IsNullOrEmpty(Scene.Name))
+                InternalCalls.Scene_SetGameSystemEnabled(Scene.Name, GetType().Name, value);
+        }
+    }
 
     internal void _SetSceneName(string sceneName)
     {

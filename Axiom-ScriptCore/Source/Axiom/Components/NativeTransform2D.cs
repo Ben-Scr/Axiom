@@ -10,33 +10,77 @@ namespace Axiom.Components;
 // Layout MUST match Axiom-Engine/src/Components/General/Transform2DComponent.hpp
 // (the C++ Transform2DComponent class). ScriptHostBridge enforces this at
 // script-engine init by calling Entity_GetComponentSize("Transform 2D") and
-// comparing against sizeof(NativeTransform2D) — a drift caught early hard-fails
-// the user assembly load instead of silently corrupting EnTT storage.
+// comparing against sizeof(NativeTransform2D).
 //
-// World-space fields (Position/Scale/Rotation) are written by
-// TransformHierarchySystem each frame from the Local* values composed against
-// the parent's world transform. Scripts that want their writes to stick
-// across the next frame's hierarchy pass MUST write the Local* fields — the
-// world fields are a derived cache. The C++ side's setters do this; the ref-API
-// is more direct, so the convention is "edit LocalPosition, observe Position
-// after the propagate pass."
+// World-space values are still a derived cache, but the public
+// Position/Scale/Rotation setters mirror root-entity writes into Local* and
+// mark the component dirty. That makes ref-API edits behave like the regular
+// Transform2D setters instead of being overwritten on the next hierarchy pass.
 [StructLayout(LayoutKind.Sequential)]
 public struct NativeTransform2D : IComponent
 {
-    public Vector2 Position;
-    public Vector2 Scale;
+    private Vector2 m_Position;
+    private Vector2 m_Scale;
     private float  m_RotationRadians;
 
-    public Vector2 LocalPosition;
-    public Vector2 LocalScale;
+    private Vector2 m_LocalPosition;
+    private Vector2 m_LocalScale;
     private float  m_LocalRotationRadians;
 
-    // C++ `bool m_Dirty` — 1 byte. Native side flips this when SetPosition /
-    // SetRotation / SetScale runs; scripts can mark a transform dirty for the
-    // next hierarchy pass after writing Local* directly. Trailing padding is
-    // 3 bytes (sequential layout, 4-byte natural alignment of the struct).
+    // C++ `bool m_Dirty` is 1 byte. Trailing padding is 3 bytes with the
+    // native struct's 4-byte natural alignment.
     [MarshalAs(UnmanagedType.U1)]
-    public bool Dirty;
+    private bool m_Dirty;
+
+    public Vector2 Position
+    {
+        readonly get => m_Position;
+        set
+        {
+            m_Position = value;
+            m_LocalPosition = value;
+            m_Dirty = true;
+        }
+    }
+
+    public Vector2 Scale
+    {
+        readonly get => m_Scale;
+        set
+        {
+            m_Scale = value;
+            m_LocalScale = value;
+            m_Dirty = true;
+        }
+    }
+
+    public Vector2 LocalPosition
+    {
+        readonly get => m_LocalPosition;
+        set
+        {
+            m_LocalPosition = value;
+            m_Position = value;
+            m_Dirty = true;
+        }
+    }
+
+    public Vector2 LocalScale
+    {
+        readonly get => m_LocalScale;
+        set
+        {
+            m_LocalScale = value;
+            m_Scale = value;
+            m_Dirty = true;
+        }
+    }
+
+    public bool Dirty
+    {
+        readonly get => m_Dirty;
+        set => m_Dirty = value;
+    }
 
     public float Rotation
     {
@@ -44,7 +88,8 @@ public struct NativeTransform2D : IComponent
         set
         {
             m_RotationRadians = value * Mathf.Deg2Rad;
-            Dirty = true;
+            m_LocalRotationRadians = m_RotationRadians;
+            m_Dirty = true;
         }
     }
 
@@ -54,13 +99,12 @@ public struct NativeTransform2D : IComponent
         set
         {
             m_LocalRotationRadians = value * Mathf.Deg2Rad;
-            Dirty = true;
+            m_RotationRadians = m_LocalRotationRadians;
+            m_Dirty = true;
         }
     }
 
     // Direction vectors derived from world Rotation (0 degrees -> Up = (0, 1)).
-    // `readonly` so accessing them on a `ref` to a component pool entry does
-    // not force the compiler to make a defensive struct copy.
     public readonly Vector2 Up    => new(-Mathf.Sin(m_RotationRadians), Mathf.Cos(m_RotationRadians));
     public readonly Vector2 Down  => -Up;
     public readonly Vector2 Right => new(Mathf.Cos(m_RotationRadians),  Mathf.Sin(m_RotationRadians));
@@ -69,7 +113,6 @@ public struct NativeTransform2D : IComponent
     public readonly float RotationDegrees => Rotation;
 
     // Native serialized/display name used by the binding layer to find this
-    // component's pool. Kept as a single source of truth so renames don't
-    // diverge between IComponent::Get / inspector / scene file.
+    // component's pool.
     internal const string NativeName = "Transform 2D";
 }

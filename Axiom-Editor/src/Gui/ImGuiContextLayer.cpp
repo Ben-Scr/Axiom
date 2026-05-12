@@ -4,6 +4,7 @@
 #include "Core/Assert.hpp"
 #include "Core/Window.hpp"
 #include "Events/AxiomEvent.hpp"
+#include "Gui/ImGuiFonts.hpp"
 #include "Packages/PackageImGuiBridge.hpp"
 #include "Serialization/Path.hpp"
 
@@ -227,35 +228,14 @@ namespace Axiom {
 		// effectively non-resizable.
 
 		// One-time HiDPI scale captured from the window's monitor. Applied below
-		// to the default font and to the theme via ScaleAllSizes. Mid-session
+		// to the UI font and to the theme via ScaleAllSizes. Mid-session
 		// monitor moves are not handled — wire glfwSetWindowContentScaleCallback
 		// if that becomes a real symptom.
 		float xScale = 1.0f, yScale = 1.0f;
 		glfwGetWindowContentScale(glfwWindow, &xScale, &yScale);
 		const float dpiScale = std::max(1.0f, xScale);
 
-		ImFontConfig fontCfg;
-		fontCfg.SizePixels = 13.0f * dpiScale;
-		io.Fonts->AddFontDefault(&fontCfg);
-
-		// Merge a Latin-1 supplement glyph fallback onto the default font.
-		// ImGui's bundled ProggyClean only ships ASCII glyphs, so anything
-		// 0xA0-0xFF (German umlauts, French/Spanish accents, ©/®/°/±/etc.)
-		// renders as '?'. We additionally point AddFontFromFileTTF at a
-		// real TTF with Latin-1 coverage and merge ONLY that range so the
-		// editor font otherwise looks identical to before. NotoSans-
-		// Regular.ttf is the engine-bundled fallback (large character set,
-		// SIL OFL).
-		const std::string notoPath = Path::Combine(Path::ResolveAxiomAssets("Fonts"), "NotoSans-Regular.ttf");
-		if (std::filesystem::exists(notoPath)) {
-			ImFontConfig latinCfg;
-			latinCfg.MergeMode = true;
-			latinCfg.SizePixels = 13.0f * dpiScale;
-			latinCfg.PixelSnapH = true;
-			static const ImWchar latin1Range[] = { 0x00A0, 0x00FF, 0 };
-			io.Fonts->AddFontFromFileTTF(notoPath.c_str(),
-				13.0f * dpiScale, &latinCfg, latin1Range);
-		}
+		LoadAxiomImGuiFont(io, dpiScale);
 
 		// GLFW_NO_API means there's no GL context; use ImGui's "Other"
 		// GLFW init that doesn't bind one.

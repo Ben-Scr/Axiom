@@ -6,6 +6,7 @@
 #include "Events/AxiomEvent.hpp"
 
 #include <GLFW/glfw3.h>
+#include <cstdint>
 #include <string>
 #include <memory>
 #include <functional>
@@ -39,6 +40,8 @@ namespace Axiom {
 
 		void SetCursorLocked(bool enabled);
 		void SetCursorHidden(bool enabled);
+		void SetCursorMode(int mode);
+		int GetCursorMode() const { return m_CursorMode; }
 
 		// Per-state cursor variants. SetUICursorImage stages the cursor
 		// the window will switch to whenever SetCursorOverUI(true) is
@@ -52,6 +55,8 @@ namespace Axiom {
 
 
 		void SetCursorImage(const Texture2D* tex2D);
+		uint64_t GetCursorTextureAsset() const { return m_CursorTextureAssetId; }
+		void SetCursorTextureAsset(uint64_t assetId) { m_CursorTextureAssetId = assetId; }
 		void SetWindowIcon(const Texture2D* tex2D);
 		void SetWindowIconFromResource();
 
@@ -175,6 +180,8 @@ namespace Axiom {
 		GLFWcursor* m_DefaultCursor = nullptr;
 		GLFWcursor* m_UICursor = nullptr;
 		bool m_CursorOverUI = false;
+		int m_CursorMode = 0;
+		uint64_t m_CursorTextureAssetId = 0;
 
 		Vec2Int m_RestoreSize;
 		Vec2Int m_RestorePos;

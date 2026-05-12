@@ -262,6 +262,7 @@ namespace Axiom {
 		int         (*Scene_SetActive)(const char* sceneName);
 		int         (*Scene_Reload)(const char* sceneName);
 		int         (*Scene_SetGameSystemEnabled)(const char* sceneName, const char* className, int enabled);
+		int         (*Scene_IsGameSystemEnabled)(const char* sceneName, const char* className);
 		void        (*Scene_SetGlobalSystemEnabled)(const char* className, int enabled);
 		int         (*Scene_DoesSceneExist)(const char* sceneName);
 		int         (*Scene_GetLoadedCount)();
@@ -619,6 +620,15 @@ namespace Axiom {
 			int enableFilter,
 			void** outPointers,
 			int maxRows);
+
+		// Core API appended after the ref-API block to preserve existing field order.
+		int      (*Application_GetRunInBackground)();
+		void     (*Application_SetRunInBackground)(int enabled);
+		void     (*Window_Restore)();
+		int      (*Cursor_GetMode)();
+		void     (*Cursor_SetMode)(int mode);
+		uint64_t (*Cursor_GetTexture)();
+		void     (*Cursor_SetTexture)(uint64_t assetId);
 	};
 
 	/// Layout must match C# ManagedCallbacksStruct exactly.

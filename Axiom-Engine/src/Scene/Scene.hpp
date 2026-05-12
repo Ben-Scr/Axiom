@@ -40,6 +40,7 @@ namespace Axiom {
 		Entity CreateEntity();
 		// Info: Creates an entity with a Transform2D and Name component
 		Entity CreateEntity(const std::string& name);
+		Entity CreateEmptyEntity();
 		Entity CreateRuntimeEntity();
 		Entity CreateRuntimeEntity(const std::string& name);
 		Entity CreatePrefabInstance(AssetGUID prefabGuid, const std::string& name = "Entity");
@@ -253,6 +254,7 @@ namespace Axiom {
 		bool RemoveGameSystem(size_t index);
 		bool MoveGameSystem(size_t fromIndex, size_t toIndex);
 		void ClearGameSystems();
+		bool IsGameSystemEnabled(const std::string& className) const;
 		bool SetGameSystemEnabled(const std::string& className, bool enabled);
 		void StartManagedGameSystemsForPlayMode();
 

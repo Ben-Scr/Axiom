@@ -241,6 +241,7 @@ internal unsafe struct NativeBindingsStruct
     public delegate* unmanaged<byte*, int> Scene_SetActive;
     public delegate* unmanaged<byte*, int> Scene_Reload;
     public delegate* unmanaged<byte*, byte*, int, int> Scene_SetGameSystemEnabled;
+    public delegate* unmanaged<byte*, byte*, int> Scene_IsGameSystemEnabled;
     public delegate* unmanaged<byte*, int, void> Scene_SetGlobalSystemEnabled;
     public delegate* unmanaged<byte*, int> Scene_DoesSceneExist;
     public delegate* unmanaged<int> Scene_GetLoadedCount;
@@ -557,6 +558,15 @@ internal unsafe struct NativeBindingsStruct
     public delegate* unmanaged<ulong, byte*, void*> Entity_GetComponentPtr;
     public delegate* unmanaged<byte*, int> Entity_GetComponentSize;
     public delegate* unmanaged<byte*, byte*, byte*, byte*, byte*, int, void**, int, int> Scene_OpenQueryView;
+
+    // Core API appended after the ref-API block to preserve existing field order.
+    public delegate* unmanaged<int> Application_GetRunInBackground;
+    public delegate* unmanaged<int, void> Application_SetRunInBackground;
+    public delegate* unmanaged<void> Window_Restore;
+    public delegate* unmanaged<int> Cursor_GetMode;
+    public delegate* unmanaged<int, void> Cursor_SetMode;
+    public delegate* unmanaged<ulong> Cursor_GetTexture;
+    public delegate* unmanaged<ulong, void> Cursor_SetTexture;
 }
 
 internal static unsafe class NativeCallbacks

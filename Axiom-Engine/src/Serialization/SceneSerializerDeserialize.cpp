@@ -801,8 +801,10 @@ namespace Axiom {
 			for (const Value& systemValue : systemsValue->GetArray()) {
 				// Two accepted shapes for forward / backward compatibility:
 				//   1. "MyGameSystem"                                        (legacy / no overrides)
-				//   2. {"className": "MyGameSystem", "fields": { ... }}      (with authored overrides)
+				//   2. {"className": "MyGameSystem", "enabled": false,
+				//      "fields": { ... }}                                    (with authored state)
 				std::string className;
+				bool enabled = true;
 				const Value* fieldsValue = nullptr;
 
 				if (systemValue.IsString()) {
@@ -812,11 +814,15 @@ namespace Axiom {
 					if (const Value* nameNode = systemValue.FindMember("className")) {
 						className = nameNode->AsStringOr();
 					}
+					if (const Value* enabledNode = systemValue.FindMember("enabled")) {
+						enabled = enabledNode->AsBoolOr(true);
+					}
 					fieldsValue = systemValue.FindMember("fields");
 				}
 
 				if (className.empty()) continue;
 				scene.AddGameSystem(className);
+				scene.SetGameSystemEnabled(className, enabled);
 
 				if (fieldsValue && fieldsValue->IsObject()) {
 					for (const auto& [fieldName, fieldValueNode] : fieldsValue->GetObject()) {

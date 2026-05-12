@@ -1,10 +1,10 @@
 #include "RuntimeImGuiHost.hpp"
 
 #include "Core/Window.hpp"
+#include "Gui/ImGuiFonts.hpp"
 #include "Packages/PackageImGuiBridge.hpp"
-#include "Serialization/Path.hpp"
 
-#include <filesystem>
+#include <algorithm>
 #include <imgui.h>
 #include <backends/imgui_impl_glfw.h>
 // ImGui backend lives inside Axiom-Engine.dll
@@ -55,21 +55,9 @@ namespace Axiom {
 		ImGuiIO& io = ImGui::GetIO();
 		io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
 
-		// Default ProggyClean covers ASCII; merge NotoSans for Latin-1
-		// supplement so splash text / runtime overlays don't render
-		// '?' for codepoints 0xA0-0xFF (umlauts, accented vowels,
-		// ©/®/°/±/·/etc.). Mirrors the editor's font setup in
-		// ImGuiContextLayer.cpp. Skipped silently if the bundled
-		// font isn't found — text falls back to '?' as before.
-		io.Fonts->AddFontDefault();
-		const std::string notoPath = Path::Combine(Path::ResolveAxiomAssets("Fonts"), "NotoSans-Regular.ttf");
-		if (std::filesystem::exists(notoPath)) {
-			ImFontConfig latinCfg;
-			latinCfg.MergeMode = true;
-			latinCfg.PixelSnapH = true;
-			static const ImWchar latin1Range[] = { 0x00A0, 0x00FF, 0 };
-			io.Fonts->AddFontFromFileTTF(notoPath.c_str(), 13.0f, &latinCfg, latin1Range);
-		}
+		float xScale = 1.0f, yScale = 1.0f;
+		glfwGetWindowContentScale(glfwWindow, &xScale, &yScale);
+		LoadAxiomImGuiFont(io, std::max(1.0f, xScale));
 
 		if (!ImGui_ImplGlfw_InitForOther(glfwWindow, true)) {
 			ImGui::DestroyContext();

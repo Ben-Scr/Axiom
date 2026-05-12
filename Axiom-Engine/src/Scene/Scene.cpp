@@ -47,32 +47,15 @@ namespace Axiom {
 
 			const std::string& GetClassName() const { return m_ClassName; }
 			uint32_t GetHandle() const { return m_Handle; }
+			bool HasEnteredLifecycle() const { return m_Handle != 0 || m_AwakeInvoked || m_StartInvoked; }
 
 			void Start(Scene& scene) override
 			{
-				if (!ShouldRunInCurrentMode()) {
-					return;
-				}
-
-				if (m_Handle == 0) {
-					if (!ScriptEngine::GameSystemClassExists(m_ClassName)) {
-						AIM_CORE_WARN_TAG("Scene", "GameSystem '{}' was registered on scene '{}' but no matching class was found", m_ClassName, scene.GetName());
-						return;
-					}
-					m_Handle = ScriptEngine::CreateGameSystemInstance(m_ClassName, scene.GetName());
-					ApplyFieldOverrides(scene);
-				}
-
-				if (m_Handle != 0) {
-					if (!m_EnableInvoked) {
-						ScriptEngine::InvokeGameSystemEnable(m_Handle);
-						m_EnableInvoked = true;
-					}
-					if (!m_StartInvoked) {
-						ScriptEngine::InvokeGameSystemStart(m_Handle);
-						m_StartInvoked = true;
-					}
-				}
+				if (!EnsureInstance(scene, true)) return;
+				if (!IsEnabled()) return;
+				InvokeEnableIfNeeded();
+				if (!IsEnabled()) return;
+				InvokeStartIfNeeded();
 			}
 
 			void Update(Scene&) override
@@ -88,21 +71,8 @@ namespace Axiom {
 			// Lazy-creates managed instance and guards against double-fire across reload.
 			void Awake(Scene& scene) override
 			{
-				if (!ShouldRunInCurrentMode()) {
-					return;
-				}
-
-				if (m_Handle == 0) {
-					if (!ScriptEngine::GameSystemClassExists(m_ClassName)) {
-						return; // Warn lives in Start so we don't double-log
-					}
-					m_Handle = ScriptEngine::CreateGameSystemInstance(m_ClassName, scene.GetName());
-					ApplyFieldOverrides(scene);
-				}
-				if (m_Handle != 0 && !m_AwakeInvoked) {
-					ScriptEngine::InvokeGameSystemAwake(m_Handle);
-					m_AwakeInvoked = true;
-				}
+				if (!EnsureInstance(scene, false)) return;
+				InvokeAwakeIfNeeded();
 			}
 
 			void FixedUpdate(Scene&) override
@@ -115,19 +85,24 @@ namespace Axiom {
 				}
 			}
 
-			void OnEnable(Scene&) override
+			void OnEnable(Scene& scene) override
 			{
-				if (m_Handle != 0 && !m_EnableInvoked) {
-					ScriptEngine::InvokeGameSystemEnable(m_Handle);
-					m_EnableInvoked = true;
-				}
+				// If a GameSystem starts disabled, Awake/Start are skipped by the
+				// scene lifecycle. Enabling it later from code should still bring
+				// the managed instance fully online before the next Update.
+				if (!EnsureInstance(scene, true)) return;
+				InvokeAwakeIfNeeded();
+				if (!IsEnabled()) return;
+				InvokeEnableIfNeeded();
+				if (!IsEnabled()) return;
+				InvokeStartIfNeeded();
 			}
 
 			void OnDisable(Scene&) override
 			{
 				if (m_Handle != 0 && m_EnableInvoked) {
-					ScriptEngine::InvokeGameSystemDisable(m_Handle);
 					m_EnableInvoked = false;
+					ScriptEngine::InvokeGameSystemDisable(m_Handle);
 				}
 			}
 
@@ -152,6 +127,52 @@ namespace Axiom {
 			bool ShouldRunInCurrentMode() const
 			{
 				return !Application::IsEditor() || Application::GetIsPlaying();
+			}
+
+			bool EnsureInstance(Scene& scene, bool warnIfMissing)
+			{
+				if (!ShouldRunInCurrentMode()) {
+					return false;
+				}
+
+				if (m_Handle != 0) {
+					return true;
+				}
+
+				if (!ScriptEngine::GameSystemClassExists(m_ClassName)) {
+					if (warnIfMissing) {
+						AIM_CORE_WARN_TAG("Scene", "GameSystem '{}' was registered on scene '{}' but no matching class was found", m_ClassName, scene.GetName());
+					}
+					return false;
+				}
+
+				m_Handle = ScriptEngine::CreateGameSystemInstance(m_ClassName, scene.GetName());
+				ApplyFieldOverrides(scene);
+				return m_Handle != 0;
+			}
+
+			void InvokeAwakeIfNeeded()
+			{
+				if (m_Handle != 0 && !m_AwakeInvoked) {
+					ScriptEngine::InvokeGameSystemAwake(m_Handle);
+					m_AwakeInvoked = true;
+				}
+			}
+
+			void InvokeEnableIfNeeded()
+			{
+				if (m_Handle != 0 && !m_EnableInvoked) {
+					m_EnableInvoked = true;
+					ScriptEngine::InvokeGameSystemEnable(m_Handle);
+				}
+			}
+
+			void InvokeStartIfNeeded()
+			{
+				if (m_Handle != 0 && !m_StartInvoked) {
+					ScriptEngine::InvokeGameSystemStart(m_Handle);
+					m_StartInvoked = true;
+				}
 			}
 
 			// Push the scene's stored editor-time field values onto the
@@ -193,6 +214,10 @@ namespace Axiom {
 		auto entityHandle = CreateEntityHandle(EntityOrigin::Scene);
 		AddComponent<Transform2DComponent>(entityHandle);
 		AddComponent<NameComponent>(entityHandle, name);
+		return Entity(entityHandle, *this);
+	}
+	Entity Scene::CreateEmptyEntity() {
+		auto entityHandle = CreateEntityHandle(EntityOrigin::Scene);
 		return Entity(entityHandle, *this);
 	}
 
@@ -504,8 +529,21 @@ namespace Axiom {
 			return false;
 		}
 
+		auto managedSystem = std::make_unique<ManagedGameSystem>(className);
+		ISystem* system = managedSystem.get();
 		m_GameSystemClassNames.push_back(className);
-		m_Systems.push_back(std::make_unique<ManagedGameSystem>(className));
+		m_Systems.push_back(std::move(managedSystem));
+
+		if (m_IsLoaded && (!Application::IsEditor() || Application::GetIsPlaying())) {
+			system->Awake(*this);
+			system->Start(*this);
+			if (auto* gameSystem = dynamic_cast<ManagedGameSystem*>(system);
+				gameSystem && gameSystem->HasEnteredLifecycle()
+				&& std::find(m_AwakenedSystems.begin(), m_AwakenedSystems.end(), system) == m_AwakenedSystems.end()) {
+				m_AwakenedSystems.push_back(system);
+			}
+		}
+
 		MarkDirty();
 		return true;
 	}
@@ -670,6 +708,22 @@ namespace Axiom {
 		m_GameSystemFieldOverrides.erase(className);
 	}
 
+	bool Scene::IsGameSystemEnabled(const std::string& className) const
+	{
+		if (className.empty()) {
+			return false;
+		}
+
+		for (const auto& system : m_Systems) {
+			const auto* managedSystem = dynamic_cast<const ManagedGameSystem*>(system.get());
+			if (managedSystem && managedSystem->GetClassName() == className) {
+				return managedSystem->IsEnabled();
+			}
+		}
+
+		return false;
+	}
+
 	bool Scene::SetGameSystemEnabled(const std::string& className, bool enabled)
 	{
 		if (className.empty()) {
@@ -682,7 +736,18 @@ namespace Axiom {
 				continue;
 			}
 
+			if (managedSystem->IsEnabled() == enabled) {
+				return true;
+			}
+
 			managedSystem->SetEnabled(enabled, *this);
+			ISystem* systemBase = managedSystem;
+			if (enabled && managedSystem->HasEnteredLifecycle()
+				&& std::find(m_AwakenedSystems.begin(), m_AwakenedSystems.end(), systemBase) == m_AwakenedSystems.end()) {
+				m_AwakenedSystems.push_back(systemBase);
+			}
+
+			MarkDirty();
 			return true;
 		}
 
@@ -941,7 +1006,8 @@ namespace Axiom {
 			if (alreadyQueued.contains(system)) {
 				continue;
 			}
-			if (!system->IsEnabled()) {
+			const auto* managedSystem = dynamic_cast<const ManagedGameSystem*>(system);
+			if (!system->IsEnabled() && (!managedSystem || managedSystem->GetHandle() == 0)) {
 				continue;
 			}
 

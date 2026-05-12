@@ -31,6 +31,8 @@ internal static unsafe class InternalCalls
 
     internal static bool Application_GetVsyncEnabled() => NativeCallbacks.Bindings.Application_GetVsyncEnabled() != 0;
     internal static void Application_SetVsyncEnabled(bool enabled) => NativeCallbacks.Bindings.Application_SetVsyncEnabled(enabled ? 1 : 0);
+    internal static bool Application_GetRunInBackground() => NativeCallbacks.Bindings.Application_GetRunInBackground() != 0;
+    internal static void Application_SetRunInBackground(bool enabled) => NativeCallbacks.Bindings.Application_SetRunInBackground(enabled ? 1 : 0);
 
     // ── Window ──────────────────────────────────────────────────────
 
@@ -48,6 +50,7 @@ internal static unsafe class InternalCalls
 
     internal static void Window_Minimize() => NativeCallbacks.Bindings.Window_Minimize();
     internal static void Window_Maximize() => NativeCallbacks.Bindings.Window_Maximize();
+    internal static void Window_Restore() => NativeCallbacks.Bindings.Window_Restore();
     internal static bool Window_IsMaximized() => NativeCallbacks.Bindings.Window_IsMaximized() != 0;
     internal static bool Window_IsFullScreen() => NativeCallbacks.Bindings.Window_IsFullScreen() != 0;
     internal static void Window_SetFullScreen(bool enabled)
@@ -71,6 +74,11 @@ internal static unsafe class InternalCalls
         NativeCallbacks.Bindings.Window_GetScreenSize(&w, &h);
         return new Vector2Int(w, h);
     }
+
+    internal static int Cursor_GetMode() => NativeCallbacks.Bindings.Cursor_GetMode();
+    internal static void Cursor_SetMode(int mode) => NativeCallbacks.Bindings.Cursor_SetMode(mode);
+    internal static ulong Cursor_GetTexture() => NativeCallbacks.Bindings.Cursor_GetTexture();
+    internal static void Cursor_SetTexture(ulong assetId) => NativeCallbacks.Bindings.Cursor_SetTexture(assetId);
 
     // ── Engine ──────────────────────────────────────────────────────
 
@@ -266,6 +274,17 @@ internal static unsafe class InternalCalls
         fixed (byte* classPtr = classBuffer)
         {
             return NativeCallbacks.Bindings.Scene_SetGameSystemEnabled(scenePtr, classPtr, enabled ? 1 : 0) != 0;
+        }
+    }
+
+    internal static bool Scene_IsGameSystemEnabled(string sceneName, string className)
+    {
+        byte[] sceneBuffer = EncodeUtf8Z(sceneName);
+        byte[] classBuffer = EncodeUtf8Z(className);
+        fixed (byte* scenePtr = sceneBuffer)
+        fixed (byte* classPtr = classBuffer)
+        {
+            return NativeCallbacks.Bindings.Scene_IsGameSystemEnabled(scenePtr, classPtr) != 0;
         }
     }
 

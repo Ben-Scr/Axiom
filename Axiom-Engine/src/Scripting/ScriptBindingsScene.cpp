@@ -162,6 +162,16 @@ namespace Axiom {
 		Window::SetVsync(enabled != 0);
 	}
 
+	static int Axiom_Application_GetRunInBackground()
+	{
+		return Application::GetRunInBackground() ? 1 : 0;
+	}
+
+	static void Axiom_Application_SetRunInBackground(int enabled)
+	{
+		Application::SetRunInBackground(enabled != 0);
+	}
+
 	// ── Engine Bindings ─────────────────────────────────────────────────
 
 	// Same two-call buffer pattern as Application_GetClipboardStringBuffer.
@@ -228,6 +238,12 @@ namespace Axiom {
 		if (window) window->MaximizeWindow();
 	}
 
+	static void Axiom_Window_Restore()
+	{
+		auto* window = Application::GetWindow();
+		if (window) window->RestoreWindow();
+	}
+
 	static int Axiom_Window_IsMaximized()
 	{
 		auto* window = Application::GetWindow();
@@ -281,6 +297,46 @@ namespace Axiom {
 		}
 		if (outWidth)  *outWidth  = w;
 		if (outHeight) *outHeight = h;
+	}
+
+	static int Axiom_Cursor_GetMode()
+	{
+		auto* window = Application::GetWindow();
+		return window ? window->GetCursorMode() : 0;
+	}
+
+	static void Axiom_Cursor_SetMode(int mode)
+	{
+		auto* window = Application::GetWindow();
+		if (window) window->SetCursorMode(mode);
+	}
+
+	static uint64_t Axiom_Cursor_GetTexture()
+	{
+		auto* window = Application::GetWindow();
+		return window ? window->GetCursorTextureAsset() : 0;
+	}
+
+	static void Axiom_Cursor_SetTexture(uint64_t assetId)
+	{
+		auto* window = Application::GetWindow();
+		if (!window) return;
+
+		if (assetId == 0) {
+			window->SetCursorImage(nullptr);
+			window->SetCursorTextureAsset(0);
+			return;
+		}
+
+		TextureHandle handle = TextureManager::LoadTextureByUUID(assetId);
+		Texture2D* texture = TextureManager::GetTexture(handle);
+		if (!texture || !texture->IsValid()) {
+			AIM_WARN_TAG("Script", "Cursor texture asset {} could not be loaded", assetId);
+			return;
+		}
+
+		window->SetCursorImage(texture);
+		window->SetCursorTextureAsset(assetId);
 	}
 
 	static int Axiom_Engine_GetVersionBuffer(char* outBuffer, int capacity)
@@ -489,6 +545,8 @@ namespace Axiom {
 		b.Application_SetClipboardString = &Axiom_Application_SetClipboardString;
 		b.Application_GetVsyncEnabled = &Axiom_Application_GetVsyncEnabled;
 		b.Application_SetVsyncEnabled = &Axiom_Application_SetVsyncEnabled;
+		b.Application_GetRunInBackground = &Axiom_Application_GetRunInBackground;
+		b.Application_SetRunInBackground = &Axiom_Application_SetRunInBackground;
 
 		b.Window_GetWidth = &Axiom_Window_GetWidth;
 		b.Window_GetHeight = &Axiom_Window_GetHeight;
@@ -496,6 +554,7 @@ namespace Axiom {
 		b.Window_SetTitle = &Axiom_Window_SetTitle;
 		b.Window_Minimize = &Axiom_Window_Minimize;
 		b.Window_Maximize = &Axiom_Window_Maximize;
+		b.Window_Restore = &Axiom_Window_Restore;
 		b.Window_IsMaximized = &Axiom_Window_IsMaximized;
 		b.Window_IsFullScreen = &Axiom_Window_IsFullScreen;
 		b.Window_SetFullScreen = &Axiom_Window_SetFullScreen;
@@ -503,6 +562,10 @@ namespace Axiom {
 		b.Window_SetPosition = &Axiom_Window_SetPosition;
 		b.Window_Focus = &Axiom_Window_Focus;
 		b.Window_GetScreenSize = &Axiom_Window_GetScreenSize;
+		b.Cursor_GetMode = &Axiom_Cursor_GetMode;
+		b.Cursor_SetMode = &Axiom_Cursor_SetMode;
+		b.Cursor_GetTexture = &Axiom_Cursor_GetTexture;
+		b.Cursor_SetTexture = &Axiom_Cursor_SetTexture;
 
 		b.Engine_GetVersionBuffer = &Axiom_Engine_GetVersionBuffer;
 		b.Engine_GetVersionLongBuffer = &Axiom_Engine_GetVersionLongBuffer;

@@ -589,6 +589,13 @@ public class Entity : IEquatable<Entity>
 
     public static Entity Create(Entity source) => Instantiate(source);
 
+    public static void Destroy(Entity entity)
+    {
+        if (entity is null || entity == Invalid)
+            return;
+        entity.Destroy();
+    }
+
     public Entity Clone() => Instantiate(this);
 
     public void Destroy()

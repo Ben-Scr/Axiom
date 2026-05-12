@@ -17,15 +17,15 @@ public static class Cursor
 {
     public static CursorMode Mode
     {
-        get => throw new System.NotImplementedException();
-        set => throw new System.NotImplementedException();
+        get => (CursorMode)InternalCalls.Cursor_GetMode();
+        set => InternalCalls.Cursor_SetMode((int)value);
     }
 
     /// <summary>The current texture of the cursor</summary>
-    public static Texture Texture
+    public static Texture? Texture
     {
-        get => throw new System.NotImplementedException();
-        set => throw new System.NotImplementedException();
+        get => Texture.FromAssetUUID(InternalCalls.Cursor_GetTexture());
+        set => InternalCalls.Cursor_SetTexture(value?.UUID ?? 0);
     }
 }
 

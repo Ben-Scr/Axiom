@@ -19,9 +19,10 @@ namespace Axiom;
 // by snapshotting entity IDs and re-resolving per row.
 //
 // Entry point: `scene.QueryRef<NativeTransform2D>()` (extension method on Scene).
-// Chain `.Without<T>()`, `.With<T>()`, `.EnabledOnly()`/`.DisabledOnly()`,
-// `.Readonly<T>()` (adds a readonly component). v1 supports 1 write + 0 or 1
-// readonly types; higher arities are straightforward generalization.
+// `scene.QueryRef<TWrite, TFilter...>()` supports up to 8 component types and
+// yields `ref TWrite`, using the rest as required filters. Chain
+// `.Without<T>()`, `.With<T>()`, `.EnabledOnly()`/`.DisabledOnly()`,
+// `.Readonly<T>()` (adds a readonly component row).
 //
 // All `T` parameters here are the `Native*` structs from `Axiom.Components` —
 // the constraint `where T : unmanaged, IComponent` only admits those, the
@@ -239,4 +240,88 @@ public static class SceneQueryRefExtensions
     public static QueryRefBuilder1<T> QueryRef<T>(this Scene scene)
         where T : unmanaged, IComponent
         => new QueryRefBuilder1<T>(scene.Name);
+
+    public static QueryRefBuilder1<TW1> QueryRef<TW1, T2>(this Scene scene)
+        where TW1 : unmanaged, IComponent
+        where T2 : unmanaged, IComponent
+        => new QueryRefBuilder1<TW1>(scene.Name)
+            .With<T2>();
+
+    public static QueryRefBuilder1<TW1> QueryRef<TW1, T2, T3>(this Scene scene)
+        where TW1 : unmanaged, IComponent
+        where T2 : unmanaged, IComponent
+        where T3 : unmanaged, IComponent
+        => new QueryRefBuilder1<TW1>(scene.Name)
+            .With<T2>()
+            .With<T3>();
+
+    public static QueryRefBuilder1<TW1> QueryRef<TW1, T2, T3, T4>(this Scene scene)
+        where TW1 : unmanaged, IComponent
+        where T2 : unmanaged, IComponent
+        where T3 : unmanaged, IComponent
+        where T4 : unmanaged, IComponent
+        => new QueryRefBuilder1<TW1>(scene.Name)
+            .With<T2>()
+            .With<T3>()
+            .With<T4>();
+
+    public static QueryRefBuilder1<TW1> QueryRef<TW1, T2, T3, T4, T5>(this Scene scene)
+        where TW1 : unmanaged, IComponent
+        where T2 : unmanaged, IComponent
+        where T3 : unmanaged, IComponent
+        where T4 : unmanaged, IComponent
+        where T5 : unmanaged, IComponent
+        => new QueryRefBuilder1<TW1>(scene.Name)
+            .With<T2>()
+            .With<T3>()
+            .With<T4>()
+            .With<T5>();
+
+    public static QueryRefBuilder1<TW1> QueryRef<TW1, T2, T3, T4, T5, T6>(this Scene scene)
+        where TW1 : unmanaged, IComponent
+        where T2 : unmanaged, IComponent
+        where T3 : unmanaged, IComponent
+        where T4 : unmanaged, IComponent
+        where T5 : unmanaged, IComponent
+        where T6 : unmanaged, IComponent
+        => new QueryRefBuilder1<TW1>(scene.Name)
+            .With<T2>()
+            .With<T3>()
+            .With<T4>()
+            .With<T5>()
+            .With<T6>();
+
+    public static QueryRefBuilder1<TW1> QueryRef<TW1, T2, T3, T4, T5, T6, T7>(this Scene scene)
+        where TW1 : unmanaged, IComponent
+        where T2 : unmanaged, IComponent
+        where T3 : unmanaged, IComponent
+        where T4 : unmanaged, IComponent
+        where T5 : unmanaged, IComponent
+        where T6 : unmanaged, IComponent
+        where T7 : unmanaged, IComponent
+        => new QueryRefBuilder1<TW1>(scene.Name)
+            .With<T2>()
+            .With<T3>()
+            .With<T4>()
+            .With<T5>()
+            .With<T6>()
+            .With<T7>();
+
+    public static QueryRefBuilder1<TW1> QueryRef<TW1, T2, T3, T4, T5, T6, T7, T8>(this Scene scene)
+        where TW1 : unmanaged, IComponent
+        where T2 : unmanaged, IComponent
+        where T3 : unmanaged, IComponent
+        where T4 : unmanaged, IComponent
+        where T5 : unmanaged, IComponent
+        where T6 : unmanaged, IComponent
+        where T7 : unmanaged, IComponent
+        where T8 : unmanaged, IComponent
+        => new QueryRefBuilder1<TW1>(scene.Name)
+            .With<T2>()
+            .With<T3>()
+            .With<T4>()
+            .With<T5>()
+            .With<T6>()
+            .With<T7>()
+            .With<T8>();
 }

@@ -9,10 +9,12 @@
 #include "Core/Log.hpp"
 #include "Graphics/Backend/WebGPUBackend.hpp"
 #include "Graphics/RenderApi.hpp"
+#include "Graphics/StaticRenderData.hpp"
 #include "Graphics/SpriteResources.hpp"
 #include "Graphics/Texture2D.hpp"
 #include "Graphics/TextureManager.hpp"
 #include "Graphics/Text/TextRenderer.hpp"
+#include "Math/Trigonometry.hpp"
 #include "Scene/Scene.hpp"
 #ifdef AXIOM_PROFILER_ENABLED
 #include "Profiling/GpuTimer.hpp"
@@ -91,6 +93,54 @@ namespace Axiom {
 		// same texture used twice in one frame builds the bind group once.
 		std::unordered_map<uint64_t, wgpu::BindGroup> g_BindGroupsThisFrame;
 
+		bool Vec2ExactEqual(const Vec2& a, const Vec2& b) {
+			return a.x == b.x && a.y == b.y;
+		}
+
+		AABB CreateQuadAABB(const Vec2& position, const Vec2& scale, float rotation) {
+			if (rotation == 0.0f) {
+				const Vec2 halfExtents{ scale.x * 0.5f, scale.y * 0.5f };
+				return { position - halfExtents, position + halfExtents };
+			}
+			if (AABB::IsAxisAligned(rotation)) {
+				return AABB::Create(position, Vec2(scale.x * 0.5f, scale.y * 0.5f));
+			}
+			return AABB::Create(position, scale * 0.5f, Degrees(rotation));
+		}
+
+		const AABB& GetStaticSpriteAABB(entt::registry& registry,
+			EntityHandle entity,
+			const Transform2DComponent& transform)
+		{
+			StaticRenderData* cache = registry.try_get<StaticRenderData>(entity);
+			if (!cache) {
+				cache = &registry.emplace<StaticRenderData>(entity);
+			}
+
+			if (!cache->Valid
+				|| !Vec2ExactEqual(cache->CachedPosition, transform.Position)
+				|| !Vec2ExactEqual(cache->CachedScale, transform.Scale)
+				|| cache->CachedRotation != transform.Rotation) {
+				cache->CachedAABB = CreateQuadAABB(transform.Position, transform.Scale, transform.Rotation);
+				cache->CachedPosition = transform.Position;
+				cache->CachedScale = transform.Scale;
+				cache->CachedRotation = transform.Rotation;
+				cache->Valid = true;
+			}
+
+			return cache->CachedAABB;
+		}
+
+		AABB GetSpriteAABB(entt::registry& registry,
+			EntityHandle entity,
+			const Transform2DComponent& transform)
+		{
+			if (registry.all_of<StaticTag>(entity)) {
+				return GetStaticSpriteAABB(registry, entity, transform);
+			}
+			return CreateQuadAABB(transform.Position, transform.Scale, transform.Rotation);
+		}
+
 		// ── CPU collect path ────────────────────────────────────────────────
 		size_t CollectSpriteInstances(Scene& scene,
 			const AABB& viewportAABB,
@@ -99,10 +149,16 @@ namespace Axiom {
 		{
 			outInstances.clear();
 			outTextures.clear();
-			auto view = scene.GetRegistry().view<Transform2DComponent, SpriteRendererComponent>();
+			auto& registry = scene.GetRegistry();
+			auto view = registry.view<Transform2DComponent, SpriteRendererComponent>(entt::exclude<DisabledTag>);
 			for (auto entity : view) {
 				const auto& t = view.get<Transform2DComponent>(entity);
 				const auto& s = view.get<SpriteRendererComponent>(entity);
+				const AABB bounds = GetSpriteAABB(registry, entity, t);
+				if (!AABB::Intersects(viewportAABB, bounds)) {
+					continue;
+				}
+
 				outInstances.emplace_back(
 					Vec2{ t.Position.x, t.Position.y },
 					Vec2{ t.Scale.x, t.Scale.y },
@@ -130,6 +186,9 @@ namespace Axiom {
 							scale.y * emitterTransform.Scale.y
 						};
 						rotation += emitterTransform.Rotation;
+					}
+					if (!AABB::Intersects(viewportAABB, CreateQuadAABB(position, scale, rotation))) {
+						continue;
 					}
 					outInstances.emplace_back(
 						position,
@@ -289,7 +348,6 @@ namespace Axiom {
 	}
 
 	void Renderer2D::BeginFrame() {
-		m_RenderedInstancesCount = 0;
 		m_DrawCallsCount = 0;
 		// Reset per-frame bind groups — texture lookups they reference may
 		// be invalidated between frames by TextureManager::PurgeUnreferenced

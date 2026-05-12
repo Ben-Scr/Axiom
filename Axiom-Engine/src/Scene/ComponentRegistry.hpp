@@ -48,6 +48,18 @@ namespace Axiom {
                     if (!e.HasComponent<T>()) return nullptr;
                     return static_cast<void*>(&e.GetComponent<T>());
                 };
+                info.fillRawPointers = [](entt::registry& registry, void** outPointers, int maxRows) -> int {
+                    int count = 0;
+                    auto view = registry.view<T>();
+                    for (auto&& [entity, component] : view.each()) {
+                        (void)entity;
+                        if (outPointers && count < maxRows) {
+                            outPointers[count] = static_cast<void*>(&component);
+                        }
+                        ++count;
+                    }
+                    return count;
+                };
                 info.rawSize = sizeof(T);
             }
 

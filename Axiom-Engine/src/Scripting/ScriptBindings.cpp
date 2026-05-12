@@ -682,6 +682,12 @@ namespace Axiom {
 		return scene && scene->SetGameSystemEnabled(className, enabled != 0) ? 1 : 0;
 	}
 
+	static int Axiom_Scene_IsGameSystemEnabled(const char* sceneName, const char* className) {
+		if (!sceneName || !className || sceneName[0] == '\0' || className[0] == '\0') return 0;
+		auto scene = SceneManager::Get().GetLoadedScene(sceneName).lock();
+		return scene && scene->IsGameSystemEnabled(className) ? 1 : 0;
+	}
+
 	static void Axiom_Scene_SetGlobalSystemEnabled(const char* className, int enabled) {
 		ScriptEngine::SetGlobalSystemEnabled(className ? className : "", enabled != 0);
 	}
@@ -1031,6 +1037,15 @@ namespace Axiom {
 			const size_t roCount = roPools.size();
 			const size_t poolCount = writeCount + roCount;
 			if (poolCount == 0) return 0;  // empty query is a no-op
+
+			if (writeCount == 1
+				&& roCount == 0
+				&& withPools.empty()
+				&& withoutPools.empty()
+				&& enableFilter == 0
+				&& writePools[0].Info->fillRawPointers) {
+				return writePools[0].Info->fillRawPointers(scene->GetRegistry(), outPointers, maxRows);
+			}
 
 			int rowIndex = 0;
 			auto& registry = scene->GetRegistry();
@@ -2766,6 +2781,7 @@ namespace Axiom {
 		b.Scene_SetActive = &Axiom_Scene_SetActive;
 		b.Scene_Reload = &Axiom_Scene_Reload;
 		b.Scene_SetGameSystemEnabled = &Axiom_Scene_SetGameSystemEnabled;
+		b.Scene_IsGameSystemEnabled = &Axiom_Scene_IsGameSystemEnabled;
 		b.Scene_SetGlobalSystemEnabled = &Axiom_Scene_SetGlobalSystemEnabled;
 		b.Scene_DoesSceneExist = &Axiom_Scene_DoesSceneExist;
 		b.Scene_GetLoadedCount = &Axiom_Scene_GetLoadedCount;

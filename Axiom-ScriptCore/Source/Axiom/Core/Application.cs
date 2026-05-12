@@ -54,8 +54,8 @@ public static class Application
 
     public static bool RunningInBackground
     {
-        get => throw new System.NotImplementedException();
-        set => throw new System.NotImplementedException();
+        get => InternalCalls.Application_GetRunInBackground();
+        set => InternalCalls.Application_SetRunInBackground(value);
     }
 
     /// <summary>

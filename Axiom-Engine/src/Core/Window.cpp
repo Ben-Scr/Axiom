@@ -217,6 +217,7 @@ namespace Axiom {
 		// owners; clearing m_Cursor avoids a double-destroy of the
 		// alias.
 		m_Cursor = nullptr;
+		m_CursorTextureAssetId = 0;
 		if (m_DefaultCursor) {
 			glfwDestroyCursor(m_DefaultCursor);
 			m_DefaultCursor = nullptr;
@@ -421,10 +422,34 @@ namespace Axiom {
 	}
 
 	void Window::SetCursorLocked(bool enabled) {
-		glfwSetInputMode(m_GLFWwindow, GLFW_CURSOR, enabled ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_NORMAL);
+		SetCursorMode(enabled ? 1 : 0);
 	}
 	void Window::SetCursorHidden(bool enabled) {
-		glfwSetInputMode(m_GLFWwindow, GLFW_CURSOR, enabled ? GLFW_CURSOR_HIDDEN : GLFW_CURSOR_NORMAL);
+		SetCursorMode(enabled ? 3 : 0);
+	}
+	void Window::SetCursorMode(int mode) {
+		int normalized = 0;
+		int glfwMode = GLFW_CURSOR_NORMAL;
+
+		switch (mode) {
+		case 1:
+			normalized = 1;
+			glfwMode = GLFW_CURSOR_DISABLED;
+			break;
+		case 2:
+			normalized = 2;
+			glfwMode = GLFW_CURSOR_DISABLED;
+			break;
+		case 3:
+			normalized = 3;
+			glfwMode = GLFW_CURSOR_HIDDEN;
+			break;
+		default:
+			break;
+		}
+
+		glfwSetInputMode(m_GLFWwindow, GLFW_CURSOR, glfwMode);
+		m_CursorMode = normalized;
 	}
 	namespace {
 		// Build a GLFWcursor from a Texture2D. Returns nullptr on any
@@ -453,6 +478,7 @@ namespace Axiom {
 		GLFWcursor* fresh = tex2D ? MakeCursorFromTexture(tex2D) : nullptr;
 		if (tex2D && !fresh) return;
 
+		m_CursorTextureAssetId = 0;
 		const bool wasUsingDefault = (m_Cursor == m_DefaultCursor);
 		if (m_DefaultCursor) {
 			glfwDestroyCursor(m_DefaultCursor);

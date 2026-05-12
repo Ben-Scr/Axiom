@@ -1397,10 +1397,16 @@ namespace Axiom {
 			SelectEntity(createdHandle);
 		};
 
-		if (ImGui::MenuItem("Create Entity"))
+		if (ImGui::MenuItem("Create (Empty)"))
 		{
-			finishCreated(scene.CreateEntity("Entity " + std::to_string(EntityHelper::EntitiesCount())));
+			finishCreated(scene.CreateEmptyEntity());
 		}
+		if (ImGui::MenuItem("Create (Entity)"))
+		{
+			finishCreated(scene.CreateEntity("Entity"));
+		}
+
+		ImGui::Separator();
 
 		if (ImGui::BeginMenu("2D Entity"))
 		{
@@ -1433,11 +1439,11 @@ namespace Axiom {
 					sprite.TextureHandle = TextureManager::GetDefaultTexture(DefaultTexture::Pixel);
 					finishCreated(created);
 				}
-				if (ImGui::MenuItem("Logo"))
+				if (ImGui::MenuItem("Icon"))
 				{
-					Entity created = scene.CreateEntity("Logo " + std::to_string(EntityHelper::EntitiesCount()));
+					Entity created = scene.CreateEntity("Icon " + std::to_string(EntityHelper::EntitiesCount()));
 					auto& sprite = created.AddComponent<SpriteRendererComponent>();
-					sprite.TextureHandle = TextureManager::LoadTexture("Game/logo.png");
+					sprite.TextureHandle = TextureManager::LoadTexture("icon.png");
 					finishCreated(created);
 				}
 
@@ -1473,15 +1479,11 @@ namespace Axiom {
 				ImGui::EndMenu();
 			}
 
-			if (ImGui::BeginMenu("Effects"))
+			if (ImGui::MenuItem("Particle System"))
 			{
-				if (ImGui::MenuItem("Particle System"))
-				{
-					Entity created = scene.CreateEntity("Particle System " + std::to_string(EntityHelper::EntitiesCount()));
-					created.AddComponent<ParticleSystem2DComponent>();
-					finishCreated(created);
-				}
-				ImGui::EndMenu();
+				Entity created = scene.CreateEntity("Particle System " + std::to_string(EntityHelper::EntitiesCount()));
+				created.AddComponent<ParticleSystem2DComponent>();
+				finishCreated(created);
 			}
 
 			// Tilemap 2D — surfaced only when the project has the
@@ -1520,20 +1522,6 @@ namespace Axiom {
 			}
 
 			ImGui::EndMenu();
-		}
-
-		if (ImGui::MenuItem("Camera"))
-		{
-			Entity created = scene.CreateEntity("Camera " + std::to_string(EntityHelper::EntitiesCount()));
-			created.AddComponent<Camera2DComponent>();
-			finishCreated(created);
-		}
-
-		if (ImGui::MenuItem("Audio Source"))
-		{
-			Entity created = scene.CreateEntity("Audio Source " + std::to_string(EntityHelper::EntitiesCount()));
-			created.AddComponent<AudioSourceComponent>();
-			finishCreated(created);
 		}
 
 		if (ImGui::BeginMenu("UI"))
@@ -1600,6 +1588,22 @@ namespace Axiom {
 				finishCreated(EntityHelper::CreateUIGridLayout(scene));
 			}
 			ImGui::EndMenu();
+		}
+
+		ImGui::Separator();
+
+		if (ImGui::MenuItem("Camera"))
+		{
+			Entity created = scene.CreateEntity("Camera " + std::to_string(EntityHelper::EntitiesCount()));
+			created.AddComponent<Camera2DComponent>();
+			finishCreated(created);
+		}
+
+		if (ImGui::MenuItem("Audio Source"))
+		{
+			Entity created = scene.CreateEntity("Audio Source " + std::to_string(EntityHelper::EntitiesCount()));
+			created.AddComponent<AudioSourceComponent>();
+			finishCreated(created);
 		}
 
 		return createdHandle;
@@ -2688,6 +2692,19 @@ namespace Axiom {
 		ImGui::Text("Scene: %s", scene.GetName().c_str());
 		ImGui::SeparatorText("Systems");
 
+		auto acceptDroppedGameSystems = [&]() {
+			if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ASSET_BROWSER_ITEM")) {
+				std::string droppedPath(static_cast<const char*>(payload->Data));
+				std::vector<EditorScriptDiscovery::ScriptEntry> droppedScripts;
+				EditorScriptDiscovery::CollectScriptFile(std::filesystem::path(droppedPath), droppedScripts);
+				for (const auto& scriptEntry : droppedScripts) {
+					if (scriptEntry.IsGameSystem) {
+						scene.AddGameSystem(scriptEntry.ClassName);
+					}
+				}
+			}
+		};
+
 		const auto& systems = scene.GetGameSystemClassNames();
 		for (size_t i = 0; i < systems.size(); ++i) {
 			ImGui::PushID(static_cast<int>(i));
@@ -2699,6 +2716,15 @@ namespace Axiom {
 			// SmallButton hit-test even though it's drawn over the header.
 			bool open = ImGui::CollapsingHeader((className + "##system_header").c_str(),
 				ImGuiTreeNodeFlags_AllowOverlap);
+
+			bool enabled = scene.IsGameSystemEnabled(className);
+			ImGui::SameLine();
+			if (ImGui::Checkbox("##Enabled", &enabled)) {
+				scene.SetGameSystemEnabled(className, enabled);
+			}
+			if (ImGui::IsItemHovered()) {
+				ImGui::SetTooltip("%s", enabled ? "Disable GameSystem" : "Enable GameSystem");
+			}
 
 			ImGui::SameLine();
 			if (ImGui::SmallButton("^") && i > 0) {
@@ -2783,6 +2809,12 @@ namespace Axiom {
 				}
 			}
 			ImGui::EndPopup();
+		}
+
+		ImGuiWindow* window = ImGui::GetCurrentWindow();
+		if (window && ImGui::BeginDragDropTargetCustom(window->InnerRect, window->GetID("SceneSystemsDropTarget"))) {
+			acceptDroppedGameSystems();
+			ImGui::EndDragDropTarget();
 		}
 	}
 

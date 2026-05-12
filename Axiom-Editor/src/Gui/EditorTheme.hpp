@@ -26,5 +26,10 @@ namespace Axiom::EditorTheme {
 		// Override marker dot drawn next to a component header when any
 		// field of that component differs from the source prefab.
 		inline constexpr ImVec4 OverrideMarker = ImVec4(0.42f, 0.66f, 0.95f, 1.00f);
+
+		// Asset Browser tile selection. Kept neutral so file selection feels
+		// like part of the editor chrome instead of the blue accent layer.
+		inline constexpr ImVec4 AssetTileSelection = ImVec4(0.25f, 0.25f, 0.29f, 0.82f);
+		inline constexpr ImVec4 AssetTileSelectionBorder = ImVec4(0.43f, 0.43f, 0.49f, 0.75f);
 	}
 }

@@ -178,6 +178,14 @@ public class Scene
     public bool DisableSystem<T>() where T : GameSystem
         => SetSystemEnabled<T>(false);
 
+    public bool IsSystemEnabled<T>() where T : GameSystem
+    {
+        if (string.IsNullOrEmpty(Name))
+            return false;
+
+        return InternalCalls.Scene_IsGameSystemEnabled(Name, typeof(T).Name);
+    }
+
     private bool SetSystemEnabled<T>(bool enabled) where T : GameSystem
     {
         if (string.IsNullOrEmpty(Name))

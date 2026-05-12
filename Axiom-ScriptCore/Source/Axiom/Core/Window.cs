@@ -38,7 +38,7 @@ public static class Window
 
     public static void Minimize() => InternalCalls.Window_Minimize();
     public static void Maximize() => InternalCalls.Window_Maximize();
-    public static void Restore() => throw new System.NotImplementedException();
+    public static void Restore() => InternalCalls.Window_Restore();
     public static void Focus() => InternalCalls.Window_Focus();
 
     public static bool IsMaximized => InternalCalls.Window_IsMaximized();

@@ -10,6 +10,7 @@
 #include "Components/General/NameComponent.hpp"
 #include "Core/Log.hpp"
 #include "Editor/ExternalEditor.hpp"
+#include "Gui/EditorTheme.hpp"
 #include "Gui/HierarchyDragData.hpp"
 #include <imgui.h>
 #include <imgui_internal.h>
@@ -751,7 +752,12 @@ namespace Axiom {
 		if (isSelected) {
 			ImVec2 bgMin(cursorPos.x - 2, cursorPos.y - 2);
 			ImVec2 bgMax(cursorPos.x + m_TileSize + 2, cursorPos.y + m_TileSize + ImGui::GetTextLineHeightWithSpacing() + 2);
-			ImGui::GetWindowDrawList()->AddRectFilled(bgMin, bgMax, IM_COL32(60, 100, 160, 180), 4.0f);
+			const float rounding = ImGui::GetStyle().FrameRounding;
+			ImDrawList* drawList = ImGui::GetWindowDrawList();
+			drawList->AddRectFilled(bgMin, bgMax,
+				ImGui::GetColorU32(EditorTheme::Colors::AssetTileSelection), rounding);
+			drawList->AddRect(bgMin, bgMax,
+				ImGui::GetColorU32(EditorTheme::Colors::AssetTileSelectionBorder), rounding);
 		}
 
 		// Dim cut items so the user can see at a glance that Ctrl+X took

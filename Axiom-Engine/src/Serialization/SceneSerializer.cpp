@@ -1054,24 +1054,29 @@ namespace Axiom {
 		Value systemsValue = Value::MakeArray();
 		for (const std::string& className : scene.GetGameSystemClassNames()) {
 			if (className.empty()) continue;
+			const bool enabled = scene.IsGameSystemEnabled(className);
 
 			// Compact form: classes without authored field values stay as a
-			// bare string so existing scenes round-trip byte-identical. Adding
-			// the object form only when there's something to store keeps git
-			// diffs and old-format compatibility clean.
+			// bare string while enabled so existing scenes round-trip cleanly.
+			// Disabled systems or authored fields use the object form.
 			const auto* overrides = scene.GetGameSystemFieldValues(className);
-			if (!overrides || overrides->empty()) {
+			if (enabled && (!overrides || overrides->empty())) {
 				systemsValue.Append(Value(className));
 				continue;
 			}
 
 			Value entry = Value::MakeObject();
 			entry.AddMember("className", Value(className));
-			Value fieldsObj = Value::MakeObject();
-			for (const auto& [fieldName, fieldValue] : *overrides) {
-				fieldsObj.AddMember(fieldName, Value(fieldValue));
+			if (!enabled) {
+				entry.AddMember("enabled", Value(false));
 			}
-			entry.AddMember("fields", std::move(fieldsObj));
+			if (overrides && !overrides->empty()) {
+				Value fieldsObj = Value::MakeObject();
+				for (const auto& [fieldName, fieldValue] : *overrides) {
+					fieldsObj.AddMember(fieldName, Value(fieldValue));
+				}
+				entry.AddMember("fields", std::move(fieldsObj));
+			}
 			systemsValue.Append(std::move(entry));
 		}
 		root.AddMember("systems", std::move(systemsValue));
