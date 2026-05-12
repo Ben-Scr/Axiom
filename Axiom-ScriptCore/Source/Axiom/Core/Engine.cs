@@ -16,6 +16,27 @@ public enum BuildConfiguration
     Release = 2,
 }
 
+public enum Platform
+{
+    Windows,
+    Linux,
+    MacOS,
+    Android,
+    iOS,
+    WebGL,
+    Unknown
+}
+
+public enum GraphicsApi
+{
+    Direct3D11,
+    Direct3D12,
+    Vulkan,
+    Metal,
+    OpenGL,
+    Unknown
+}
+
 /// <summary>
 /// Engine-level identity and graphics-capability info.
 /// Read-only; values are determined at process start.
@@ -25,9 +46,10 @@ public static class Engine
     /// <summary>Engine semver string, e.g. "2026.1.0".</summary>
     public static string Version => InternalCalls.Engine_GetVersion();
 
-    /// <summary>Full engine version string, e.g. "Axiom 2026.1.0 (Windows x64 Debug)".
+    /// <summary>Full engine version string, e.g. "Axiom 2026.1.0 (Windows x64 Release)".
     /// Mirrors the AIM_VERSION_LONG macro on the C++ side.</summary>
     public static string VersionLong => InternalCalls.Engine_GetVersionLong();
+    public static string ConfigurationName => throw new NotImplementedException("Engine.ConfigurationName is not implemented yet.");
 
     /// <summary>
     /// Active build configuration (Debug / Development / Release). Mirrors
@@ -48,7 +70,9 @@ public static class Engine
 
     /// <summary>GPU vendor name, e.g. "NVIDIA", "AMD", "Intel".</summary>
     public static string GpuVendor => InternalCalls.Engine_GetGpuVendor();
+    public static string CpuVendor => throw new NotImplementedException();
 
     /// <summary>Active renderer backend name, e.g. "Vulkan", "Direct3D12", "Metal".</summary>
     public static string GpuRenderer => InternalCalls.Engine_GetGpuRenderer();
+
 }

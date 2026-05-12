@@ -228,6 +228,8 @@ namespace Axiom {
 				case AxiomProject::RenderBackend::Direct3D11: return wgpu::BackendType::D3D11;
 				case AxiomProject::RenderBackend::Direct3D12: return wgpu::BackendType::D3D12;
 				case AxiomProject::RenderBackend::OpenGL:     return wgpu::BackendType::OpenGL;
+				case AxiomProject::RenderBackend::Metal:      return wgpu::BackendType::Metal;
+				case AxiomProject::RenderBackend::OpenGLES:   return wgpu::BackendType::OpenGLES;
 			}
 			return wgpu::BackendType::Undefined;
 		}

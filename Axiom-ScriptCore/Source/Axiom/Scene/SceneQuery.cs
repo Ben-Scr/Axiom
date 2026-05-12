@@ -9,6 +9,23 @@ public class Scene
     private delegate int QueryExecutor(Span<ulong> buffer);
 
     public string Name { get; internal set; } = "";
+    internal ulong AssetUUID { get; set; }
+    public string Path => AssetUUID != 0 ? InternalCalls.Asset_GetPath(AssetUUID) : "";
+
+    internal static Scene? FromAssetUUID(ulong uuid)
+    {
+        if (uuid == 0)
+            return null;
+
+        string displayName = InternalCalls.Asset_GetDisplayName(uuid);
+        string path = InternalCalls.Asset_GetPath(uuid);
+        string name = !string.IsNullOrEmpty(displayName)
+            ? displayName
+            : System.IO.Path.GetFileNameWithoutExtension(path);
+
+        return new Scene { Name = name, AssetUUID = uuid };
+    }
+
     public bool IsLoaded
     {
         get

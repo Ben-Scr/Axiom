@@ -36,6 +36,18 @@ namespace Axiom {
 			return true;
 		}
 
+		uint64_t ParseUInt64String(std::string_view value, uint64_t fallback = 0) {
+			if (value.empty()) return fallback;
+			try {
+				size_t parsed = 0;
+				uint64_t result = std::stoull(std::string(value), &parsed, 10);
+				return parsed == value.size() ? result : fallback;
+			}
+			catch (...) {
+				return fallback;
+			}
+		}
+
 		void ReportCreateProgress(const AxiomProject::CreateProgressCallback& callback, float progress, std::string_view stage) {
 			if (callback) {
 				callback(progress, stage);
@@ -641,6 +653,10 @@ endforeach()
 			root.AddMember("renderBackend",
 				std::string(AxiomProject::RenderBackendToString(project.ActiveRenderBackend)));
 		}
+		if (project.DefaultFontAssetId != k_DefaultFontAssetId) {
+			root.AddMember("defaultFontAsset",
+				std::to_string(project.DefaultFontAssetId));
+		}
 		if (!project.CustomDefines.empty()) {
 			Json::Value definesJson = Json::Value::MakeArray();
 			for (const std::string& d : project.CustomDefines) {
@@ -737,6 +753,8 @@ endforeach()
 			case RenderBackend::Direct3D11: return "Direct3D11";
 			case RenderBackend::Direct3D12: return "Direct3D12";
 			case RenderBackend::OpenGL:     return "OpenGL";
+			case RenderBackend::Metal:      return "Metal";
+			case RenderBackend::OpenGLES:   return "OpenGLES";
 		}
 		return "Auto";
 	}
@@ -749,6 +767,8 @@ endforeach()
 		if (value == "Direct3D11" || value == "DX11"    || value == "d3d11") return RenderBackend::Direct3D11;
 		if (value == "Direct3D12" || value == "DX12"    || value == "d3d12") return RenderBackend::Direct3D12;
 		if (value == "OpenGL"     || value == "opengl"  || value == "GL")    return RenderBackend::OpenGL;
+		if (value == "Metal"      || value == "metal")                        return RenderBackend::Metal;
+		if (value == "OpenGLES"   || value == "opengles" || value == "GLES")  return RenderBackend::OpenGLES;
 		return RenderBackend::Auto;
 	}
 
@@ -1179,6 +1199,14 @@ endforeach()
 					project.ActiveBuildProfile = AxiomProject::BuildProfileFromString(v->AsStringOr("Development"));
 				if (const Json::Value* v = root.FindMember("renderBackend"))
 					project.ActiveRenderBackend = AxiomProject::RenderBackendFromString(v->AsStringOr("Auto"));
+				if (const Json::Value* v = root.FindMember("defaultFontAsset")) {
+					project.DefaultFontAssetId = v->IsString()
+						? ParseUInt64String(v->AsStringOr(), k_DefaultFontAssetId)
+						: v->AsUInt64Or(k_DefaultFontAssetId);
+					if (project.DefaultFontAssetId == 0) {
+						project.DefaultFontAssetId = k_DefaultFontAssetId;
+					}
+				}
 				if (const Json::Value* v = root.FindMember("customDefines"); v && v->IsArray()) {
 					project.CustomDefines.clear();
 					for (const Json::Value& item : v->GetArray()) {

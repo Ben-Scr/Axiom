@@ -9,6 +9,8 @@
 #include "Graphics/Shader.hpp"
 #include "Graphics/Text/Font.hpp"
 #include "Graphics/Text/FontManager.hpp"
+#include "Project/AxiomProject.hpp"
+#include "Project/ProjectManager.hpp"
 #include "Scene/Scene.hpp"
 #include "Serialization/Path.hpp"
 
@@ -511,7 +513,14 @@ namespace Axiom {
 			}
 		}
 
-		const uint64_t uuid = static_cast<uint64_t>(text.FontAssetId);
+		uint64_t uuid = static_cast<uint64_t>(text.FontAssetId);
+		if (uuid == 0 || uuid == k_DefaultFontAssetId) {
+			if (AxiomProject* project = ProjectManager::GetCurrentProject()) {
+				if (project->DefaultFontAssetId != 0) {
+					uuid = project->DefaultFontAssetId;
+				}
+			}
+		}
 		if (uuid != 0) {
 			text.ResolvedFont = FontManager::LoadFontByUUID(uuid, bakeRequest);
 			if (Font* f = FontManager::GetFont(text.ResolvedFont)) return f;

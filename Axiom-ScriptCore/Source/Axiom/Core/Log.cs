@@ -16,7 +16,6 @@ public static class Log
     {
         nativeWrite(message);
         RaiseLogMessage(message);
-        ScriptInstanceManager.DispatchLogMessage(message);
     }
 
     public static void Trace(string message) => Write(message, InternalCalls.Log_Trace);

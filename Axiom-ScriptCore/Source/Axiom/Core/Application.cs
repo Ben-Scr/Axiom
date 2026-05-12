@@ -9,15 +9,13 @@ namespace Axiom;
 /// </summary>
 public static class Application
 {
-    public static event Action<bool>? FocusChanged;
-    public static event Action? ApplicationPaused;
-    public static event Action? ApplicationStart;
-    public static event Action? ApplicationQuit;
+    public static event Action? OnPaused;
+    public static event Action? OnStart;
+    public static event Action? OnQuit;
 
-    internal static void RaiseFocusChanged(bool focused) => FocusChanged?.Invoke(focused);
-    internal static void RaiseApplicationPaused() => ApplicationPaused?.Invoke();
-    internal static void RaiseApplicationStart() => ApplicationStart?.Invoke();
-    internal static void RaiseApplicationQuit() => ApplicationQuit?.Invoke();
+    internal static void RaiseApplicationPaused() => OnPaused?.Invoke();
+    internal static void RaiseApplicationStart() => OnStart?.Invoke();
+    internal static void RaiseApplicationQuit() => OnQuit?.Invoke();
 
     public static float TargetFrameRate
     {
@@ -53,6 +51,12 @@ public static class Application
     public static int ScreenWidth => InternalCalls.Application_GetScreenWidth();
     public static int ScreenHeight => InternalCalls.Application_GetScreenHeight();
     public static float AspectRatio => ScreenHeight > 0 ? (float)ScreenWidth / ScreenHeight : 1.0f;
+
+    public static bool RunningInBackground
+    {
+        get => throw new System.NotImplementedException();
+        set => throw new System.NotImplementedException();
+    }
 
     /// <summary>
     /// True when the script is running inside the editor process (editor

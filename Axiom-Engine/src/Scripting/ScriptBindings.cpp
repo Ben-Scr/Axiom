@@ -18,6 +18,7 @@
 #include "Project/ProjectManager.hpp"
 #include "Project/AxiomProject.hpp"
 #include "Scene/ComponentRegistry.hpp"
+#include "Components/General/HierarchyComponent.hpp"
 #include "Components/General/UUIDComponent.hpp"
 #include "Components/General/Transform2DComponent.hpp"
 #include "Components/General/NameComponent.hpp"
@@ -49,6 +50,7 @@
 #include "Physics/Physics2D.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <limits>
 #include <string_view>
@@ -1114,6 +1116,34 @@ namespace Axiom {
 
 	// ── Transform2D ─────────────────────────────────────────────────────
 
+	static const Transform2DComponent* GetParentTransform(Scene& scene, EntityHandle handle)
+	{
+		if (!scene.HasComponent<HierarchyComponent>(handle)) return nullptr;
+		const EntityHandle parent = scene.GetComponent<HierarchyComponent>(handle).Parent;
+		if (parent == entt::null || !scene.IsValid(parent) || !scene.HasComponent<Transform2DComponent>(parent)) {
+			return nullptr;
+		}
+		return &scene.GetComponent<Transform2DComponent>(parent);
+	}
+
+	static Vec2 WorldPositionToLocal(const Transform2DComponent* parent, const Vec2& worldPosition)
+	{
+		if (!parent) return worldPosition;
+		Vec2 local = Rotate(worldPosition - parent->Position, -parent->Rotation);
+		if (std::abs(parent->Scale.x) > 0.00001f) local.x /= parent->Scale.x;
+		if (std::abs(parent->Scale.y) > 0.00001f) local.y /= parent->Scale.y;
+		return local;
+	}
+
+	static Vec2 WorldScaleToLocal(const Transform2DComponent* parent, const Vec2& worldScale)
+	{
+		if (!parent) return worldScale;
+		Vec2 local = worldScale;
+		if (std::abs(parent->Scale.x) > 0.00001f) local.x /= parent->Scale.x;
+		if (std::abs(parent->Scale.y) > 0.00001f) local.y /= parent->Scale.y;
+		return local;
+	}
+
 	static void Axiom_Transform2D_GetPosition(uint64_t entityID, float* outX, float* outY)
 	{
 		GET_COMPONENT(Transform2DComponent, entityID, (void)(*outX = 0, *outY = 0));
@@ -1123,7 +1153,10 @@ namespace Axiom {
 	static void Axiom_Transform2D_SetPosition(uint64_t entityID, float x, float y)
 	{
 		GET_COMPONENT(Transform2DComponent, entityID, );
-		comp.SetPosition({ x, y });
+		const Vec2 worldPosition{ x, y };
+		comp.LocalPosition = WorldPositionToLocal(GetParentTransform(*scene, handle), worldPosition);
+		comp.Position = worldPosition;
+		comp.MarkDirty();
 	}
 
 	static float Axiom_Transform2D_GetRotation(uint64_t entityID)
@@ -1135,7 +1168,14 @@ namespace Axiom {
 	static void Axiom_Transform2D_SetRotation(uint64_t entityID, float rotation)
 	{
 		GET_COMPONENT(Transform2DComponent, entityID, );
-		comp.SetRotation(rotation);
+		if (const Transform2DComponent* parent = GetParentTransform(*scene, handle)) {
+			comp.LocalRotation = rotation - parent->Rotation;
+		}
+		else {
+			comp.LocalRotation = rotation;
+		}
+		comp.Rotation = rotation;
+		comp.MarkDirty();
 	}
 
 	static void Axiom_Transform2D_GetScale(uint64_t entityID, float* outX, float* outY)
@@ -1147,7 +1187,10 @@ namespace Axiom {
 	static void Axiom_Transform2D_SetScale(uint64_t entityID, float x, float y)
 	{
 		GET_COMPONENT(Transform2DComponent, entityID, );
-		comp.SetScale({ x, y });
+		const Vec2 worldScale{ x, y };
+		comp.LocalScale = WorldScaleToLocal(GetParentTransform(*scene, handle), worldScale);
+		comp.Scale = worldScale;
+		comp.MarkDirty();
 	}
 
 	static uint64_t Axiom_Transform2D_GetEntity(uint64_t entityID)
@@ -1168,7 +1211,15 @@ namespace Axiom {
 	static void Axiom_Transform2D_SetLocalPosition(uint64_t entityID, float x, float y)
 	{
 		GET_COMPONENT(Transform2DComponent, entityID, );
-		comp.SetPosition({ x, y });
+		const Vec2 localPosition{ x, y };
+		comp.LocalPosition = localPosition;
+		if (const Transform2DComponent* parent = GetParentTransform(*scene, handle)) {
+			comp.Position = parent->TransformPoint(localPosition);
+		}
+		else {
+			comp.Position = localPosition;
+		}
+		comp.MarkDirty();
 	}
 
 	static float Axiom_Transform2D_GetLocalRotation(uint64_t entityID)
@@ -1180,7 +1231,12 @@ namespace Axiom {
 	static void Axiom_Transform2D_SetLocalRotation(uint64_t entityID, float rotation)
 	{
 		GET_COMPONENT(Transform2DComponent, entityID, );
-		comp.SetRotation(rotation);
+		comp.LocalRotation = rotation;
+		comp.Rotation = rotation;
+		if (const Transform2DComponent* parent = GetParentTransform(*scene, handle)) {
+			comp.Rotation += parent->Rotation;
+		}
+		comp.MarkDirty();
 	}
 
 	static void Axiom_Transform2D_GetLocalScale(uint64_t entityID, float* outX, float* outY)
@@ -1192,7 +1248,15 @@ namespace Axiom {
 	static void Axiom_Transform2D_SetLocalScale(uint64_t entityID, float x, float y)
 	{
 		GET_COMPONENT(Transform2DComponent, entityID, );
-		comp.SetScale({ x, y });
+		const Vec2 localScale{ x, y };
+		comp.LocalScale = localScale;
+		if (const Transform2DComponent* parent = GetParentTransform(*scene, handle)) {
+			comp.Scale = Hadamard(parent->Scale, localScale);
+		}
+		else {
+			comp.Scale = localScale;
+		}
+		comp.MarkDirty();
 	}
 
 	static uint64_t Axiom_Transform2D_GetParent(uint64_t entityID)

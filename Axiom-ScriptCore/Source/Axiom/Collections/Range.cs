@@ -1,15 +1,12 @@
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
+using System.Numerics;
 
 namespace Axiom.Collections;
-public struct Range
-{
-    private float min;
 
-    public float Min {
+public struct Range<T> where T : struct, INumber<T>
+{
+    private T min;
+
+    public T Min {
         set
         {
             if (value > Max) throw new ArgumentOutOfRangeException($"Range({value},{Max}) is wrong, min can't be more than max.");
@@ -21,9 +18,9 @@ public struct Range
         }
     }
 
-    private float max;
+    private T max;
 
-    public float Max
+    public T Max
     {
         set
         {
@@ -36,27 +33,33 @@ public struct Range
         }
     }
 
-    public Range(float min, float max)
+    public Range(T min, T max)
     {
         if(min > max) throw new ArgumentOutOfRangeException($"Range({min},{max}) is wrong, min can't be more than max.");
 
-        this.Min = min;
-        this.Max = max;
+        Min = min;
+        Max = max;
     }
 
-    public float Clamp(float value)
+    public T Clamp(T value)
     {
         if (value < Min) return Min;
         if (value > Max) return Max;
         return value;
     }
 
-    public bool OutOfBounds(float value)
+    public bool OutOfBounds(T value)
+        => value < Min || value > Max;
+    
+    public bool OutOfBounds(params T[] values)
     {
-        return value < Min || value > Max;
+       for(int i = 0; i < values.Length; i++)
+            if (!OutOfBounds(values[i])) return false;
+
+        return true;
     }
 
-     public override string ToString()
+    public override string ToString()
     {
         return $"Range({Min}, {Max})";
     }

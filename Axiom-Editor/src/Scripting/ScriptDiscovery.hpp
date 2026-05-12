@@ -147,7 +147,10 @@ namespace Axiom::EditorScriptDiscovery {
 		const std::string compactSource = ReadSourceWithoutWhitespace(filePath);
 		return compactSource.find(":Component") != std::string::npos
 			|| compactSource.find(":Axiom.Component") != std::string::npos
-			|| compactSource.find(":global::Axiom.Component") != std::string::npos;
+			|| compactSource.find(":global::Axiom.Component") != std::string::npos
+			|| compactSource.find(":IComponent") != std::string::npos
+			|| compactSource.find(":Axiom.Components.IComponent") != std::string::npos
+			|| compactSource.find(":global::Axiom.Components.IComponent") != std::string::npos;
 	}
 
 	inline std::vector<std::string> ExtractRegisteredNativeScriptClasses(const std::filesystem::path& filePath)
@@ -195,7 +198,9 @@ namespace Axiom::EditorScriptDiscovery {
 		std::string extension = ToLowerCopy(filePath.extension().string());
 		if (IsCSharpScriptExtension(extension)) {
 			const std::string compactSource = ReadSourceWithoutWhitespace(filePath);
-			const bool isManagedComponent = SourceHasBaseClass(compactSource, "Component");
+			const bool isManagedComponent = SourceHasBaseClass(compactSource, "Component")
+				|| SourceHasBaseClass(compactSource, "IComponent")
+				|| SourceHasBaseClass(compactSource, "Components.IComponent");
 			const bool isGameSystem = SourceHasBaseClass(compactSource, "GameSystem");
 			const bool isGlobalSystem = SourceHasBaseClass(compactSource, "GlobalSystem");
 			AppendScriptEntry(entries, filePath.stem().string(), filePath, extension, ScriptType::Managed, isManagedComponent, isGameSystem, isGlobalSystem);

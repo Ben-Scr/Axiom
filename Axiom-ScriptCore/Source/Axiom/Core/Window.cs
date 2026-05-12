@@ -15,6 +15,17 @@ public static class Window
     /// frame) so subscribers don't see a transient 0×0.
     /// </summary>
     public static event Action? OnResize;
+    public static event Action<bool>? FocusChanged;
+    public static event Action? OnMaximize;
+    public static event Action? OnMinimize;
+    public static event Action? OnRestore;
+
+    internal static void RaiseRestore() => OnRestore?.Invoke();
+    internal static void RaiseMinimize() => OnMinimize?.Invoke();
+    internal static void RaiseMaximize() => OnMaximize?.Invoke();
+
+    internal static void RaiseFocusChanged(bool focused) => FocusChanged?.Invoke(focused);
+
 
     public static int Width => InternalCalls.Window_GetWidth();
     public static int Height => InternalCalls.Window_GetHeight();
@@ -27,6 +38,8 @@ public static class Window
 
     public static void Minimize() => InternalCalls.Window_Minimize();
     public static void Maximize() => InternalCalls.Window_Maximize();
+    public static void Restore() => throw new System.NotImplementedException();
+    public static void Focus() => InternalCalls.Window_Focus();
 
     public static bool IsMaximized => InternalCalls.Window_IsMaximized();
 
@@ -42,7 +55,6 @@ public static class Window
         set => InternalCalls.Window_SetPosition(value);
     }
 
-    public static void Focus() => InternalCalls.Window_Focus();
 
     /// <summary>
     /// Half-extent of the window in pixels — useful for centring HUD

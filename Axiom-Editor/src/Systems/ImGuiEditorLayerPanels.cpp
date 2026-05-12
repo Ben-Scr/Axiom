@@ -108,6 +108,78 @@ namespace Axiom {
 			".png", ".jpg", ".jpeg", ".bmp"
 		};
 
+		struct RenderBackendOption {
+			AxiomProject::RenderBackend Backend;
+			const char* Label;
+		};
+
+		constexpr RenderBackendOption k_RenderBackendOptions[] = {
+			{ AxiomProject::RenderBackend::Auto,       "Auto (platform best)" },
+			{ AxiomProject::RenderBackend::Vulkan,     "Vulkan" },
+			{ AxiomProject::RenderBackend::Direct3D11, "Direct3D 11" },
+			{ AxiomProject::RenderBackend::Direct3D12, "Direct3D 12" },
+			{ AxiomProject::RenderBackend::Metal,      "Metal" },
+			{ AxiomProject::RenderBackend::OpenGL,     "OpenGL" },
+			{ AxiomProject::RenderBackend::OpenGLES,   "OpenGL ES" },
+		};
+
+		const char* RenderBackendLabel(AxiomProject::RenderBackend backend) {
+			for (const RenderBackendOption& option : k_RenderBackendOptions) {
+				if (option.Backend == backend) return option.Label;
+			}
+			return "Auto (platform best)";
+		}
+
+		bool IsRenderBackendSupportedOnHost(AxiomProject::RenderBackend backend) {
+			if (backend == AxiomProject::RenderBackend::Auto) return true;
+#if defined(AIM_PLATFORM_WINDOWS)
+			return backend == AxiomProject::RenderBackend::Vulkan
+				|| backend == AxiomProject::RenderBackend::Direct3D11
+				|| backend == AxiomProject::RenderBackend::Direct3D12
+				|| backend == AxiomProject::RenderBackend::OpenGL;
+#elif defined(AIM_PLATFORM_MACOS)
+			return backend == AxiomProject::RenderBackend::Metal;
+#elif defined(AIM_PLATFORM_LINUX)
+			return backend == AxiomProject::RenderBackend::Vulkan
+				|| backend == AxiomProject::RenderBackend::OpenGL
+				|| backend == AxiomProject::RenderBackend::OpenGLES;
+#else
+			return false;
+#endif
+		}
+
+		const char* RenderBackendUnsupportedReason(AxiomProject::RenderBackend backend) {
+			if (IsRenderBackendSupportedOnHost(backend)) return nullptr;
+			switch (backend) {
+				case AxiomProject::RenderBackend::Direct3D11:
+				case AxiomProject::RenderBackend::Direct3D12:
+					return "Direct3D backends are only available on Windows.";
+				case AxiomProject::RenderBackend::Metal:
+					return "Metal is only available on macOS.";
+				case AxiomProject::RenderBackend::Vulkan:
+					return "Vulkan is not available for this host platform.";
+				case AxiomProject::RenderBackend::OpenGL:
+					return "OpenGL is not available for this host platform.";
+				case AxiomProject::RenderBackend::OpenGLES:
+					return "OpenGL ES is not available for this host platform.";
+				case AxiomProject::RenderBackend::Auto:
+					break;
+			}
+			return "This backend is not available for this host platform.";
+		}
+
+		uint64_t ParsePickerAssetId(const std::string& value) {
+			if (value.empty()) return 0;
+			try {
+				size_t parsed = 0;
+				uint64_t id = std::stoull(value, &parsed, 10);
+				return parsed == value.size() ? id : 0;
+			}
+			catch (...) {
+				return 0;
+			}
+		}
+
 		bool NeedsCopy(const std::filesystem::path& src, const std::filesystem::path& dest) {
 			if (!std::filesystem::exists(dest)) return true;
 			try {
@@ -1470,17 +1542,13 @@ namespace Axiom {
 		}
 
 		bool changed = false;
-		if (ImGui::CollapsingHeader("Resolution", ImGuiTreeNodeFlags_DefaultOpen)) {
+		if (ImGui::CollapsingHeader("Window", ImGuiTreeNodeFlags_DefaultOpen)) {
 			ImGui::Indent(8);
 			changed |= ImGui::InputInt("Width", &project->BuildWidth);
 			changed |= ImGui::InputInt("Height", &project->BuildHeight);
 			if (project->BuildWidth < 320) project->BuildWidth = 320;
 			if (project->BuildHeight < 240) project->BuildHeight = 240;
-			ImGui::Unindent(8);
-		}
-
-		if (ImGui::CollapsingHeader("Window", ImGuiTreeNodeFlags_DefaultOpen)) {
-			ImGui::Indent(8);
+			ImGui::Spacing();
 			changed |= ImGui::Checkbox("Fullscreen", &project->BuildFullscreen);
 			changed |= ImGui::Checkbox("Resizable", &project->BuildResizable);
 			ImGui::Unindent(8);
@@ -1991,6 +2059,8 @@ namespace Axiom {
 		}
 
 		bool changed = false;
+		static bool s_RenderBackendChangePopup = false;
+		static AxiomProject::RenderBackend s_PendingRenderBackend = AxiomProject::RenderBackend::Auto;
 
 		if (ImGui::CollapsingHeader("Asset Browser", ImGuiTreeNodeFlags_DefaultOpen)) {
 			ImGui::Indent(8);
@@ -2036,20 +2106,27 @@ namespace Axiom {
 		if (ImGui::CollapsingHeader("Graphics", ImGuiTreeNodeFlags_DefaultOpen)) {
 			ImGui::Indent(8);
 
-			const char* const backendLabels[] = {
-				"Auto (platform best)",
-				"Vulkan",
-				"Direct3D 11",
-				"Direct3D 12",
-				"OpenGL"
-			};
-			int backendIndex = static_cast<int>(project->ActiveRenderBackend);
 			ImGui::SetNextItemWidth(220.0f);
-			if (ImGui::Combo("Rendering API", &backendIndex,
-					backendLabels, IM_ARRAYSIZE(backendLabels))) {
-				project->ActiveRenderBackend =
-					static_cast<AxiomProject::RenderBackend>(backendIndex);
-				changed = true;
+			if (ImGui::BeginCombo("Rendering API", RenderBackendLabel(project->ActiveRenderBackend))) {
+				for (const RenderBackendOption& option : k_RenderBackendOptions) {
+					const bool selected = option.Backend == project->ActiveRenderBackend;
+					const bool supported = IsRenderBackendSupportedOnHost(option.Backend);
+					if (!supported) ImGui::BeginDisabled();
+					if (ImGui::Selectable(option.Label, selected)) {
+						if (supported && option.Backend != project->ActiveRenderBackend) {
+							s_PendingRenderBackend = option.Backend;
+							s_RenderBackendChangePopup = true;
+						}
+					}
+					if (!supported) ImGui::EndDisabled();
+					if (!supported && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+						ImGui::SetTooltip("%s", RenderBackendUnsupportedReason(option.Backend));
+					}
+					if (selected) {
+						ImGui::SetItemDefaultFocus();
+					}
+				}
+				ImGui::EndCombo();
 			}
 			if (ImGui::IsItemHovered()) {
 				ImGui::SetTooltip(
@@ -2068,6 +2145,36 @@ namespace Axiom {
 					"    backend was requested.");
 			}
 
+			constexpr const char* k_DefaultFontPickerKey = "ProjectSettings.DefaultFont";
+			if (auto pending = ReferencePicker::ConsumeSelection(k_DefaultFontPickerKey); pending) {
+				uint64_t pickedId = ParsePickerAssetId(*pending);
+				project->DefaultFontAssetId = pickedId != 0 ? pickedId : k_DefaultFontAssetId;
+				changed = true;
+			}
+
+			bool fontMissing = false;
+			std::string fontSecondary;
+			std::string fontDisplay = ReferencePicker::ResolveAssetDisplay(
+				project->DefaultFontAssetId, AssetKind::Font, fontMissing, &fontSecondary);
+			ImGui::Spacing();
+			ImGui::TextUnformatted("Default Font");
+			ImGui::SameLine(130.0f);
+			ImGui::PushID("ProjectDefaultFont");
+			if (ImGui::Button(fontDisplay.c_str(), ImVec2(260.0f, 0.0f))) {
+				ReferencePicker::OpenForFieldKey(k_DefaultFontPickerKey, "Select Default Font",
+					ReferencePicker::CollectAssetsByKind(AssetKind::Font),
+					ReferencePicker::Style::Plain);
+			}
+			if (ImGui::IsItemHovered() && !fontSecondary.empty()) {
+				ImGui::SetTooltip("%s", fontSecondary.c_str());
+			}
+			ImGui::PopID();
+			ImGui::SameLine();
+			if (ImGui::Button("Reset##ProjectDefaultFont")) {
+				project->DefaultFontAssetId = k_DefaultFontAssetId;
+				changed = true;
+			}
+
 			ImGui::Unindent(8);
 		}
 
@@ -2076,6 +2183,35 @@ namespace Axiom {
 		// configuration, not a runtime knob: the toggle list drives
 		// ScriptEngine::InitializeGlobalSystems on edit so the editor's
 		// next play-mode session uses the new set without a restart.
+		if (s_RenderBackendChangePopup) {
+			ImGui::OpenPopup("Restart Renderer?");
+			s_RenderBackendChangePopup = false;
+		}
+		if (ImGui::BeginPopupModal("Restart Renderer?", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+			ImGui::TextWrapped(
+				"Changing the rendering API from %s to %s requires the renderer to be reinitialized.",
+				RenderBackendLabel(project->ActiveRenderBackend),
+				RenderBackendLabel(s_PendingRenderBackend));
+			ImGui::Spacing();
+			if (ImGui::Button("Restart Now", ImVec2(120.0f, 0.0f))) {
+				project->ActiveRenderBackend = s_PendingRenderBackend;
+				project->Save();
+				ImGui::CloseCurrentPopup();
+				Application::Reload();
+			}
+			ImGui::SameLine();
+			if (ImGui::Button("Save For Later", ImVec2(120.0f, 0.0f))) {
+				project->ActiveRenderBackend = s_PendingRenderBackend;
+				changed = true;
+				ImGui::CloseCurrentPopup();
+			}
+			ImGui::SameLine();
+			if (ImGui::Button("Cancel", ImVec2(90.0f, 0.0f))) {
+				ImGui::CloseCurrentPopup();
+			}
+			ImGui::EndPopup();
+		}
+
 		bool globalSystemsChanged = false;
 		if (ImGui::CollapsingHeader("Global Systems", ImGuiTreeNodeFlags_DefaultOpen)) {
 			ImGui::Indent(8);
@@ -2151,6 +2287,8 @@ namespace Axiom {
 				ScriptEngine::InitializeGlobalSystems(activeGlobalSystems);
 			}
 		}
+
+		ReferencePicker::RenderPopup();
 
 		ImGui::End();
 	}

@@ -50,6 +50,10 @@ namespace Axiom {
 
 			void Start(Scene& scene) override
 			{
+				if (!ShouldRunInCurrentMode()) {
+					return;
+				}
+
 				if (m_Handle == 0) {
 					if (!ScriptEngine::GameSystemClassExists(m_ClassName)) {
 						AIM_CORE_WARN_TAG("Scene", "GameSystem '{}' was registered on scene '{}' but no matching class was found", m_ClassName, scene.GetName());
@@ -64,12 +68,18 @@ namespace Axiom {
 						ScriptEngine::InvokeGameSystemEnable(m_Handle);
 						m_EnableInvoked = true;
 					}
-					ScriptEngine::InvokeGameSystemStart(m_Handle);
+					if (!m_StartInvoked) {
+						ScriptEngine::InvokeGameSystemStart(m_Handle);
+						m_StartInvoked = true;
+					}
 				}
 			}
 
 			void Update(Scene&) override
 			{
+				if (!ShouldRunInCurrentMode()) {
+					return;
+				}
 				if (m_Handle != 0) {
 					ScriptEngine::InvokeGameSystemUpdate(m_Handle);
 				}
@@ -78,6 +88,10 @@ namespace Axiom {
 			// Lazy-creates managed instance and guards against double-fire across reload.
 			void Awake(Scene& scene) override
 			{
+				if (!ShouldRunInCurrentMode()) {
+					return;
+				}
+
 				if (m_Handle == 0) {
 					if (!ScriptEngine::GameSystemClassExists(m_ClassName)) {
 						return; // Warn lives in Start so we don't double-log
@@ -93,6 +107,9 @@ namespace Axiom {
 
 			void FixedUpdate(Scene&) override
 			{
+				if (!ShouldRunInCurrentMode()) {
+					return;
+				}
 				if (m_Handle != 0) {
 					ScriptEngine::InvokeGameSystemFixedUpdate(m_Handle);
 				}
@@ -127,9 +144,16 @@ namespace Axiom {
 				ScriptEngine::InvokeGameSystemDestroy(m_Handle);
 				ScriptEngine::DestroyGameSystemInstance(m_Handle);
 				m_Handle = 0;
+				m_StartInvoked = false;
+				m_AwakeInvoked = false;
 			}
 
 		private:
+			bool ShouldRunInCurrentMode() const
+			{
+				return !Application::IsEditor() || Application::GetIsPlaying();
+			}
+
 			// Push the scene's stored editor-time field values onto the
 			// freshly-created managed instance. Mirrors how ScriptComponent
 			// flushes PendingFieldValues for EntityScripts after their
@@ -151,6 +175,7 @@ namespace Axiom {
 			uint32_t m_Handle = 0;
 			bool m_EnableInvoked = false;
 			bool m_AwakeInvoked = false; // H7
+			bool m_StartInvoked = false;
 		};
 
 		bool IsManagedGameSystem(const std::unique_ptr<ISystem>& system)
@@ -662,6 +687,22 @@ namespace Axiom {
 		}
 
 		return false;
+	}
+
+	void Scene::StartManagedGameSystemsForPlayMode()
+	{
+		for (const auto& systemPointer : m_Systems) {
+			if (!systemPointer || !systemPointer->IsEnabled() || !IsManagedGameSystem(systemPointer)) {
+				continue;
+			}
+
+			ISystem* system = systemPointer.get();
+			system->Awake(*this);
+			system->Start(*this);
+			if (std::find(m_AwakenedSystems.begin(), m_AwakenedSystems.end(), system) == m_AwakenedSystems.end()) {
+				m_AwakenedSystems.push_back(system);
+			}
+		}
 	}
 
 	Camera2DComponent* Scene::GetMainCamera() {

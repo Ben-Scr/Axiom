@@ -254,6 +254,7 @@ namespace Axiom {
 		bool MoveGameSystem(size_t fromIndex, size_t toIndex);
 		void ClearGameSystems();
 		bool SetGameSystemEnabled(const std::string& className, bool enabled);
+		void StartManagedGameSystemsForPlayMode();
 
 		// ── GameSystem inspector fields ────────────────────────────────────
 		// Returns the live ScriptEngine handle for the named GameSystem, or 0

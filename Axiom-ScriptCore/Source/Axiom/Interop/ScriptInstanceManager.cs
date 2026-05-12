@@ -200,6 +200,28 @@ internal static class ScriptInstanceManager
         return new List<ScriptInstanceData>(s_Instances.Values);
     }
 
+    internal static EntityScript? GetScriptInstance(ulong entityID, string className)
+    {
+        if (entityID == 0 || string.IsNullOrWhiteSpace(className))
+            return null;
+
+        foreach (var data in SnapshotInstances())
+        {
+            EntityScript instance = data.Instance;
+            if (instance.Entity == null || instance.Entity.ID != entityID)
+                continue;
+
+            Type type = instance.GetType();
+            if (string.Equals(type.Name, className, StringComparison.Ordinal)
+                || string.Equals(type.FullName, className, StringComparison.Ordinal))
+            {
+                return instance;
+            }
+        }
+
+        return null;
+    }
+
     private static void DispatchToScripts(Action<EntityScript> invoke, string eventName)
     {
         foreach (var data in SnapshotInstances())
@@ -227,10 +249,6 @@ internal static class ScriptInstanceManager
         }
     }
 
-    internal static void DispatchLogMessage(string message)
-    {
-        DispatchToScripts(script => script.OnLogMessage(message), nameof(EntityScript.OnLogMessage));
-    }
 
     private static Scene SceneFromName(string name) => new Scene { Name = name };
 
@@ -265,102 +283,9 @@ internal static class ScriptInstanceManager
     }
 
     [UnmanagedCallersOnly]
-    public static void RaiseFocusChanged(int focused)
-    {
-        bool isFocused = focused != 0;
-        Application.RaiseFocusChanged(isFocused);
-        DispatchToScripts(script => script.OnFocusChanged(isFocused), nameof(EntityScript.OnFocusChanged));
-        DispatchToGameSystems(system => system.OnFocusChanged(isFocused), nameof(GameSystem.OnFocusChanged));
-        DispatchToGlobalSystems(system => system.OnFocusChanged(isFocused), nameof(GlobalSystem.OnFocusChanged));
-    }
-
-    [UnmanagedCallersOnly]
     public static void RaiseWindowResize()
     {
         Window.InvokeResize();
-    }
-
-    [UnmanagedCallersOnly]
-    public static void RaiseKeyDown(int key)
-    {
-        KeyCode keyCode = (KeyCode)key;
-        Input.RaiseKeyDown(keyCode);
-        DispatchToScripts(script => script.OnKeyDown(keyCode), nameof(EntityScript.OnKeyDown));
-    }
-
-    [UnmanagedCallersOnly]
-    public static void RaiseKeyUp(int key)
-    {
-        KeyCode keyCode = (KeyCode)key;
-        Input.RaiseKeyUp(keyCode);
-        DispatchToScripts(script => script.OnKeyUp(keyCode), nameof(EntityScript.OnKeyUp));
-    }
-
-    [UnmanagedCallersOnly]
-    public static void RaiseMouseDown(int button)
-    {
-        MouseButton mouseButton = (MouseButton)button;
-        Input.RaiseMouseDown(mouseButton);
-        DispatchToScripts(script => script.OnMouseDown(mouseButton), nameof(EntityScript.OnMouseDown));
-    }
-
-    [UnmanagedCallersOnly]
-    public static void RaiseMouseUp(int button)
-    {
-        MouseButton mouseButton = (MouseButton)button;
-        Input.RaiseMouseUp(mouseButton);
-        DispatchToScripts(script => script.OnMouseUp(mouseButton), nameof(EntityScript.OnMouseUp));
-    }
-
-    [UnmanagedCallersOnly]
-    public static void RaiseMouseScroll(float delta)
-    {
-        Input.RaiseMouseScroll(delta);
-        DispatchToScripts(script => script.OnMouseScroll(delta), nameof(EntityScript.OnMouseScroll));
-    }
-
-    [UnmanagedCallersOnly]
-    public static void RaiseMouseMove(float x, float y)
-    {
-        Vector2 position = new(x, y);
-        Input.RaiseMouseMove(position);
-        DispatchToScripts(script => script.OnMouseMove(position), nameof(EntityScript.OnMouseMove));
-    }
-
-    [UnmanagedCallersOnly]
-    public static unsafe void RaiseBeforeSceneLoaded(byte* sceneNamePtr)
-    {
-        string name = PtrToString(sceneNamePtr);
-        SceneManager.RaiseBeforeSceneLoaded(name);
-        Scene scene = SceneFromName(name);
-        DispatchToScripts(script => script.OnBeforeSceneLoaded(scene), nameof(EntityScript.OnBeforeSceneLoaded));
-    }
-
-    [UnmanagedCallersOnly]
-    public static unsafe void RaiseSceneLoaded(byte* sceneNamePtr)
-    {
-        string name = PtrToString(sceneNamePtr);
-        SceneManager.RaiseSceneLoaded(name);
-        Scene scene = SceneFromName(name);
-        DispatchToScripts(script => script.OnSceneLoaded(scene), nameof(EntityScript.OnSceneLoaded));
-    }
-
-    [UnmanagedCallersOnly]
-    public static unsafe void RaiseBeforeSceneUnloaded(byte* sceneNamePtr)
-    {
-        string name = PtrToString(sceneNamePtr);
-        SceneManager.RaiseBeforeSceneUnloaded(name);
-        Scene scene = SceneFromName(name);
-        DispatchToScripts(script => script.OnBeforeSceneUnloaded(scene), nameof(EntityScript.OnBeforeSceneUnloaded));
-    }
-
-    [UnmanagedCallersOnly]
-    public static unsafe void RaiseSceneUnloaded(byte* sceneNamePtr)
-    {
-        string name = PtrToString(sceneNamePtr);
-        SceneManager.RaiseSceneUnloaded(name);
-        Scene scene = SceneFromName(name);
-        DispatchToScripts(script => script.OnSceneUnloaded(scene), nameof(EntityScript.OnSceneUnloaded));
     }
 
     [UnmanagedCallersOnly]
@@ -1012,6 +937,7 @@ internal static class ScriptInstanceManager
         // Axiom-specific types
         if (t == typeof(Color)) return "color";
         if (t == typeof(Entity)) return "entity";
+        if (t == typeof(Scene)) return "scene";
         if (t == typeof(Texture)) return "texture";
         if (t == typeof(Audio)) return "audio";
         if (t == typeof(TextureRef)) return "texture";
@@ -1074,6 +1000,11 @@ internal static class ScriptInstanceManager
             return entity.IsPrefabAsset
                 ? "prefab:" + entity.PrefabGUID.ToString(ic)
                 : entity.ID.ToString(ic);
+        }
+        if (t == typeof(Scene))
+        {
+            var scene = (Scene)val;
+            return scene.AssetUUID != 0 ? scene.AssetUUID.ToString(ic) : "";
         }
         if (t == typeof(Texture))
         {
@@ -1260,6 +1191,10 @@ internal static class ScriptInstanceManager
             if (t == typeof(Entity))
             {
                 return Entity.ParseEntityReference(s);
+            }
+            if (t == typeof(Scene))
+            {
+                return Scene.FromAssetUUID(ParseAssetUUID(s));
             }
             if (t == typeof(Texture)) return Texture.FromAssetUUID(ParseAssetUUID(s));
             if (t == typeof(Audio)) return Audio.FromAssetUUID(ParseAssetUUID(s));
@@ -1967,7 +1902,9 @@ internal static class ScriptInstanceManager
 
         Type? type = FindType(className);
         bool isScript = type != null && type.IsSubclassOf(typeof(EntityScript));
-        bool isComponent = type != null && type.IsSubclassOf(typeof(Component)) && !Entity.TryGetNativeComponentName(type, out _);
+        bool isComponent = type != null
+            && ((type.IsSubclassOf(typeof(Component)) && !Entity.TryGetNativeComponentName(type, out _))
+                || (type.IsValueType && typeof(Axiom.Components.IComponent).IsAssignableFrom(type)));
         bool isGameSystem = type != null && type.IsSubclassOf(typeof(GameSystem));
         bool isGlobalSystem = type != null && type.IsSubclassOf(typeof(GlobalSystem));
         if (type == null || (!isScript && !isComponent && !isGameSystem && !isGlobalSystem))
@@ -1996,6 +1933,7 @@ internal static class ScriptInstanceManager
         if (s_UserAssembly != null)
         {
             var type = s_UserAssembly.GetType($"Axiom.{className}")
+                    ?? s_UserAssembly.GetType($"Axiom.Components.{className}")
                     ?? s_UserAssembly.GetType(className);
             if (type != null) return type;
         }
@@ -2003,6 +1941,7 @@ internal static class ScriptInstanceManager
         if (s_CoreAssembly != null)
         {
             var type = s_CoreAssembly.GetType($"Axiom.{className}")
+                    ?? s_CoreAssembly.GetType($"Axiom.Components.{className}")
                     ?? s_CoreAssembly.GetType(className);
             if (type != null) return type;
         }

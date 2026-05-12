@@ -89,6 +89,7 @@
     <Compile Include="Source\Axiom\Collections\Native\NativeStack.cs" />
     <Compile Include="Source\Axiom\Collections\Native\NativeString.cs" />
     <Compile Include="Source\Axiom\Collections\Range.cs" />
+    <Compile Include="Source\Axiom\Collections\Timer.cs" />
     <Compile Include="Source\Axiom\Components\ComponentTypes.cs" />
     <Compile Include="Source\Axiom\Components\IComponent.cs" />
     <Compile Include="Source\Axiom\Components\NativeSpriteRenderer.cs" />
@@ -97,6 +98,7 @@
     <Compile Include="Source\Axiom\Components\TextureHandle.cs" />
     <Compile Include="Source\Axiom\Core\Application.cs" />
     <Compile Include="Source\Axiom\Core\AssetManager.cs" />
+    <Compile Include="Source\Axiom\Core\Cursor.cs" />
     <Compile Include="Source\Axiom\Core\Engine.cs" />
     <Compile Include="Source\Axiom\Core\GlobalUsings.cs" />
     <Compile Include="Source\Axiom\Core\Input.cs" />

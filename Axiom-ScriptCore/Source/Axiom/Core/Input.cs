@@ -11,6 +11,7 @@ public static class Input
 {
     public static event Action<KeyCode>? KeyDown;
     public static event Action<KeyCode>? KeyUp;
+    public static event Action<char>? EnterChar;
 
     public static event Action<MouseButton>? MouseDown;
     public static event Action<MouseButton>? MouseUp;
@@ -32,6 +33,7 @@ public static class Input
         }
     }
 
+    internal static void RaiseEnterChar(char c) => EnterChar?.Invoke(c);
     internal static void RaiseKeyDown(KeyCode key) => KeyDown?.Invoke(key);
     internal static void RaiseKeyUp(KeyCode key) => KeyUp?.Invoke(key);
     internal static void RaiseMouseDown(MouseButton button) => MouseDown?.Invoke(button);
@@ -79,6 +81,8 @@ public static class Input
     {
         return InternalCalls.Input_GetScrollWheelDelta();
     }
+
+    public static bool GetAnyKey() => throw new System.NotImplementedException();
 
     /// <summary>
     /// Returns true every frame the key is held down.

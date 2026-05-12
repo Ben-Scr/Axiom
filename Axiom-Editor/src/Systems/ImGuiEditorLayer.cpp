@@ -844,6 +844,7 @@ namespace Axiom {
 		// Reset Time.TimeSinceStartup / Time.RealtimeSinceStartup so each
 		// play session starts at t=0 from a script's perspective.
 		ApplicationEditorAccess::MarkGameStart();
+		scene.StartManagedGameSystemsForPlayMode();
 		// Reset Box2D sleep timers so bodies that sat through editor
 		// idle don't immediately freeze on the first physics step.
 		if (PhysicsSystem2D::IsInitialized()) {

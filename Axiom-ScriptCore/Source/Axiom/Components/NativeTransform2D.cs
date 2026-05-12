@@ -46,18 +46,6 @@ public struct NativeTransform2D : IComponent
     public readonly Vector2 Right => new(Mathf.Cos(Rotation),  Mathf.Sin(Rotation));
     public readonly Vector2 Left  => -Right;
 
-    public float Speed
-    {
-        get
-        {
-            return 0;
-        }
-        set
-        {
-
-        }
-    }
-
     public readonly float RotationDegrees => Rotation * Mathf.Rad2Deg;
 
     // Native serialized/display name used by the binding layer to find this

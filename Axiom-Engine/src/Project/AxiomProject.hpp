@@ -1,5 +1,6 @@
 #pragma once
 #include "Core/Export.hpp"
+#include "Graphics/Text/FontHandle.hpp"
 #include <string>
 #include <functional>
 #include <string_view>
@@ -139,6 +140,8 @@ namespace Axiom {
 		std::string CursorImagePath;
 		std::string UIInteractableCursorImagePath;
 
+		uint64_t DefaultFontAssetId = k_DefaultFontAssetId;
+
 		// Build profile — drives compile-time defines emitted to user
 		// scripts at build time:
 		//   • Development → AXIOM_BUILD_DEVELOPMENT (and toggle defaults
@@ -166,6 +169,8 @@ namespace Axiom {
 			Direct3D11 = 2,
 			Direct3D12 = 3,
 			OpenGL     = 4,
+			Metal      = 5,
+			OpenGLES   = 6,
 		};
 		RenderBackend ActiveRenderBackend = RenderBackend::Auto;
 

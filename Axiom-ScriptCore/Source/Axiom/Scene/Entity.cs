@@ -176,6 +176,53 @@ public class Entity : IEquatable<Entity>
         return type.IsSubclassOf(typeof(Component)) ? type.Name : null;
     }
 
+    private static Type? ResolveComponentTypeByName(string name)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+            return null;
+
+        foreach (var pair in s_NativeComponentNames)
+        {
+            Type type = pair.Key;
+            if (string.Equals(pair.Value, name, StringComparison.Ordinal)
+                || string.Equals(type.Name, name, StringComparison.Ordinal)
+                || string.Equals(type.FullName, name, StringComparison.Ordinal))
+            {
+                return type;
+            }
+        }
+
+        foreach (Assembly assembly in AppDomain.CurrentDomain.GetAssemblies())
+        {
+            Type[] types;
+            try { types = assembly.GetTypes(); }
+            catch (ReflectionTypeLoadException ex)
+            {
+                List<Type> loadedTypes = new();
+                foreach (Type? type in ex.Types)
+                {
+                    if (type != null)
+                        loadedTypes.Add(type);
+                }
+                types = loadedTypes.ToArray();
+            }
+
+            foreach (Type type in types)
+            {
+                if (!type.IsSubclassOf(typeof(Component)))
+                    continue;
+
+                if (string.Equals(type.Name, name, StringComparison.Ordinal)
+                    || string.Equals(type.FullName, name, StringComparison.Ordinal))
+                {
+                    return type;
+                }
+            }
+        }
+
+        return null;
+    }
+
     internal static Entity FromPrefabGUID(ulong prefabGuid)
         => prefabGuid != 0 ? new Entity(0, prefabGuid) : Invalid;
 
@@ -279,6 +326,23 @@ public class Entity : IEquatable<Entity>
     public T? GetComponent<T>() where T : Component, new()
     {
         return GetComponentByType(typeof(T)) as T;
+    }
+
+    public object? GetComponent(string componentOrScriptName)
+    {
+        Type? componentType = ResolveComponentTypeByName(componentOrScriptName);
+        if (componentType != null)
+            return GetComponentByType(componentType);
+
+        return GetScript(componentOrScriptName);
+    }
+
+    public EntityScript? GetScript(string scriptName)
+    {
+        if (IsPrefabAsset)
+            return null;
+
+        return ScriptInstanceManager.GetScriptInstance(ID, scriptName);
     }
 
     // Direct ref into the entity's component storage. Returns a ref-to-null
@@ -447,6 +511,7 @@ public class Entity : IEquatable<Entity>
         if (type == typeof(byte) && byte.TryParse(value, NumberStyles.Integer, ic, out byte b)) return b;
         if (type == typeof(sbyte) && sbyte.TryParse(value, NumberStyles.Integer, ic, out sbyte sb)) return sb;
         if (type == typeof(Entity)) return ParseEntityReference(value);
+        if (type == typeof(Scene)) return Scene.FromAssetUUID(ParseAssetUUID(value));
         if (type == typeof(Texture)) return Texture.FromAssetUUID(ParseAssetUUID(value));
         if (type == typeof(Audio)) return Audio.FromAssetUUID(ParseAssetUUID(value));
         if (type == typeof(TextureRef)) return new TextureRef(ParseAssetUUID(value));
