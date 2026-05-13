@@ -482,20 +482,6 @@ namespace Axiom {
 			}
 		}
 
-		// Inspector edits and other panels run earlier in this same OnPreRender
-		// phase — AFTER the scene system's OnPreRender propagation already
-		// fired — so re-propagate here before either the gizmo pass or the
-		// FBO render samples Position/Scale/Rotation. Without this, an edit
-		// to a Local* field would only show up one frame later.
-		if (IsInPrefabEditMode()) {
-			TransformHierarchySystem::Propagate(*m_PrefabEditScene);
-		}
-		else {
-			SceneManager::Get().ForeachLoadedScene([](Scene& s) {
-				TransformHierarchySystem::Propagate(s);
-				});
-		}
-
 		// In prefab-edit mode, every reference to the inspector's "scene"
 		// in this function points at the detached prefab scene. We don't
 		// want gizmos / camera icons / framebuffer renders to leak the
@@ -897,12 +883,6 @@ namespace Axiom {
 			return;
 		}
 
-		// Same rationale as RenderEditorView — propagate any inspector edits
-		// from earlier in this OnPreRender phase before reading transforms.
-		SceneManager::Get().ForeachLoadedScene([](Scene& s) {
-			TransformHierarchySystem::Propagate(s);
-			});
-
 		const int aspectPresetIndex = std::clamp(m_GameViewAspectPresetIndex, 0, static_cast<int>(k_GameViewAspectPresets.size()) - 1);
 		m_GameViewAspectPresetIndex = aspectPresetIndex;
 		if (!m_GameViewAspectLoaded) {
@@ -1084,7 +1064,8 @@ namespace Axiom {
 				AABB viewAABB = gameCam->GetViewportAABB();
 				const auto now = std::chrono::steady_clock::now();
 				float targetFps = 0.0f;
-				if (m_GameViewVsync) {
+				const bool appVsyncEnabled = Window::IsVsync();
+				if (m_GameViewVsync && appVsyncEnabled) {
 					if (auto* window = Application::GetWindow()) {
 						const GLFWvidmode* videoMode = window->GetVideomode();
 						targetFps = videoMode ? static_cast<float>(videoMode->refreshRate) : 60.0f;

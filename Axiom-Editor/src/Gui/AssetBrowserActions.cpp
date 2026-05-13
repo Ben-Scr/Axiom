@@ -114,6 +114,29 @@ namespace Axiom {
 			return mirrorPath;
 		}
 
+		AxiomProject::EditorEntityNameSuffixStyle GetAssetDuplicateSuffixStyle()
+		{
+			if (AxiomProject* project = ProjectManager::GetCurrentProject()) {
+				return project->EditorAssetDuplicateSuffix;
+			}
+			return AxiomProject::EditorEntityNameSuffixStyle::ParenthesizedNumber;
+		}
+
+		std::string FormatDuplicateAssetName(const std::string& baseName, int index)
+		{
+			switch (GetAssetDuplicateSuffixStyle()) {
+			case AxiomProject::EditorEntityNameSuffixStyle::SpaceNumber:
+				return baseName + " " + std::to_string(index);
+			case AxiomProject::EditorEntityNameSuffixStyle::HyphenNumber:
+				return baseName + "-" + std::to_string(index);
+			case AxiomProject::EditorEntityNameSuffixStyle::UnderscoreNumber:
+				return baseName + "_" + std::to_string(index);
+			case AxiomProject::EditorEntityNameSuffixStyle::ParenthesizedNumber:
+			default:
+				return baseName + " (" + std::to_string(index) + ")";
+			}
+		}
+
 		// .scene files embed a "name" field in their JSON which Scene::SetName
 		// reads at load time. If the file is renamed but the embedded "name"
 		// keeps the old stem, reopening "Bar.scene" still shows "Foo" in the
@@ -261,7 +284,7 @@ namespace Axiom {
 			std::error_code existsEc;
 			for (int n = 1; targetPath.string() != m_RenamePath
 				&& std::filesystem::exists(targetPath, existsEc) && n < 10000; ++n) {
-				targetPath = std::filesystem::path(m_PendingScriptDir) / (baseName + " (" + std::to_string(n) + ").prefab");
+				targetPath = std::filesystem::path(m_PendingScriptDir) / (FormatDuplicateAssetName(baseName, n) + ".prefab");
 				existsEc.clear();
 			}
 
@@ -800,7 +823,7 @@ namespace Axiom {
 		std::error_code existsEc;
 		for (int n = 1; std::filesystem::exists(destPath, existsEc) && n < 10000; ++n) {
 			destPath = std::filesystem::path(parentDir) /
-				(displayName + " (" + std::to_string(n) + ")" + ext);
+				(FormatDuplicateAssetName(displayName, n) + ext);
 			existsEc.clear();
 		}
 
@@ -883,7 +906,7 @@ namespace Axiom {
 		std::filesystem::path filePath = std::filesystem::path(parentDir) / (baseName + ext);
 		std::error_code existsEc;
 		for (int n = 1; std::filesystem::exists(filePath, existsEc) && n < 10000; ++n) {
-			filePath = std::filesystem::path(parentDir) / (baseName + " (" + std::to_string(n) + ")" + ext);
+			filePath = std::filesystem::path(parentDir) / (FormatDuplicateAssetName(baseName, n) + ext);
 			existsEc.clear();
 		}
 
@@ -908,7 +931,7 @@ namespace Axiom {
 		std::filesystem::path prefabPath = std::filesystem::path(parentDir) / (baseName + ".prefab");
 		std::error_code existsEc;
 		for (int n = 1; std::filesystem::exists(prefabPath, existsEc) && n < 10000; ++n) {
-			prefabPath = std::filesystem::path(parentDir) / (baseName + " (" + std::to_string(n) + ").prefab");
+			prefabPath = std::filesystem::path(parentDir) / (FormatDuplicateAssetName(baseName, n) + ".prefab");
 			existsEc.clear();
 		}
 

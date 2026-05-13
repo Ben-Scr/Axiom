@@ -2073,6 +2073,22 @@ namespace Axiom {
 					"original extension on commit. When on, extensions are\n"
 					"shown and editable verbatim.");
 			}
+			constexpr const char* k_AssetSuffixLabels[] = {
+				"Asset 1",
+				"Asset (1)",
+				"Asset-1",
+				"Asset_1",
+			};
+			int assetSuffixIndex = static_cast<int>(project->EditorAssetDuplicateSuffix);
+			if (assetSuffixIndex < 0 || assetSuffixIndex >= IM_ARRAYSIZE(k_AssetSuffixLabels)) {
+				assetSuffixIndex = static_cast<int>(AxiomProject::EditorEntityNameSuffixStyle::ParenthesizedNumber);
+			}
+			ImGui::SetNextItemWidth(180.0f);
+			if (ImGui::Combo("Duplicate suffix", &assetSuffixIndex, k_AssetSuffixLabels, IM_ARRAYSIZE(k_AssetSuffixLabels))) {
+				project->EditorAssetDuplicateSuffix =
+					static_cast<AxiomProject::EditorEntityNameSuffixStyle>(assetSuffixIndex);
+				changed = true;
+			}
 			ImGui::Unindent(8);
 		}
 
@@ -2103,6 +2119,31 @@ namespace Axiom {
 		// launch. NOTE: this value is persisted to axiom-project.json
 		// but not yet plumbed into WebGPUApi.cpp::RequestAdapterSync —
 		// wiring it through is a separate change.
+		if (ImGui::CollapsingHeader("Scripting", ImGuiTreeNodeFlags_DefaultOpen)) {
+			ImGui::Indent(8);
+			changed |= ImGui::Checkbox("Auto-recompile on file changes", &project->AutoRecompileScripts);
+			changed |= ImGui::Checkbox("Recompile before Play Mode", &project->RecompileScriptsOnPlay);
+			Scene* activeScene = SceneManager::Get().GetActiveScene();
+			ScriptSystem* scriptSys = (activeScene && activeScene->HasSystem<ScriptSystem>())
+				? activeScene->GetSystem<ScriptSystem>()
+				: nullptr;
+			const bool canRecompile = scriptSys && !scriptSys->IsRebuilding();
+			if (!canRecompile) {
+				ImGui::BeginDisabled();
+			}
+			if (ImGui::Button("Recompile Scripts") && scriptSys) {
+				scriptSys->RequestRebuildAndReloadAll();
+			}
+			if (!canRecompile) {
+				ImGui::EndDisabled();
+			}
+			if (scriptSys && scriptSys->IsRebuilding()) {
+				ImGui::SameLine();
+				ImGui::TextDisabled("Compiling...");
+			}
+			ImGui::Unindent(8);
+		}
+
 		if (ImGui::CollapsingHeader("Entities", ImGuiTreeNodeFlags_DefaultOpen)) {
 			ImGui::Indent(8);
 			changed |= ImGui::Checkbox("Ensure unique editor-created names", &project->EditorEnsureUniqueEntityNames);

@@ -55,6 +55,7 @@ namespace Axiom {
 		void OnDetach(Application& app) override;
 		void OnPreRender(Application& app) override;
 		void OnUpdate(Application& app, float dt) override;
+		void OnEvent(Application& app, AxiomEvent& event) override;
 	private:
 		struct LogEntry {
 			std::string Message;
@@ -138,6 +139,7 @@ namespace Axiom {
 		void UnpackSelectedPrefabs(Scene& scene);
 		void CopySelectedEntities(Scene& scene);
 		void PasteEntities(Scene& scene);
+		EntityHandle FinishCreatedEditorEntity(Scene& scene, Entity parent, Entity created);
 		EntityHandle RenderCreateEntityMenu(Scene& scene, Entity parent);
 		std::string MakeEditorUniqueEntityName(Scene& scene, std::string_view baseName, EntityHandle ignoreEntity = entt::null) const;
 		void EnsureEditorUniqueEntityName(Scene& scene, EntityHandle entity);

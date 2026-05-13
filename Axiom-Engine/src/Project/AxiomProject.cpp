@@ -629,6 +629,12 @@ endforeach()
 			root.AddMember("autoSaveIntervalSeconds",
 				Json::Value(project.AutoSaveIntervalSeconds));
 		}
+		if (!project.AutoRecompileScripts) {
+			root.AddMember("autoRecompileScripts", false);
+		}
+		if (project.RecompileScriptsOnPlay) {
+			root.AddMember("recompileScriptsOnPlay", true);
+		}
 
 		if (project.ShowFileExtensions) {
 			root.AddMember("showFileExtensions", true);
@@ -640,6 +646,10 @@ endforeach()
 		if (project.EditorEntityNameSuffix != AxiomProject::EditorEntityNameSuffixStyle::ParenthesizedNumber) {
 			root.AddMember("editorEntityNameSuffix",
 				std::string(AxiomProject::EditorEntityNameSuffixStyleToString(project.EditorEntityNameSuffix)));
+		}
+		if (project.EditorAssetDuplicateSuffix != AxiomProject::EditorEntityNameSuffixStyle::ParenthesizedNumber) {
+			root.AddMember("editorAssetDuplicateSuffix",
+				std::string(AxiomProject::EditorEntityNameSuffixStyleToString(project.EditorAssetDuplicateSuffix)));
 		}
 
 		if (!project.CursorImagePath.empty()) {
@@ -699,6 +709,18 @@ endforeach()
 #endif
 	}
 
+	std::string AxiomProject::GetManagedPlatformDefine() {
+#if defined(AIM_PLATFORM_WINDOWS)
+		return "AXIOM_WINDOWS";
+#elif defined(AIM_PLATFORM_MACOS)
+		return "AXIOM_MACOS";
+#elif defined(AIM_PLATFORM_LINUX)
+		return "AXIOM_LINUX";
+#else
+		return {};
+#endif
+	}
+
 	std::string AxiomProject::BuildManagedDefineConstants(std::string_view primarySymbol) {
 		std::string defineConstants;
 		if (!primarySymbol.empty()) {
@@ -721,6 +743,11 @@ endforeach()
 		if (!profileDefine.empty()) {
 			if (!defineConstants.empty()) defineConstants += "%3B";
 			defineConstants += profileDefine;
+		}
+		const std::string platformDefine = GetManagedPlatformDefine();
+		if (!platformDefine.empty()) {
+			if (!defineConstants.empty()) defineConstants += "%3B";
+			defineConstants += platformDefine;
 		}
 		if (project) {
 			for (const std::string& custom : project->CustomDefines) {
@@ -913,6 +940,11 @@ endforeach()
 		if (!profile.empty()) {
 			defines += ';';
 			defines += profile;
+		}
+		const std::string platform = GetManagedPlatformDefine();
+		if (!platform.empty()) {
+			defines += ';';
+			defines += platform;
 		}
 		for (const std::string& custom : CustomDefines) {
 			if (custom.empty()) continue;
@@ -1220,12 +1252,19 @@ endforeach()
 					project.AutoSaveScenes = v->AsBoolOr(false);
 				if (const Json::Value* v = root.FindMember("autoSaveIntervalSeconds"))
 					project.AutoSaveIntervalSeconds = static_cast<float>(v->AsDoubleOr(120.0));
+				if (const Json::Value* v = root.FindMember("autoRecompileScripts"))
+					project.AutoRecompileScripts = v->AsBoolOr(true);
+				if (const Json::Value* v = root.FindMember("recompileScriptsOnPlay"))
+					project.RecompileScriptsOnPlay = v->AsBoolOr(false);
 				if (const Json::Value* v = root.FindMember("showFileExtensions"))
 					project.ShowFileExtensions = v->AsBoolOr(false);
 				if (const Json::Value* v = root.FindMember("editorEnsureUniqueEntityNames"))
 					project.EditorEnsureUniqueEntityNames = v->AsBoolOr(true);
 				if (const Json::Value* v = root.FindMember("editorEntityNameSuffix"))
 					project.EditorEntityNameSuffix = AxiomProject::EditorEntityNameSuffixStyleFromString(
+						v->AsStringOr("ParenthesizedNumber"));
+				if (const Json::Value* v = root.FindMember("editorAssetDuplicateSuffix"))
+					project.EditorAssetDuplicateSuffix = AxiomProject::EditorEntityNameSuffixStyleFromString(
 						v->AsStringOr("ParenthesizedNumber"));
 				if (const Json::Value* v = root.FindMember("cursorImagePath"))
 					project.CursorImagePath = v->AsStringOr();

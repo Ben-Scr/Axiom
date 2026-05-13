@@ -30,7 +30,12 @@ internal static class ComponentTypes
     };
 
     internal static string? TryGetNativeName(Type t)
-        => s_NativeNames.TryGetValue(t, out string? n) ? n : null;
+    {
+        if (s_NativeNames.TryGetValue(t, out string? n))
+            return n;
+
+        return ResolveNativeName(t, 0, out _);
+    }
 
     internal static string? ResolveNativeName(Type t, int managedSize, out int nativeSize)
     {

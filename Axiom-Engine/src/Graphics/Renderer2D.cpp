@@ -24,6 +24,7 @@
 #include <glm/gtc/type_ptr.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <unordered_map>
@@ -364,6 +365,8 @@ namespace Axiom {
 
 	void Renderer2D::BeginFrame() {
 		m_DrawCallsCount = 0;
+		m_RenderedInstancesCount = 0;
+		m_RenderLoopDuration = 0.0f;
 		// Reset per-frame bind groups — texture lookups they reference may
 		// be invalidated between frames by TextureManager::PurgeUnreferenced
 		// or explicit Texture2D::Destroy. A fresh per-frame build keeps the
@@ -417,18 +420,33 @@ namespace Axiom {
 		if (!m_IsInitialized) return;
 		if (!WebGPUSpriteResources::IsReady()) return;
 
+		const auto renderStart = std::chrono::steady_clock::now();
+		auto finishTiming = [&]() {
+			m_RenderLoopDuration = std::chrono::duration<float, std::milli>(
+				std::chrono::steady_clock::now() - renderStart).count();
+			};
+
 		const size_t n = CollectSpriteInstances(scene, viewportAABB, g_InstancesScratch, g_TexturesScratch);
 		m_RenderedInstancesCount = n;
-		if (n == 0) return;
+		if (n == 0) {
+			finishTiming();
+			return;
+		}
 
 		SortInstancesInPlace(n);
 
 		auto target = WebGPUBackend::BeginRenderToCurrentTarget();
-		if (!target.Valid) return;
+		if (!target.Valid) {
+			finishTiming();
+			return;
+		}
 
 		wgpu::Device device = WebGPUBackend::GetDevice();
 		wgpu::Queue  queue  = WebGPUBackend::GetQueue();
-		if (!device || !queue) return;
+		if (!device || !queue) {
+			finishTiming();
+			return;
+		}
 
 		wgpu::RenderPipeline pipeline = WebGPUSpriteResources::GetSpritePipeline(
 			target.ColorFormat, target.HasDepth);
@@ -436,13 +454,20 @@ namespace Axiom {
 			AIM_CORE_WARN_TAG("Renderer2D",
 				"No pipeline for color-format {} (hasDepth={}) — skipping submit",
 				static_cast<int>(target.ColorFormat), target.HasDepth);
+			finishTiming();
 			return;
 		}
 
-		if (!EnsureUniformBuffer(device)) return;
+		if (!EnsureUniformBuffer(device)) {
+			finishTiming();
+			return;
+		}
 		queue.WriteBuffer(g_UniformBuffer, 0, glm::value_ptr(vp), 64);
 
-		if (!EnsureInstanceBuffer(device, static_cast<uint32_t>(n))) return;
+		if (!EnsureInstanceBuffer(device, static_cast<uint32_t>(n))) {
+			finishTiming();
+			return;
+		}
 		g_GpuInstanceScratch.resize(n);
 		for (size_t k = 0; k < n; ++k) {
 			WebGPUSpriteResources::EncodeInstance44(g_InstancesScratch[k], g_GpuInstanceScratch[k]);
@@ -452,7 +477,10 @@ namespace Axiom {
 			n * sizeof(SpriteInstance));
 
 		wgpu::CommandEncoder encoder = WebGPUBackend::GetFrameEncoder();
-		if (!encoder) return;
+		if (!encoder) {
+			finishTiming();
+			return;
+		}
 
 		// Open the sprite render pass — Load semantics so a prior
 		// RenderApi::Clear's result is preserved instead of double-cleared.
@@ -533,6 +561,7 @@ namespace Axiom {
 		if (target.IsSwapChain) {
 			WebGPUBackend::MarkSwapChainRendered();
 		}
+		finishTiming();
 	}
 
 	void Renderer2D::RenderScenes() {

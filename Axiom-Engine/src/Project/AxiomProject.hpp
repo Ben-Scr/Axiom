@@ -119,6 +119,8 @@ namespace Axiom {
 		// by default so it stays opt-in.
 		bool AutoSaveScenes = false;
 		float AutoSaveIntervalSeconds = 120.0f;
+		bool AutoRecompileScripts = true;
+		bool RecompileScriptsOnPlay = false;
 
 		enum class EditorEntityNameSuffixStyle : uint8_t {
 			SpaceNumber = 0,       // Entity 1
@@ -129,6 +131,7 @@ namespace Axiom {
 
 		bool EditorEnsureUniqueEntityNames = true;
 		EditorEntityNameSuffixStyle EditorEntityNameSuffix = EditorEntityNameSuffixStyle::ParenthesizedNumber;
+		EditorEntityNameSuffixStyle EditorAssetDuplicateSuffix = EditorEntityNameSuffixStyle::ParenthesizedNumber;
 
 		// Editor-only: show file extensions in the asset browser and the
 		// rename/create textbox. When false (default), an asset created
@@ -273,6 +276,7 @@ namespace Axiom {
 
 		static std::string GetActiveBuildConfiguration();
 		static std::string GetActiveBuildDefineConstant();
+		static std::string GetManagedPlatformDefine();
 		static std::string BuildManagedDefineConstants(std::string_view primarySymbol);
 
 		static AxiomProject Create(const std::string& name, const std::string& parentDir,

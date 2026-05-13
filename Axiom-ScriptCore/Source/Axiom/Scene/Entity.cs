@@ -227,7 +227,20 @@ public class Entity : IEquatable<Entity>
         => prefabGuid != 0 ? new Entity(0, prefabGuid) : Invalid;
 
     internal static string? GetNativeComponentName<T>() where T : Component, new() => GetNativeName<T>();
-    internal static bool TryGetNativeComponentName(Type type, out string? name) => s_NativeComponentNames.TryGetValue(type, out name);
+    internal static bool TryGetNativeComponentName(Type type, out string? name)
+    {
+        if (s_NativeComponentNames.TryGetValue(type, out name))
+            return true;
+
+        if (type.IsValueType && typeof(IComponent).IsAssignableFrom(type))
+        {
+            name = ComponentTypes.TryGetNativeName(type);
+            return name != null;
+        }
+
+        name = null;
+        return false;
+    }
 
     private void InvalidateCachedComponent(Type type)
     {

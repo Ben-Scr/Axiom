@@ -12,6 +12,7 @@ namespace Axiom {
 		void Initialize(const std::string& rootDirectory);
 		void Shutdown();
 		void Render();
+		void RequestRefresh() { m_NeedsRefresh = true; }
 
 		/// Returns true when the user is currently naming a new script (rename in progress).
 		bool IsCreatingScript() const { return m_PendingScriptType != PendingScriptType::None; }

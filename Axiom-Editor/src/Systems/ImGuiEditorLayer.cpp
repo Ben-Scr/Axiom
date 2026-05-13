@@ -11,6 +11,8 @@
 #include "Components/Components.hpp"
 #include "Core/Application.hpp"
 #include "Core/Window.hpp"
+#include "Events/EventDispatcher.hpp"
+#include "Events/WindowFocusEvent.hpp"
 #include "Graphics/OpenGL.hpp"
 #include "Graphics/Renderer2D.hpp"
 #include "Graphics/GizmoRenderer.hpp"
@@ -412,6 +414,14 @@ namespace Axiom {
 		m_GameViewFBO.Destroy();
 	}
 
+	void ImGuiEditorLayer::OnEvent(Application& /*app*/, AxiomEvent& event) {
+		EventDispatcher dispatcher(event);
+		dispatcher.Dispatch<WindowFocusEvent>([this](WindowFocusEvent&) {
+			m_AssetBrowser.RequestRefresh();
+			return false;
+			});
+	}
+
 	void ImGuiEditorLayer::OnUpdate(Application& app, float dt) {
 		DrainPendingLogEntries();
 		RunAutoSaveTick(app, dt);
@@ -472,6 +482,7 @@ namespace Axiom {
 		}
 		UpdateEditorCameraFocus(dt);
 		const bool hasShortcutFocus = HasEntityShortcutFocus();
+		const ImGuiIO& io = ImGui::GetIO();
 		// Shortcut handlers (focus / duplicate / rename / etc.) act on the
 		// scene the user is editing, which is the prefab edit scene in prefab
 		// mode. Hand them the same context-aware reference the sweep used so
@@ -480,7 +491,8 @@ namespace Axiom {
 		Scene& shortcutScene = selectionScene;
 		const bool hasEntitySelection = !GetSelectedEntities(shortcutScene).empty();
 
-		if (input.GetKeyDown(KeyCode::F) && hasShortcutFocus && hasEntitySelection) {
+		if (!io.WantTextInput && !ImGui::IsAnyItemActive()
+			&& input.GetKeyDown(KeyCode::F) && hasShortcutFocus && hasEntitySelection) {
 			FocusSelectedEntity(shortcutScene);
 		}
 
@@ -494,8 +506,13 @@ namespace Axiom {
 		// model of iteration. Save (Ctrl+S) is gated separately on the
 		// menu, so it can't accidentally persist play-mode state.
 
-		const ImGuiIO& io = ImGui::GetIO();
 		if (m_RenamingEntity != entt::null || io.WantTextInput || ImGui::IsAnyItemActive()) {
+			return;
+		}
+
+		if (io.KeyShift && !io.KeyCtrl && !io.KeyAlt && !io.KeySuper
+			&& ImGui::IsKeyPressed(ImGuiKey_C, false)) {
+			FinishCreatedEditorEntity(shortcutScene, Entity::Null, shortcutScene.CreateEmptyEntity());
 			return;
 		}
 
@@ -924,6 +941,13 @@ namespace Axiom {
 		ApplicationEditorAccess::SetPlaymodePaused(false);
 
 		ScriptSystem* scriptSys = scene.HasSystem<ScriptSystem>() ? scene.GetSystem<ScriptSystem>() : nullptr;
+		if (scriptSys && project && project->RecompileScriptsOnPlay) {
+			const bool rebuildStarted = scriptSys->RequestRebuildAndReloadAll();
+			if (rebuildStarted || scriptSys->IsRebuilding()) {
+				m_PlayModeRecompilePending = true;
+				return;
+			}
+		}
 		if (scriptSys && scriptSys->IsRebuilding()) {
 			m_PlayModeRecompilePending = true;
 			return;
@@ -1111,6 +1135,7 @@ namespace Axiom {
 		// entt id and dispatch a stale click against an unrelated restored entity.
 		m_PressedEntity = entt::null;
 
+		const bool wasSceneNodeSelected = m_IsSceneNodeSelected;
 		uint64_t selectedUUID = 0;
 		Scene* active = SceneManager::Get().GetActiveScene();
 		if (active && m_SelectedEntity != entt::null && active->IsValid(m_SelectedEntity)
@@ -1119,6 +1144,8 @@ namespace Axiom {
 		}
 
 		m_SelectedEntity = entt::null;
+		m_SelectedEntities.clear();
+		m_LastEntitySelectionIndex = -1;
 		m_IsSceneNodeSelected = false;
 		m_RenamingEntity = entt::null;
 		m_EntityOrder.clear(); m_EntityOrderDirty = true;
@@ -1136,6 +1163,9 @@ namespace Axiom {
 		}
 
 		if (selectedUUID == 0) {
+			if (wasSceneNodeSelected) {
+				SelectSceneNode();
+			}
 			return;
 		}
 
@@ -1246,26 +1276,49 @@ namespace Axiom {
 
 	void ImGuiEditorLayer::SelectEntityRange(int index) {
 		ResetEditorFocusCycle();
-		if (m_EntityOrder.empty()) {
+		const auto& order = !m_VisibleEntityOrder.empty() ? m_VisibleEntityOrder : m_EntityOrder;
+		if (order.empty()) {
 			return;
 		}
 
-		if (index < 0 || index >= static_cast<int>(m_EntityOrder.size())) {
+		if (index < 0 || index >= static_cast<int>(order.size())) {
 			return;
 		}
 
-		if (m_LastEntitySelectionIndex < 0 || m_LastEntitySelectionIndex >= static_cast<int>(m_EntityOrder.size())) {
-			SetSingleEntitySelection(m_EntityOrder[static_cast<std::size_t>(index)], index);
+		int anchorIndex = m_LastEntitySelectionIndex;
+		if (anchorIndex < 0 || anchorIndex >= static_cast<int>(order.size())) {
+			for (int i = 0; i < static_cast<int>(order.size()); ++i) {
+				if (order[static_cast<std::size_t>(i)] == m_SelectedEntity) {
+					anchorIndex = i;
+					break;
+				}
+			}
+		}
+		if (anchorIndex < 0 || anchorIndex >= static_cast<int>(order.size())) {
+			for (EntityHandle selected : m_SelectedEntities) {
+				for (int i = 0; i < static_cast<int>(order.size()); ++i) {
+					if (order[static_cast<std::size_t>(i)] == selected) {
+						anchorIndex = i;
+						break;
+					}
+				}
+				if (anchorIndex >= 0) break;
+			}
+		}
+
+		if (anchorIndex < 0 || anchorIndex >= static_cast<int>(order.size())) {
+			SetSingleEntitySelection(order[static_cast<std::size_t>(index)], index);
 			return;
 		}
 
-		const int first = std::min(m_LastEntitySelectionIndex, index);
-		const int last = std::max(m_LastEntitySelectionIndex, index);
+		const int first = std::min(anchorIndex, index);
+		const int last = std::max(anchorIndex, index);
 		m_SelectedEntities.clear();
 		for (int i = first; i <= last; ++i) {
-			m_SelectedEntities.push_back(m_EntityOrder[static_cast<std::size_t>(i)]);
+			m_SelectedEntities.push_back(order[static_cast<std::size_t>(i)]);
 		}
-		m_SelectedEntity = m_EntityOrder[static_cast<std::size_t>(index)];
+		m_SelectedEntity = order[static_cast<std::size_t>(index)];
+		m_LastEntitySelectionIndex = index;
 		m_IsSceneNodeSelected = false;
 		m_AssetBrowser.ClearSelection();
 	}
@@ -1669,9 +1722,10 @@ namespace Axiom {
 		}
 	}
 
-	EntityHandle ImGuiEditorLayer::RenderCreateEntityMenu(Scene& scene, Entity parent) {
-		EntityHandle createdHandle = entt::null;
-
+	EntityHandle ImGuiEditorLayer::FinishCreatedEditorEntity(Scene& scene, Entity parent, Entity created) {
+		if (!created.IsValid()) {
+			return entt::null;
+		}
 		// Prefab edit mode constraint: every entity created inside a
 		// prefab edit must live UNDER the prefab root (the prefab is a
 		// single-rooted asset — siblings to the root would silently get
@@ -1692,19 +1746,25 @@ namespace Axiom {
 			effectiveParent = m_PrefabEditScene->GetEntity(m_PrefabEditRootEntity);
 		}
 
+		if (effectiveParent.IsValid()) {
+			created.SetParent(effectiveParent);
+			m_CollapsedHierarchyEntities.erase(static_cast<uint32_t>(effectiveParent.GetHandle()));
+		}
+
+		const EntityHandle createdHandle = created.GetHandle();
+		EnsureEditorUniqueEntityNames(scene, { createdHandle });
+		SelectEntity(createdHandle);
+		scene.MarkDirty();
+		m_EntityOrder.clear();
+		m_EntityOrderDirty = true;
+		return createdHandle;
+	}
+
+	EntityHandle ImGuiEditorLayer::RenderCreateEntityMenu(Scene& scene, Entity parent) {
+		EntityHandle createdHandle = entt::null;
+
 		auto finishCreated = [&](Entity created) {
-			if (!created.IsValid()) {
-				return;
-			}
-
-			if (effectiveParent.IsValid()) {
-				created.SetParent(effectiveParent);
-				m_CollapsedHierarchyEntities.erase(static_cast<uint32_t>(effectiveParent.GetHandle()));
-			}
-
-			createdHandle = created.GetHandle();
-			EnsureEditorUniqueEntityNames(scene, { createdHandle });
-			SelectEntity(createdHandle);
+			createdHandle = FinishCreatedEditorEntity(scene, parent, created);
 		};
 
 		if (ImGui::MenuItem("Create (Empty)", "Shift + C"))
@@ -2274,7 +2334,7 @@ namespace Axiom {
 	}
 
 	bool ImGuiEditorLayer::HasEntityShortcutFocus() const {
-		return m_IsEditorViewFocused || m_IsEntitiesPanelFocused || m_IsInspectorPanelFocused;
+		return m_IsEditorViewActive || m_IsEditorViewFocused || m_IsEntitiesPanelFocused || m_IsInspectorPanelFocused;
 	}
 
 
@@ -2567,6 +2627,7 @@ namespace Axiom {
 						hideUnderDepth = -1;
 					}
 
+					const int visibleIndex = static_cast<int>(m_VisibleEntityOrder.size());
 					m_VisibleEntityOrder.push_back(entityHandle);
 
 					// Step indent up/down to match this entity's depth.
@@ -2684,13 +2745,13 @@ namespace Axiom {
 							if (ImGui::IsItemHovered() && m_PressedEntity == entityHandle && !IsLeftMouseDragPastClickThreshold()) {
 								const ImGuiIO& io = ImGui::GetIO();
 								if (io.KeyShift) {
-									SelectEntityRange(entityIdx);
+									SelectEntityRange(visibleIndex);
 								}
 								else if (io.KeyCtrl) {
-									ToggleEntitySelection(entityHandle, entityIdx);
+									ToggleEntitySelection(entityHandle, visibleIndex);
 								}
 								else {
-									SetSingleEntitySelection(entityHandle, entityIdx);
+									SetSingleEntitySelection(entityHandle, visibleIndex);
 								}
 							}
 							if (m_PressedEntity == entityHandle) {
@@ -2836,7 +2897,7 @@ namespace Axiom {
 					if (ImGui::BeginPopupContextItem())
 					{
 						if (!IsEntitySelected(entityHandle)) {
-							SetSingleEntitySelection(entityHandle, entityIdx);
+							SetSingleEntitySelection(entityHandle, visibleIndex);
 						}
 
 						if (ImGui::MenuItem("Delete Entity"))

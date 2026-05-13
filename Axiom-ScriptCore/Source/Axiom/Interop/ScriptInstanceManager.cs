@@ -1011,6 +1011,12 @@ internal static class ScriptInstanceManager
                 ? "component:" + nativeName
                 : "unsupported";
         }
+        if (t.IsValueType && typeof(Axiom.Components.IComponent).IsAssignableFrom(t))
+        {
+            return Entity.TryGetNativeComponentName(t, out string? nativeName)
+                ? "component:" + nativeName
+                : "unsupported";
+        }
         return "unsupported";
     }
 

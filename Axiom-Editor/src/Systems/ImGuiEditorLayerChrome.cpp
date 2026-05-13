@@ -30,6 +30,7 @@
 #include "Gui/EditorIcons.hpp"
 #include "Scripting/ScriptEngine.hpp"
 #include "Scripting/ScriptSystem.hpp"
+#include "Systems/TransformHierarchySystem.hpp"
 #include <algorithm>
 #include <filesystem>
 #include <unordered_set>
@@ -466,6 +467,14 @@ namespace Axiom {
 		// the real active scene so the user can still preview play.
 		Scene* contextScene = GetContextScene();
 		RenderInspectorPanel(contextScene ? *contextScene : scene);
+		if (IsInPrefabEditMode() && m_PrefabEditScene) {
+			TransformHierarchySystem::Propagate(*m_PrefabEditScene);
+		}
+		else {
+			SceneManager::Get().ForeachLoadedScene([](Scene& s) {
+				TransformHierarchySystem::Propagate(s);
+				});
+		}
 		RenderEditorView(contextScene ? *contextScene : scene);
 		RenderGameView(scene);
 		RenderProjectPanel();

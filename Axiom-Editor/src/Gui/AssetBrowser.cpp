@@ -40,22 +40,70 @@ namespace Axiom {
 
 		std::string GetDuplicateBaseName(const std::string& stem)
 		{
-			if (stem.size() < 4 || stem.back() != ')') {
-				return stem;
-			}
-
-			const std::size_t open = stem.rfind(" (");
-			if (open == std::string::npos || open + 2 >= stem.size() - 1) {
-				return stem;
-			}
-
-			for (std::size_t i = open + 2; i < stem.size() - 1; ++i) {
-				if (!std::isdigit(static_cast<unsigned char>(stem[i]))) {
-					return stem;
+			if (stem.size() >= 4 && stem.back() == ')') {
+				const std::size_t open = stem.rfind(" (");
+				if (open != std::string::npos && open + 2 < stem.size() - 1) {
+					bool allDigits = true;
+					for (std::size_t i = open + 2; i < stem.size() - 1; ++i) {
+						if (!std::isdigit(static_cast<unsigned char>(stem[i]))) {
+							allDigits = false;
+							break;
+						}
+					}
+					if (allDigits) {
+						return stem.substr(0, open);
+					}
 				}
 			}
 
-			return stem.substr(0, open);
+			const auto stripSeparatorNumber = [&](char separator) -> std::string {
+				if (stem.size() < 3 || !std::isdigit(static_cast<unsigned char>(stem.back()))) {
+					return {};
+				}
+				std::size_t firstDigit = stem.size() - 1;
+				while (firstDigit > 0 && std::isdigit(static_cast<unsigned char>(stem[firstDigit - 1]))) {
+					--firstDigit;
+				}
+				if (firstDigit > 0 && stem[firstDigit - 1] == separator) {
+					return stem.substr(0, firstDigit - 1);
+				}
+				return {};
+			};
+
+			for (char separator : { ' ', '-', '_' }) {
+				std::string stripped = stripSeparatorNumber(separator);
+				if (!stripped.empty()) {
+					return stripped;
+				}
+			}
+
+			return stem;
+		}
+
+		AxiomProject::EditorEntityNameSuffixStyle GetAssetDuplicateSuffixStyle()
+		{
+			if (AxiomProject* project = ProjectManager::GetCurrentProject()) {
+				return project->EditorAssetDuplicateSuffix;
+			}
+			return AxiomProject::EditorEntityNameSuffixStyle::ParenthesizedNumber;
+		}
+
+		std::string FormatDuplicateAssetName(
+			const std::string& baseName,
+			int index,
+			AxiomProject::EditorEntityNameSuffixStyle style)
+		{
+			switch (style) {
+			case AxiomProject::EditorEntityNameSuffixStyle::SpaceNumber:
+				return baseName + " " + std::to_string(index);
+			case AxiomProject::EditorEntityNameSuffixStyle::HyphenNumber:
+				return baseName + "-" + std::to_string(index);
+			case AxiomProject::EditorEntityNameSuffixStyle::UnderscoreNumber:
+				return baseName + "_" + std::to_string(index);
+			case AxiomProject::EditorEntityNameSuffixStyle::ParenthesizedNumber:
+			default:
+				return baseName + " (" + std::to_string(index) + ")";
+			}
 		}
 
 		std::filesystem::path MakeUniqueAssetPath(
@@ -71,15 +119,16 @@ namespace Axiom {
 
 			const std::string stem = GetDuplicateBaseName(source.stem().string());
 			const std::string extension = source.extension().string();
+			const auto suffixStyle = GetAssetDuplicateSuffixStyle();
 			for (int counter = 1; counter < 10000; ++counter) {
-				candidate = destinationDirectory / (stem + " (" + std::to_string(counter) + ")" + extension);
+				candidate = destinationDirectory / (FormatDuplicateAssetName(stem, counter, suffixStyle) + extension);
 				ec.clear();
 				if (!std::filesystem::exists(candidate, ec)) {
 					return candidate;
 				}
 			}
 
-			return destinationDirectory / (stem + " (" + std::to_string(std::time(nullptr)) + ")" + extension);
+			return destinationDirectory / (FormatDuplicateAssetName(stem, static_cast<int>(std::time(nullptr)), suffixStyle) + extension);
 		}
 
 		bool CopyEntryTo(const std::filesystem::path& source, const std::filesystem::path& destination)
@@ -331,6 +380,11 @@ namespace Axiom {
 		}
 
 		const ImGuiIO& io = ImGui::GetIO();
+		if (io.KeyShift && !io.KeyCtrl && !io.KeyAlt && !io.KeySuper
+			&& ImGui::IsKeyPressed(ImGuiKey_F, false)) {
+			CreateFolder(m_CurrentDirectory);
+			return;
+		}
 		if (!io.KeyCtrl) {
 			return;
 		}
@@ -748,13 +802,15 @@ namespace Axiom {
 		ImGui::BeginGroup();
 
 		ImVec2 cursorPos = ImGui::GetCursorScreenPos();
+		const ImVec2 selectionMin(cursorPos.x - 2.0f, cursorPos.y - 2.0f);
+		const ImVec2 selectionMax(
+			cursorPos.x + m_TileSize + 2.0f,
+			cursorPos.y + m_TileSize + ImGui::GetTextLineHeightWithSpacing() + 2.0f);
 
 		if (isSelected) {
-			ImVec2 bgMin(cursorPos.x - 2, cursorPos.y - 2);
-			ImVec2 bgMax(cursorPos.x + m_TileSize + 2, cursorPos.y + m_TileSize + ImGui::GetTextLineHeightWithSpacing() + 2);
 			const float rounding = ImGui::GetStyle().FrameRounding;
 			ImDrawList* drawList = ImGui::GetWindowDrawList();
-			drawList->AddRectFilled(bgMin, bgMax,
+			drawList->AddRectFilled(selectionMin, selectionMax,
 				ImGui::GetColorU32(EditorTheme::Colors::AssetTileSelection), rounding);
 		}
 
@@ -906,15 +962,10 @@ namespace Axiom {
 		}
 
 		if (isSelected) {
-			const ImVec2 itemMin = ImGui::GetItemRectMin();
-			const ImVec2 itemMax = ImGui::GetItemRectMax();
-			constexpr float inset = 1.0f;
-			const ImVec2 outlineMin(itemMin.x + inset, itemMin.y + inset);
-			const ImVec2 outlineMax(itemMax.x - inset, itemMax.y - inset);
-			if (outlineMax.x > outlineMin.x && outlineMax.y > outlineMin.y) {
+			if (selectionMax.x > selectionMin.x && selectionMax.y > selectionMin.y) {
 				ImGui::GetWindowDrawList()->AddRect(
-					outlineMin,
-					outlineMax,
+					selectionMin,
+					selectionMax,
 					ImGui::GetColorU32(EditorTheme::Colors::AssetTileSelectionBorder),
 					ImGui::GetStyle().FrameRounding);
 			}
