@@ -2,6 +2,7 @@
 #include "Core/Assert.hpp"
 #include "Core/Exceptions.hpp"
 #include "Core/Log.hpp"
+#include "Components/Tags.hpp"
 #include "Scene/ComponentInfo.hpp"
 
 #include <string>
@@ -48,11 +49,12 @@ namespace Axiom {
                     if (!e.HasComponent<T>()) return nullptr;
                     return static_cast<void*>(&e.GetComponent<T>());
                 };
-                info.fillRawPointers = [](entt::registry& registry, void** outPointers, int maxRows) -> int {
+                info.fillRawPointers = [](entt::registry& registry, void** outPointers, int maxRows, int enableFilter) -> int {
                     int count = 0;
                     auto view = registry.view<T>();
                     for (auto&& [entity, component] : view.each()) {
-                        (void)entity;
+                        if (enableFilter == 1 && registry.all_of<DisabledTag>(entity)) continue;
+                        if (enableFilter == 2 && !registry.all_of<DisabledTag>(entity)) continue;
                         if (outPointers && count < maxRows) {
                             outPointers[count] = static_cast<void*>(&component);
                         }

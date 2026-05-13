@@ -21,8 +21,8 @@ namespace Axiom;
 // Entry point: `scene.QueryRef<NativeTransform2D>()` (extension method on Scene).
 // `scene.QueryRef<TWrite, TFilter...>()` supports up to 8 component types and
 // yields `ref TWrite`, using the rest as required filters. Chain
-// `.Without<T>()`, `.With<T>()`, `.EnabledOnly()`/`.DisabledOnly()`,
-// `.Readonly<T>()` (adds a readonly component row).
+// `.Without<T>()`, `.With<T>()`, `.EnabledOnly()`/`.IncludeDisabled()`/
+// `.DisabledOnly()`, `.Readonly<T>()` (adds a readonly component row).
 //
 // All `T` parameters here are the `Native*` structs from `Axiom.Components` —
 // the constraint `where T : unmanaged, IComponent` only admits those, the
@@ -117,7 +117,7 @@ public ref struct QueryRefBuilder1<TW1> where TW1 : unmanaged, IComponent
             ReadonlyNames = "",
             MustHaveNames = "",
             WithoutNames  = "",
-            EnableFilter  = 0,
+            EnableFilter  = 1,
         };
     }
 
@@ -128,6 +128,7 @@ public ref struct QueryRefBuilder1<TW1> where TW1 : unmanaged, IComponent
     { m_Filters.AppendMustHave(ComponentTypes<T>.NativeName); return this; }
 
     public QueryRefBuilder1<TW1> EnabledOnly()  { m_Filters.EnableFilter = 1; return this; }
+    public QueryRefBuilder1<TW1> IncludeDisabled() { m_Filters.EnableFilter = 0; return this; }
     public QueryRefBuilder1<TW1> DisabledOnly() { m_Filters.EnableFilter = 2; return this; }
 
     public QueryRefBuilder1_RO1<TW1, TRO1> Readonly<TRO1>() where TRO1 : unmanaged, IComponent
@@ -175,6 +176,7 @@ public ref struct QueryRefBuilder1_RO1<TW1, TRO1>
     { m_Filters.AppendMustHave(ComponentTypes<T>.NativeName); return this; }
 
     public QueryRefBuilder1_RO1<TW1, TRO1> EnabledOnly()  { m_Filters.EnableFilter = 1; return this; }
+    public QueryRefBuilder1_RO1<TW1, TRO1> IncludeDisabled() { m_Filters.EnableFilter = 0; return this; }
     public QueryRefBuilder1_RO1<TW1, TRO1> DisabledOnly() { m_Filters.EnableFilter = 2; return this; }
 
     public Enumerator GetEnumerator() => new Enumerator(m_Filters);

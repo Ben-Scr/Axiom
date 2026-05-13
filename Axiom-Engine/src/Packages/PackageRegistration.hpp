@@ -17,9 +17,11 @@
 #include "Scene/SceneManager.hpp"
 
 #include <initializer_list>
+#include <functional>
 #include <span>
 #include <string>
 #include <typeindex>
+#include <utility>
 #include <vector>
 
 namespace Axiom::Package {
@@ -137,6 +139,42 @@ namespace Axiom::Package {
         AIM_CORE_ASSERT(patched, AxiomErrorCode::InvalidValue,
             "SetEditorGizmo<T>: component type is not registered yet — "
             "call RegisterComponent / RegisterSerializableComponent first.");
+    }
+
+    // Registers a package-owned entity preset for the editor's Create menu.
+    // `menuPath` is the tab/menu the preset appears under, e.g. "2D Entity";
+    // `label` is the clickable item text; `defaultName` is the base entity
+    // name before the editor's project-specific unique-name pass runs.
+    inline void RegisterEntityPreset(
+        const char* menuPath,
+        const char* label,
+        const char* defaultName,
+        std::function<Entity(Scene&)> create) {
+
+        SceneManager::Get().RegisterEntityPreset({
+            menuPath ? menuPath : "",
+            label ? label : "",
+            defaultName ? defaultName : (label ? label : "Entity"),
+            std::move(create)
+        });
+    }
+
+    // Convenience for the common "new entity plus one component" preset.
+    // Packages such as Tilemap2D can surface themselves under "2D Entity"
+    // without the editor hardcoding package names or component display names.
+    template <typename TComponent>
+    void RegisterComponentEntityPreset(
+        const char* menuPath,
+        const char* label,
+        const char* defaultName = nullptr) {
+
+        std::string baseName = defaultName ? defaultName : (label ? label : "Entity");
+        RegisterEntityPreset(menuPath, label, baseName.c_str(),
+            [baseName](Scene& scene) {
+                Entity entity = scene.CreateEntity(baseName);
+                SceneManager::Get().GetComponentRegistry().AddWithDependencies(entity, typeid(TComponent));
+                return entity;
+            });
     }
 
     // Declare a symmetric conflict between two already-registered components.

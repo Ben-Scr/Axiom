@@ -2103,6 +2103,36 @@ namespace Axiom {
 		// launch. NOTE: this value is persisted to axiom-project.json
 		// but not yet plumbed into WebGPUApi.cpp::RequestAdapterSync —
 		// wiring it through is a separate change.
+		if (ImGui::CollapsingHeader("Entities", ImGuiTreeNodeFlags_DefaultOpen)) {
+			ImGui::Indent(8);
+			changed |= ImGui::Checkbox("Ensure unique editor-created names", &project->EditorEnsureUniqueEntityNames);
+			if (ImGui::IsItemHovered()) {
+				ImGui::SetTooltip(
+					"When on, entities created through editor UI actions,\n"
+					"shortcuts, paste, duplicate, and asset drops get a\n"
+					"non-conflicting name. Runtime/script-created entities\n"
+					"skip this editor-only pass.");
+			}
+
+			constexpr const char* k_StyleLabels[] = {
+				"Entity 1",
+				"Entity (1)",
+				"Entity-1",
+				"Entity_1",
+			};
+			int suffixIndex = static_cast<int>(project->EditorEntityNameSuffix);
+			if (suffixIndex < 0 || suffixIndex >= IM_ARRAYSIZE(k_StyleLabels)) {
+				suffixIndex = static_cast<int>(AxiomProject::EditorEntityNameSuffixStyle::ParenthesizedNumber);
+			}
+			ImGui::SetNextItemWidth(180.0f);
+			if (ImGui::Combo("Duplicate suffix", &suffixIndex, k_StyleLabels, IM_ARRAYSIZE(k_StyleLabels))) {
+				project->EditorEntityNameSuffix =
+					static_cast<AxiomProject::EditorEntityNameSuffixStyle>(suffixIndex);
+				changed = true;
+			}
+			ImGui::Unindent(8);
+		}
+
 		if (ImGui::CollapsingHeader("Graphics", ImGuiTreeNodeFlags_DefaultOpen)) {
 			ImGui::Indent(8);
 

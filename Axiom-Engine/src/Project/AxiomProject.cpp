@@ -634,6 +634,14 @@ endforeach()
 			root.AddMember("showFileExtensions", true);
 		}
 
+		if (!project.EditorEnsureUniqueEntityNames) {
+			root.AddMember("editorEnsureUniqueEntityNames", false);
+		}
+		if (project.EditorEntityNameSuffix != AxiomProject::EditorEntityNameSuffixStyle::ParenthesizedNumber) {
+			root.AddMember("editorEntityNameSuffix",
+				std::string(AxiomProject::EditorEntityNameSuffixStyleToString(project.EditorEntityNameSuffix)));
+		}
+
 		if (!project.CursorImagePath.empty()) {
 			root.AddMember("cursorImagePath", project.CursorImagePath);
 		}
@@ -770,6 +778,29 @@ endforeach()
 		if (value == "Metal"      || value == "metal")                        return RenderBackend::Metal;
 		if (value == "OpenGLES"   || value == "opengles" || value == "GLES")  return RenderBackend::OpenGLES;
 		return RenderBackend::Auto;
+	}
+
+	const char* AxiomProject::EditorEntityNameSuffixStyleToString(EditorEntityNameSuffixStyle style) {
+		switch (style) {
+			case EditorEntityNameSuffixStyle::SpaceNumber:         return "SpaceNumber";
+			case EditorEntityNameSuffixStyle::ParenthesizedNumber: return "ParenthesizedNumber";
+			case EditorEntityNameSuffixStyle::HyphenNumber:        return "HyphenNumber";
+			case EditorEntityNameSuffixStyle::UnderscoreNumber:    return "UnderscoreNumber";
+		}
+		return "ParenthesizedNumber";
+	}
+
+	AxiomProject::EditorEntityNameSuffixStyle AxiomProject::EditorEntityNameSuffixStyleFromString(std::string_view value) {
+		if (value == "SpaceNumber" || value == "Entity 1" || value == "space") {
+			return EditorEntityNameSuffixStyle::SpaceNumber;
+		}
+		if (value == "HyphenNumber" || value == "Entity-1" || value == "hyphen") {
+			return EditorEntityNameSuffixStyle::HyphenNumber;
+		}
+		if (value == "UnderscoreNumber" || value == "Entity_1" || value == "underscore") {
+			return EditorEntityNameSuffixStyle::UnderscoreNumber;
+		}
+		return EditorEntityNameSuffixStyle::ParenthesizedNumber;
 	}
 
 	std::string AxiomProject::GetNativeDllPath() const {
@@ -1191,6 +1222,11 @@ endforeach()
 					project.AutoSaveIntervalSeconds = static_cast<float>(v->AsDoubleOr(120.0));
 				if (const Json::Value* v = root.FindMember("showFileExtensions"))
 					project.ShowFileExtensions = v->AsBoolOr(false);
+				if (const Json::Value* v = root.FindMember("editorEnsureUniqueEntityNames"))
+					project.EditorEnsureUniqueEntityNames = v->AsBoolOr(true);
+				if (const Json::Value* v = root.FindMember("editorEntityNameSuffix"))
+					project.EditorEntityNameSuffix = AxiomProject::EditorEntityNameSuffixStyleFromString(
+						v->AsStringOr("ParenthesizedNumber"));
 				if (const Json::Value* v = root.FindMember("cursorImagePath"))
 					project.CursorImagePath = v->AsStringOr();
 				if (const Json::Value* v = root.FindMember("uiInteractableCursorImagePath"))

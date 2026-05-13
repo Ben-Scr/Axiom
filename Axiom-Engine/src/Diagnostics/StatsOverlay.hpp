@@ -47,6 +47,7 @@ namespace Axiom::Diagnostics {
 			std::size_t MemAllocBytes    = 0; // process working set (resident)
 			std::size_t MemReservedBytes = 0; // committed virtual memory
 			std::uint32_t AudioPlaying   = 0;
+			std::size_t Entities         = 0;
 		};
 
 		// Refresh the cached snapshot at most every 33 ms (~30 Hz). Pass

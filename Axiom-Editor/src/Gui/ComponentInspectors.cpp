@@ -287,16 +287,6 @@ namespace Axiom {
 				}
 			}
 		}
-		const std::string playbackLabel = (playUniform ? (firstPlaying ? "Pause" : "Play") : "Play / Pause") + std::string("##Value");
-		if (ImGuiUtils::DrawInspectorControl("Playback", [&playbackLabel](const char*) {
-			return ImGui::Button(playbackLabel.c_str());
-		})) {
-			for (const Entity& e : entities) {
-				auto& ps = const_cast<Entity&>(e).GetComponent<ParticleSystem2DComponent>();
-				if (ps.IsPlaying()) ps.Pause();
-				else                ps.Play();
-			}
-		}
 
 		// All declarative fields — auto-drawer renders the standard rows
 		// with proper EnabledIf / Variant / Clamp behavior.
@@ -423,6 +413,54 @@ namespace Axiom {
 		if (ImGui::CollapsingHeader("Anchors", ImGuiTreeNodeFlags_DefaultOpen)) {
 			ImGui::PushID("Anchors");
 			ImGui::Indent(8.0f);
+
+			auto applyAnchorPreset = [&](const Vec2& anchor) {
+				for (const Entity& e : entities) {
+					auto& rect = const_cast<Entity&>(e).GetComponent<RTC>();
+					rect.AnchorMin = anchor;
+					rect.AnchorMax = anchor;
+					rect.Pivot = anchor;
+					if (Scene* scene = const_cast<Entity&>(e).GetScene()) {
+						scene->MarkDirty();
+					}
+				}
+			};
+
+			struct AnchorPreset {
+				const char* Label;
+				Vec2 Anchor;
+			};
+			static const AnchorPreset kAnchorPresets[] = {
+				{ "Top Left", { 0.0f, 1.0f } },
+				{ "Middle Top", { 0.5f, 1.0f } },
+				{ "Top Right", { 1.0f, 1.0f } },
+				{ "Middle Left", { 0.0f, 0.5f } },
+				{ "Center", { 0.5f, 0.5f } },
+				{ "Middle Right", { 1.0f, 0.5f } },
+				{ "Bottom Left", { 0.0f, 0.0f } },
+				{ "Middle Bottom", { 0.5f, 0.0f } },
+				{ "Bottom Right", { 1.0f, 0.0f } },
+			};
+
+			if (fillReadOnly) ImGui::BeginDisabled();
+			if (ImGui::Button("Presets...")) {
+				ImGui::OpenPopup("AnchorPresetsPopup");
+			}
+			if (ImGui::BeginPopup("AnchorPresetsPopup")) {
+				for (int i = 0; i < IM_ARRAYSIZE(kAnchorPresets); ++i) {
+					if (i > 0 && (i % 3) != 0) {
+						ImGui::SameLine();
+					}
+					ImGui::PushID(i);
+					if (ImGui::Button(kAnchorPresets[i].Label, ImVec2(116.0f, 0.0f))) {
+						applyAnchorPreset(kAnchorPresets[i].Anchor);
+						ImGui::CloseCurrentPopup();
+					}
+					ImGui::PopID();
+				}
+				ImGui::EndPopup();
+			}
+			if (fillReadOnly) ImGui::EndDisabled();
 
 			if (fillReadOnly) ImGui::BeginDisabled();
 

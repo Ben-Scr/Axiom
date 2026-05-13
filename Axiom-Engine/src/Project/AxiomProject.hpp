@@ -1,6 +1,7 @@
 #pragma once
 #include "Core/Export.hpp"
 #include "Graphics/Text/FontHandle.hpp"
+#include <cstdint>
 #include <string>
 #include <functional>
 #include <string_view>
@@ -119,6 +120,16 @@ namespace Axiom {
 		bool AutoSaveScenes = false;
 		float AutoSaveIntervalSeconds = 120.0f;
 
+		enum class EditorEntityNameSuffixStyle : uint8_t {
+			SpaceNumber = 0,       // Entity 1
+			ParenthesizedNumber,   // Entity (1)
+			HyphenNumber,          // Entity-1
+			UnderscoreNumber,      // Entity_1
+		};
+
+		bool EditorEnsureUniqueEntityNames = true;
+		EditorEntityNameSuffixStyle EditorEntityNameSuffix = EditorEntityNameSuffixStyle::ParenthesizedNumber;
+
 		// Editor-only: show file extensions in the asset browser and the
 		// rename/create textbox. When false (default), an asset created
 		// from "Create > Scene" displays as "MyScene" rather than
@@ -236,6 +247,8 @@ namespace Axiom {
 		// "VK", etc.) so manually-edited project files are forgiving.
 		static const char* RenderBackendToString(RenderBackend backend);
 		static RenderBackend RenderBackendFromString(std::string_view value);
+		static const char* EditorEntityNameSuffixStyleToString(EditorEntityNameSuffixStyle style);
+		static EditorEntityNameSuffixStyle EditorEntityNameSuffixStyleFromString(std::string_view value);
 
 		std::string GetNativeDllPath() const;
 		std::string GetSceneFilePath(const std::string& sceneName) const;

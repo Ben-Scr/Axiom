@@ -46,9 +46,13 @@
 #include "Scripting/ScriptDiscovery.hpp"
 #include "Scripting/ScriptComponentInspector.hpp"
 #include "Systems/TransformHierarchySystem.hpp"
+#include "Systems/UILayoutSystem.hpp"
+#include "Math/VectorMath.hpp"
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
+#include <functional>
+#include <limits>
 #include <unordered_set>
 
 namespace Axiom {
@@ -113,6 +117,62 @@ namespace Axiom {
 			}
 
 			return roots;
+		}
+
+		bool IsAsciiDigits(std::string_view value)
+		{
+			if (value.empty()) return false;
+			for (char c : value) {
+				if (c < '0' || c > '9') return false;
+			}
+			return true;
+		}
+
+		std::string StripEditorNumericSuffix(std::string_view name)
+		{
+			std::string base(name);
+			if (base.empty()) return "Entity";
+
+			if (base.size() > 3 && base.back() == ')') {
+				const std::size_t open = base.rfind(" (");
+				if (open != std::string::npos && open + 2 < base.size() - 1
+					&& IsAsciiDigits(std::string_view(base).substr(open + 2, base.size() - open - 3))) {
+					base.erase(open);
+					return base.empty() ? "Entity" : base;
+				}
+			}
+
+			auto stripDelimitedDigits = [&](char delimiter) -> bool {
+				const std::size_t pos = base.rfind(delimiter);
+				if (pos == std::string::npos || pos + 1 >= base.size()) return false;
+				if (!IsAsciiDigits(std::string_view(base).substr(pos + 1))) return false;
+				base.erase(pos);
+				return true;
+			};
+
+			if (stripDelimitedDigits('-') || stripDelimitedDigits('_') || stripDelimitedDigits(' ')) {
+				return base.empty() ? "Entity" : base;
+			}
+
+			return base;
+		}
+
+		std::string FormatEditorEntitySuffix(
+			const std::string& base,
+			int index,
+			AxiomProject::EditorEntityNameSuffixStyle style)
+		{
+			switch (style) {
+			case AxiomProject::EditorEntityNameSuffixStyle::SpaceNumber:
+				return base + " " + std::to_string(index);
+			case AxiomProject::EditorEntityNameSuffixStyle::HyphenNumber:
+				return base + "-" + std::to_string(index);
+			case AxiomProject::EditorEntityNameSuffixStyle::UnderscoreNumber:
+				return base + "_" + std::to_string(index);
+			case AxiomProject::EditorEntityNameSuffixStyle::ParenthesizedNumber:
+			default:
+				return base + " (" + std::to_string(index) + ")";
+			}
 		}
 
 		std::string BuildScriptMenuLabel(const EditorScriptDiscovery::ScriptEntry& scriptEntry)
@@ -410,6 +470,7 @@ namespace Axiom {
 				std::remove_if(m_SelectedEntities.begin(), m_SelectedEntities.end(), isStale),
 				m_SelectedEntities.end());
 		}
+		UpdateEditorCameraFocus(dt);
 		const bool hasShortcutFocus = HasEntityShortcutFocus();
 		// Shortcut handlers (focus / duplicate / rename / etc.) act on the
 		// scene the user is editing, which is the prefab edit scene in prefab
@@ -433,17 +494,55 @@ namespace Axiom {
 		// model of iteration. Save (Ctrl+S) is gated separately on the
 		// menu, so it can't accidentally persist play-mode state.
 
-		if (m_RenamingEntity != entt::null || ImGui::GetIO().WantTextInput || ImGui::IsAnyItemActive()) {
+		const ImGuiIO& io = ImGui::GetIO();
+		if (m_RenamingEntity != entt::null || io.WantTextInput || ImGui::IsAnyItemActive()) {
 			return;
 		}
 
-		// Use ImGui's KeyCtrl + IsKeyPressed instead of the raw Input wrapper —
-		// the engine's KeyCode::LeftControl misses RIGHT Ctrl (and Cmd on macOS),
+		// Arrow-key hierarchy navigation follows the currently rendered row list.
+		if (m_IsEntitiesPanelFocused && hasEntitySelection && !m_VisibleEntityOrder.empty()) {
+			const int direction = ImGui::IsKeyPressed(ImGuiKey_DownArrow, true) ? 1
+				: (ImGui::IsKeyPressed(ImGuiKey_UpArrow, true) ? -1 : 0);
+			if (direction != 0) {
+				int currentIndex = -1;
+				for (int i = 0; i < static_cast<int>(m_VisibleEntityOrder.size()); ++i) {
+					if (m_VisibleEntityOrder[static_cast<std::size_t>(i)] == m_SelectedEntity) {
+						currentIndex = i;
+						break;
+					}
+				}
+
+				if (currentIndex < 0) {
+					for (EntityHandle selected : GetSelectedEntities(shortcutScene)) {
+						for (int i = 0; i < static_cast<int>(m_VisibleEntityOrder.size()); ++i) {
+							if (m_VisibleEntityOrder[static_cast<std::size_t>(i)] == selected) {
+								currentIndex = i;
+								break;
+							}
+						}
+						if (currentIndex >= 0) break;
+					}
+				}
+
+				if (currentIndex >= 0) {
+					const int targetIndex = std::clamp(
+						currentIndex + direction,
+						0,
+						static_cast<int>(m_VisibleEntityOrder.size()) - 1);
+					const EntityHandle target = m_VisibleEntityOrder[static_cast<std::size_t>(targetIndex)];
+					if (target != entt::null && shortcutScene.IsValid(target)) {
+						SetSingleEntitySelection(target, targetIndex);
+					}
+				}
+			}
+		}
+
+		// Use ImGui's KeyCtrl + IsKeyPressed instead of the raw Input wrapper.
+		// The engine's KeyCode::LeftControl misses RIGHT Ctrl (and Cmd on macOS),
 		// which is why the prior code silently failed for users on RHS keyboards.
 		// IsKeyPressed(_, repeat=false) also prevents auto-repeat from firing
 		// the action multiple times when the key is held. Same pattern as the
 		// Save shortcut wired up in ImGuiEditorLayerChrome.cpp.
-		const ImGuiIO& io = ImGui::GetIO();
 		if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_C, false) && hasEntitySelection) {
 			CopySelectedEntities(shortcutScene);
 		}
@@ -1055,6 +1154,7 @@ namespace Axiom {
 	}
 
 	void ImGuiEditorLayer::SelectSceneNode() {
+		ResetEditorFocusCycle();
 		m_SelectedEntity = entt::null;
 		m_PressedEntity = entt::null;
 		m_SelectedEntities.clear();
@@ -1066,6 +1166,7 @@ namespace Axiom {
 	}
 
 	void ImGuiEditorLayer::SelectEntity(EntityHandle entity) {
+		ResetEditorFocusCycle();
 		m_SelectedEntity = entity;
 		m_SelectedEntities.clear();
 		if (entity != entt::null) {
@@ -1079,6 +1180,7 @@ namespace Axiom {
 	}
 
 	void ImGuiEditorLayer::ClearEntitySelection() {
+		ResetEditorFocusCycle();
 		// Pressed-state must clear together with selection — m_PressedEntity is a
 		// transient mouse-down cursor and surviving a selection change would dispatch
 		// a click against an entity that is no longer the user's intended target.
@@ -1112,6 +1214,7 @@ namespace Axiom {
 	}
 
 	void ImGuiEditorLayer::SetSingleEntitySelection(EntityHandle entity, int index) {
+		ResetEditorFocusCycle();
 		m_SelectedEntity = entity;
 		m_SelectedEntities.clear();
 		if (entity != entt::null) {
@@ -1123,6 +1226,7 @@ namespace Axiom {
 	}
 
 	void ImGuiEditorLayer::ToggleEntitySelection(EntityHandle entity, int index) {
+		ResetEditorFocusCycle();
 		auto it = std::find(m_SelectedEntities.begin(), m_SelectedEntities.end(), entity);
 		if (it != m_SelectedEntities.end()) {
 			m_SelectedEntities.erase(it);
@@ -1141,6 +1245,7 @@ namespace Axiom {
 	}
 
 	void ImGuiEditorLayer::SelectEntityRange(int index) {
+		ResetEditorFocusCycle();
 		if (m_EntityOrder.empty()) {
 			return;
 		}
@@ -1165,21 +1270,143 @@ namespace Axiom {
 		m_AssetBrowser.ClearSelection();
 	}
 
+	void ImGuiEditorLayer::ResetEditorFocusCycle() {
+		m_EditorCameraFocusActive = false;
+		m_FocusLastEntity = entt::null;
+		m_FocusNextPressTight = false;
+	}
+
+	void ImGuiEditorLayer::UpdateEditorCameraFocus(float dt) {
+		if (!m_EditorCameraFocusActive) {
+			return;
+		}
+
+		const float alpha = 1.0f - std::exp(-std::max(0.0f, dt) * 10.0f);
+		const Vec2 currentPosition = m_EditorCamera.GetPosition();
+		const float currentSize = m_EditorCamera.GetOrthographicSize();
+		const Vec2 nextPosition = Lerp(currentPosition, m_EditorCameraFocusTarget, alpha);
+		const float nextSize = currentSize + (m_EditorCameraFocusOrthoSize - currentSize) * alpha;
+
+		m_EditorCamera.SetPosition(nextPosition);
+		m_EditorCamera.SetOrthographicSize(nextSize);
+
+		if (DistanceSquared(nextPosition, m_EditorCameraFocusTarget) < 0.0001f
+			&& std::abs(nextSize - m_EditorCameraFocusOrthoSize) < 0.001f) {
+			m_EditorCamera.SetPosition(m_EditorCameraFocusTarget);
+			m_EditorCamera.SetOrthographicSize(m_EditorCameraFocusOrthoSize);
+			m_EditorCameraFocusActive = false;
+		}
+	}
+
+	bool ImGuiEditorLayer::TryBuildEntityAABB(Scene& scene, EntityHandle entity, bool includeChildren, AABB& outAABB) {
+		if (entity == entt::null || !scene.IsValid(entity)) {
+			return false;
+		}
+
+		TransformHierarchySystem::Propagate(scene);
+		ComputeUILayout(scene);
+
+		bool hasBounds = false;
+		auto includeAABB = [&](const AABB& aabb) {
+			if (!hasBounds) {
+				outAABB = aabb;
+				hasBounds = true;
+				return;
+			}
+			outAABB.Min.x = std::min(outAABB.Min.x, aabb.Min.x);
+			outAABB.Min.y = std::min(outAABB.Min.y, aabb.Min.y);
+			outAABB.Max.x = std::max(outAABB.Max.x, aabb.Max.x);
+			outAABB.Max.y = std::max(outAABB.Max.y, aabb.Max.y);
+		};
+
+		std::unordered_set<uint32_t> visited;
+		std::function<void(EntityHandle)> visit = [&](EntityHandle current) {
+			if (current == entt::null || !scene.IsValid(current)) {
+				return;
+			}
+			if (!visited.insert(static_cast<uint32_t>(current)).second) {
+				return;
+			}
+
+			Transform2DComponent* transform = nullptr;
+			if (scene.TryGetComponent<Transform2DComponent>(current, transform) && transform) {
+				includeAABB(AABB::FromTransform(*transform));
+			}
+
+			RectTransform2DComponent* rect = nullptr;
+			if (scene.TryGetComponent<RectTransform2DComponent>(current, rect) && rect) {
+				const float worldScale = GuiRenderer::ComputeWorldUIPixelScale();
+				const Vec2 bl = rect->GetBottomLeft();
+				const Vec2 tr = rect->GetTopRight();
+				const Vec2 pivot = rect->ResolvedValid ? rect->ResolvedPivot
+					: Vec2{ (bl.x + tr.x) * 0.5f, (bl.y + tr.y) * 0.5f };
+
+				Vec2 corners[4] = {
+					Vec2{ bl.x * worldScale, bl.y * worldScale },
+					Vec2{ tr.x * worldScale, bl.y * worldScale },
+					Vec2{ tr.x * worldScale, tr.y * worldScale },
+					Vec2{ bl.x * worldScale, tr.y * worldScale },
+				};
+
+				if (rect->Rotation != 0.0f) {
+					const Vec2 worldPivot{ pivot.x * worldScale, pivot.y * worldScale };
+					for (Vec2& corner : corners) {
+						corner = worldPivot + Rotated(corner - worldPivot, rect->Rotation);
+					}
+				}
+
+				Vec2 minPoint = corners[0];
+				Vec2 maxPoint = corners[0];
+				for (int i = 1; i < 4; ++i) {
+					minPoint.x = std::min(minPoint.x, corners[i].x);
+					minPoint.y = std::min(minPoint.y, corners[i].y);
+					maxPoint.x = std::max(maxPoint.x, corners[i].x);
+					maxPoint.y = std::max(maxPoint.y, corners[i].y);
+				}
+				includeAABB({ minPoint, maxPoint });
+			}
+
+			if (includeChildren && scene.HasComponent<HierarchyComponent>(current)) {
+				for (EntityHandle child : scene.GetComponent<HierarchyComponent>(current).Children) {
+					visit(child);
+				}
+			}
+		};
+
+		visit(entity);
+		return hasBounds;
+	}
+
 	void ImGuiEditorLayer::FocusSelectedEntity(Scene& scene) {
 		if (m_SelectedEntity == entt::null || !scene.IsValid(m_SelectedEntity)) {
 			return;
 		}
 
-		Transform2DComponent* transform = nullptr;
-		if (scene.TryGetComponent<Transform2DComponent>(m_SelectedEntity, transform) && transform) {
-			m_EditorCamera.SetPosition(transform->Position);
+		const bool tightFocus = m_FocusLastEntity == m_SelectedEntity && m_FocusNextPressTight;
+		AABB bounds;
+		if (!TryBuildEntityAABB(scene, m_SelectedEntity, !tightFocus, bounds)) {
 			return;
 		}
 
-		RectTransform2DComponent* rectTransform = nullptr;
-		if (scene.TryGetComponent<RectTransform2DComponent>(m_SelectedEntity, rectTransform) && rectTransform) {
-			m_EditorCamera.SetPosition(rectTransform->GetCenter());
-		}
+		const Vec2 size = bounds.Scale();
+		const Vec2 center{
+			(bounds.Min.x + bounds.Max.x) * 0.5f,
+			(bounds.Min.y + bounds.Max.y) * 0.5f
+		};
+
+		const AABB viewport = m_EditorCamera.GetViewportAABB();
+		const Vec2 viewportSize = viewport.Scale();
+		const float aspect = viewportSize.y > 0.0001f ? viewportSize.x / viewportSize.y : 16.0f / 9.0f;
+		const float paddedHalfWidth = std::max(std::abs(size.x) * 0.5f, 0.5f) * 1.25f;
+		const float paddedHalfHeight = std::max(std::abs(size.y) * 0.5f, 0.5f) * 1.25f;
+		const float targetHalfHeight = std::max(paddedHalfHeight, paddedHalfWidth / std::max(aspect, 0.0001f));
+		const float zoom = std::max(m_EditorCamera.GetZoom(), 0.0001f);
+
+		m_EditorCameraFocusTarget = center;
+		m_EditorCameraFocusOrthoSize = std::max(0.5f, targetHalfHeight / zoom);
+		m_EditorCameraFocusActive = true;
+		m_FocusLastEntity = m_SelectedEntity;
+		m_FocusNextPressTight = !tightFocus;
 	}
 
 	void ImGuiEditorLayer::DuplicateSelectedEntity(Scene& scene) {
@@ -1210,6 +1437,7 @@ namespace Axiom {
 		}
 
 		if (!createdEntities.empty()) {
+			EnsureEditorUniqueEntityNames(scene, createdEntities);
 			m_SelectedEntities = createdEntities;
 			m_SelectedEntity = createdEntities.back();
 			m_LastEntitySelectionIndex = -1;
@@ -1348,6 +1576,7 @@ namespace Axiom {
 		}
 
 		if (!createdEntities.empty()) {
+			EnsureEditorUniqueEntityNames(scene, createdEntities);
 			m_SelectedEntities = createdEntities;
 			m_SelectedEntity = createdEntities.back();
 			m_LastEntitySelectionIndex = -1;
@@ -1357,6 +1586,86 @@ namespace Axiom {
 			}
 			scene.MarkDirty();
 			m_EntityOrder.clear(); m_EntityOrderDirty = true;
+		}
+	}
+
+	std::string ImGuiEditorLayer::MakeEditorUniqueEntityName(
+		Scene& scene,
+		std::string_view baseName,
+		EntityHandle ignoreEntity) const
+	{
+		AxiomProject* project = ProjectManager::GetCurrentProject();
+		std::string original = baseName.empty() ? std::string("Entity") : std::string(baseName);
+		if (!project || !project->EditorEnsureUniqueEntityNames) {
+			return original;
+		}
+
+		const auto style = project->EditorEntityNameSuffix;
+		std::unordered_set<std::string> existingNames;
+		auto view = scene.GetRegistry().view<NameComponent>();
+		for (auto [entity, name] : view.each()) {
+			if (entity == ignoreEntity) {
+				continue;
+			}
+			existingNames.insert(name.Name);
+		}
+
+		if (!existingNames.contains(original)) {
+			return original;
+		}
+
+		std::string base = StripEditorNumericSuffix(original);
+		if (base.empty()) {
+			base = "Entity";
+		}
+		const bool originalHadSuffix = base != original;
+		if (!originalHadSuffix && !existingNames.contains(base)) {
+			return base;
+		}
+
+		for (int suffix = 1; suffix < std::numeric_limits<int>::max(); ++suffix) {
+			std::string candidate = FormatEditorEntitySuffix(base, suffix, style);
+			if (!existingNames.contains(candidate)) {
+				return candidate;
+			}
+		}
+
+		return base;
+	}
+
+	void ImGuiEditorLayer::EnsureEditorUniqueEntityName(Scene& scene, EntityHandle entity) {
+		if (entity == entt::null || !scene.IsValid(entity) || !scene.HasComponent<NameComponent>(entity)) {
+			return;
+		}
+
+		NameComponent& name = scene.GetComponent<NameComponent>(entity);
+		name.Name = MakeEditorUniqueEntityName(scene, name.Name, entity);
+	}
+
+	void ImGuiEditorLayer::EnsureEditorUniqueEntityNames(Scene& scene, const std::vector<EntityHandle>& roots) {
+		if (roots.empty()) {
+			return;
+		}
+
+		std::unordered_set<uint32_t> visited;
+		std::function<void(EntityHandle)> visit = [&](EntityHandle entity) {
+			if (entity == entt::null || !scene.IsValid(entity)) {
+				return;
+			}
+			if (!visited.insert(static_cast<uint32_t>(entity)).second) {
+				return;
+			}
+
+			EnsureEditorUniqueEntityName(scene, entity);
+			if (scene.HasComponent<HierarchyComponent>(entity)) {
+				for (EntityHandle child : scene.GetComponent<HierarchyComponent>(entity).Children) {
+					visit(child);
+				}
+			}
+		};
+
+		for (EntityHandle root : roots) {
+			visit(root);
 		}
 	}
 
@@ -1394,10 +1703,11 @@ namespace Axiom {
 			}
 
 			createdHandle = created.GetHandle();
+			EnsureEditorUniqueEntityNames(scene, { createdHandle });
 			SelectEntity(createdHandle);
 		};
 
-		if (ImGui::MenuItem("Create (Empty)"))
+		if (ImGui::MenuItem("Create (Empty)", "Shift + C"))
 		{
 			finishCreated(scene.CreateEmptyEntity());
 		}
@@ -1405,6 +1715,22 @@ namespace Axiom {
 		{
 			finishCreated(scene.CreateEntity("Entity"));
 		}
+
+		auto renderPackagePresets = [&](std::string_view menuPath) {
+			bool renderedAny = false;
+			for (const SceneManager::EntityPresetInfo& preset : SceneManager::Get().GetEntityPresets()) {
+				if (preset.MenuPath != menuPath) {
+					continue;
+				}
+				if (!renderedAny) {
+					ImGui::Separator();
+					renderedAny = true;
+				}
+				if (ImGui::MenuItem(preset.Label.c_str())) {
+					finishCreated(preset.Create(scene));
+				}
+			}
+		};
 
 		ImGui::Separator();
 
@@ -1414,34 +1740,34 @@ namespace Axiom {
 			{
 				if (ImGui::MenuItem("Square"))
 				{
-					Entity created = scene.CreateEntity("Square " + std::to_string(EntityHelper::EntitiesCount()));
+					Entity created = scene.CreateEntity("Square");
 					created.AddComponent<SpriteRendererComponent>();
 					finishCreated(created);
 				}
 				if (ImGui::MenuItem("Circle"))
 				{
-					Entity created = scene.CreateEntity("Circle " + std::to_string(EntityHelper::EntitiesCount()));
+					Entity created = scene.CreateEntity("Circle");
 					auto& sprite = created.AddComponent<SpriteRendererComponent>();
 					sprite.TextureHandle = TextureManager::GetDefaultTexture(DefaultTexture::Circle);
 					finishCreated(created);
 				}
 				if (ImGui::MenuItem("9Sliced"))
 				{
-					Entity created = scene.CreateEntity("9Sliced " + std::to_string(EntityHelper::EntitiesCount()));
+					Entity created = scene.CreateEntity("9Sliced");
 					auto& sprite = created.AddComponent<SpriteRendererComponent>();
 					sprite.TextureHandle = TextureManager::GetDefaultTexture(DefaultTexture::_9Sliced);
 					finishCreated(created);
 				}
 				if (ImGui::MenuItem("Pixel"))
 				{
-					Entity created = scene.CreateEntity("Pixel " + std::to_string(EntityHelper::EntitiesCount()));
+					Entity created = scene.CreateEntity("Pixel");
 					auto& sprite = created.AddComponent<SpriteRendererComponent>();
 					sprite.TextureHandle = TextureManager::GetDefaultTexture(DefaultTexture::Pixel);
 					finishCreated(created);
 				}
 				if (ImGui::MenuItem("Icon"))
 				{
-					Entity created = scene.CreateEntity("Icon " + std::to_string(EntityHelper::EntitiesCount()));
+					Entity created = scene.CreateEntity("Icon");
 					auto& sprite = created.AddComponent<SpriteRendererComponent>();
 					sprite.TextureHandle = TextureManager::LoadTexture("icon.png");
 					finishCreated(created);
@@ -1453,7 +1779,7 @@ namespace Axiom {
 			if (ImGui::BeginMenu("Physics")) {
 				if (ImGui::MenuItem("Dynamic Body"))
 				{
-					Entity created = scene.CreateEntity("Dynamic Body " + std::to_string(EntityHelper::EntitiesCount()));
+					Entity created = scene.CreateEntity("Dynamic Body");
 					created.AddComponent<SpriteRendererComponent>();
 					created.AddComponent<Rigidbody2DComponent>();
 					created.AddComponent<BoxCollider2DComponent>();
@@ -1461,7 +1787,7 @@ namespace Axiom {
 				}
 				if (ImGui::MenuItem("Kinematic Body"))
 				{
-					Entity created = scene.CreateEntity("Kinematic Body " + std::to_string(EntityHelper::EntitiesCount()));
+					Entity created = scene.CreateEntity("Kinematic Body");
 					created.AddComponent<SpriteRendererComponent>();
 					created.AddComponent<Rigidbody2DComponent>().SetBodyType(BodyType::Kinematic);
 					created.AddComponent<BoxCollider2DComponent>();
@@ -1469,7 +1795,7 @@ namespace Axiom {
 				}
 				if (ImGui::MenuItem("Static Body"))
 				{
-					Entity created = scene.CreateEntity("Static Body " + std::to_string(EntityHelper::EntitiesCount()));
+					Entity created = scene.CreateEntity("Static Body");
 					created.AddComponent<SpriteRendererComponent>();
 					created.AddComponent<Rigidbody2DComponent>().SetBodyType(BodyType::Static);
 					created.AddComponent<BoxCollider2DComponent>();
@@ -1481,45 +1807,13 @@ namespace Axiom {
 
 			if (ImGui::MenuItem("Particle System"))
 			{
-				Entity created = scene.CreateEntity("Particle System " + std::to_string(EntityHelper::EntitiesCount()));
+				Entity created = scene.CreateEntity("Particle System");
 				created.AddComponent<ParticleSystem2DComponent>();
 				finishCreated(created);
 			}
 
-			// Tilemap 2D — surfaced only when the project has the
-			// Axiom.Tilemap2D package enabled. The package owns the
-			// Tilemap2DComponent definition (it isn't linked into the
-			// editor binary), so we add the component via the
-			// ComponentRegistry's display-name lookup → info.add() path
-			// rather than referencing the type directly. Without the
-			// package toggle, the component isn't registered and the
-			// menu item is hidden so the user doesn't see a click-then-
-			// nothing-happens UX.
-			{
-				AxiomProject* project = ProjectManager::GetCurrentProject();
-				const bool tilemapPackageEnabled = project &&
-					std::find(project->Packages.begin(), project->Packages.end(),
-						std::string("Axiom.Tilemap2D")) != project->Packages.end();
-				if (tilemapPackageEnabled) {
-					const ComponentInfo* tilemapInfo = nullptr;
-					SceneManager::Get().GetComponentRegistry().ForEachComponentInfo(
-						[&](const std::type_index&, const ComponentInfo& info) {
-							if (!tilemapInfo
-								&& info.category == ComponentCategory::Component
-								&& info.displayName == "Tilemap 2D"
-								&& info.add)
-							{
-								tilemapInfo = &info;
-							}
-						});
-					if (tilemapInfo && ImGui::MenuItem("Tilemap 2D")) {
-						Entity created = scene.CreateEntity(
-							"Tilemap 2D " + std::to_string(EntityHelper::EntitiesCount()));
-						tilemapInfo->add(created);
-						finishCreated(created);
-					}
-				}
-			}
+			// Package-registered presets can extend this menu without editor hardcoding.
+			renderPackagePresets("2D Entity");
 
 			ImGui::EndMenu();
 		}
@@ -1587,21 +1881,42 @@ namespace Axiom {
 			if (ImGui::MenuItem("Grid Layout")) {
 				finishCreated(EntityHelper::CreateUIGridLayout(scene));
 			}
+			renderPackagePresets("UI");
 			ImGui::EndMenu();
+		}
+
+		std::vector<std::string> packageMenuPaths;
+		for (const SceneManager::EntityPresetInfo& preset : SceneManager::Get().GetEntityPresets()) {
+			if (preset.MenuPath.empty() || preset.MenuPath == "2D Entity" || preset.MenuPath == "UI") {
+				continue;
+			}
+			if (std::find(packageMenuPaths.begin(), packageMenuPaths.end(), preset.MenuPath) == packageMenuPaths.end()) {
+				packageMenuPaths.push_back(preset.MenuPath);
+			}
+		}
+		for (const std::string& menuPath : packageMenuPaths) {
+			if (ImGui::BeginMenu(menuPath.c_str())) {
+				for (const SceneManager::EntityPresetInfo& preset : SceneManager::Get().GetEntityPresets()) {
+					if (preset.MenuPath == menuPath && ImGui::MenuItem(preset.Label.c_str())) {
+						finishCreated(preset.Create(scene));
+					}
+				}
+				ImGui::EndMenu();
+			}
 		}
 
 		ImGui::Separator();
 
 		if (ImGui::MenuItem("Camera"))
 		{
-			Entity created = scene.CreateEntity("Camera " + std::to_string(EntityHelper::EntitiesCount()));
+			Entity created = scene.CreateEntity("Camera");
 			created.AddComponent<Camera2DComponent>();
 			finishCreated(created);
 		}
 
 		if (ImGui::MenuItem("Audio Source"))
 		{
-			Entity created = scene.CreateEntity("Audio Source " + std::to_string(EntityHelper::EntitiesCount()));
+			Entity created = scene.CreateEntity("Audio Source");
 			created.AddComponent<AudioSourceComponent>();
 			finishCreated(created);
 		}
@@ -2050,6 +2365,7 @@ namespace Axiom {
 			}
 		}
 		std::string sceneToRemove;
+		m_VisibleEntityOrder.clear();
 
 		for (Scene* scenePtrRaw : scenesToShow) {
 			if (!scenePtrRaw) continue;
@@ -2250,6 +2566,8 @@ namespace Axiom {
 						}
 						hideUnderDepth = -1;
 					}
+
+					m_VisibleEntityOrder.push_back(entityHandle);
 
 					// Step indent up/down to match this entity's depth.
 					while (currentIndentDepth < targetDepth) {
@@ -2505,7 +2823,10 @@ namespace Axiom {
 							std::string ext = std::filesystem::path(droppedPath).extension().string();
 							std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
 							if (ext == ".prefab") {
-								SceneSerializer::LoadEntityFromFile(scene, droppedPath);
+								EntityHandle loaded = SceneSerializer::LoadEntityFromFile(scene, droppedPath);
+								if (loaded != entt::null) {
+									EnsureEditorUniqueEntityNames(scene, { loaded });
+								}
 								m_EntityOrder.clear(); m_EntityOrderDirty = true;
 							}
 						}
@@ -2648,7 +2969,10 @@ namespace Axiom {
 						else if (ext == ".prefab") {
 							Scene* dropScene = GetContextScene();
 							if (dropScene) {
-								SceneSerializer::LoadEntityFromFile(*dropScene, droppedPath);
+								EntityHandle loaded = SceneSerializer::LoadEntityFromFile(*dropScene, droppedPath);
+								if (loaded != entt::null) {
+									EnsureEditorUniqueEntityNames(*dropScene, { loaded });
+								}
 								m_EntityOrder.clear(); m_EntityOrderDirty = true;
 							}
 						}
@@ -2667,6 +2991,7 @@ namespace Axiom {
 									transform.Scale = { aspect, 1.0f };
 								}
 
+								EnsureEditorUniqueEntityNames(*dropScene, { newEntity.GetHandle() });
 								SelectEntity(newEntity.GetHandle());
 								dropScene->MarkDirty();
 							}

@@ -26,6 +26,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -124,6 +125,9 @@ namespace Axiom {
 		void RunAutoSaveTick(Application& app, float dt);
 		void AppendLogEntry(LogEntry entry);
 		void ClearLogEntries();
+		void ResetEditorFocusCycle();
+		void UpdateEditorCameraFocus(float dt);
+		bool TryBuildEntityAABB(Scene& scene, EntityHandle entity, bool includeChildren, AABB& outAABB);
 		void FocusSelectedEntity(Scene& scene);
 		void DuplicateSelectedEntity(Scene& scene);
 		void DeleteSelectedEntity(Scene& scene);
@@ -135,6 +139,9 @@ namespace Axiom {
 		void CopySelectedEntities(Scene& scene);
 		void PasteEntities(Scene& scene);
 		EntityHandle RenderCreateEntityMenu(Scene& scene, Entity parent);
+		std::string MakeEditorUniqueEntityName(Scene& scene, std::string_view baseName, EntityHandle ignoreEntity = entt::null) const;
+		void EnsureEditorUniqueEntityName(Scene& scene, EntityHandle entity);
+		void EnsureEditorUniqueEntityNames(Scene& scene, const std::vector<EntityHandle>& roots);
 		bool SetEntityParentPreservingWorld(Scene& scene, EntityHandle child, Entity parent);
 		// Reorders `dragged` so it becomes the immediate previous (insertAfter=false)
 		// or next (insertAfter=true) sibling of `target`. Reparents across
@@ -231,6 +238,7 @@ namespace Axiom {
 		bool m_EntityOrderDirty = true;
 		std::vector<entt::entity> m_RenderedEntityOrder;
 		std::vector<int> m_RenderedEntityDepths;
+		std::vector<entt::entity> m_VisibleEntityOrder;
 
 		// ── Prefab edit mode ──────────────────────────────────────────
 		// Owned detached scene that contains the entity tree of the
@@ -280,6 +288,11 @@ namespace Axiom {
 		bool m_IsEditorViewHovered = false;
 		bool m_IsEditorViewFocused = false;
 		EditorViewDrawMode m_EditorViewDrawMode = EditorViewDrawMode::Default;
+		bool m_EditorCameraFocusActive = false;
+		Vec2 m_EditorCameraFocusTarget{ 0.0f, 0.0f };
+		float m_EditorCameraFocusOrthoSize = 5.0f;
+		EntityHandle m_FocusLastEntity = entt::null;
+		bool m_FocusNextPressTight = false;
 
 		bool m_IsGameViewActive = false;
 		bool m_IsEditorViewActive = false;

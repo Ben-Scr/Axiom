@@ -226,6 +226,21 @@ namespace Axiom {
 
 		void SortInstancesInPlace(size_t n) {
 			if (n < 2) return;
+			auto sortLess = [](const Instance44& a, const Instance44& b) {
+				if (a.SortingLayer != b.SortingLayer) return a.SortingLayer < b.SortingLayer;
+				if (a.SortingOrder != b.SortingOrder) return a.SortingOrder < b.SortingOrder;
+				return a.DrawIndex < b.DrawIndex;
+			};
+
+			bool alreadySorted = true;
+			for (size_t k = 1; k < n; ++k) {
+				if (sortLess(g_InstancesScratch[k], g_InstancesScratch[k - 1])) {
+					alreadySorted = false;
+					break;
+				}
+			}
+			if (alreadySorted) return;
+
 			g_SortIndexScratch.resize(n);
 			for (size_t k = 0; k < n; ++k) g_SortIndexScratch[k] = k;
 			std::sort(g_SortIndexScratch.begin(), g_SortIndexScratch.end(),

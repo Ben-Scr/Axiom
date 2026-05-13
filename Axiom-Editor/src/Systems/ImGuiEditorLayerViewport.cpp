@@ -1004,13 +1004,58 @@ namespace Axiom {
 		const int fbH = std::max(1, static_cast<int>(std::round(renderSize.y)));
 
 		if (viewportSize.x > 0.0f && viewportSize.y > 0.0f) {
-			m_GameViewFBO.Recreate(fbW, fbH);
-
 			Camera2DComponent* gameCam = Camera2DComponent::Main();
+			if ((gameCam && gameCam->IsValid()) || !m_GameViewFBO.IsValid()) {
+				m_GameViewFBO.Recreate(fbW, fbH);
+			}
+
+			auto drawNoCameraFallback = [&]() {
+				const ImVec2 canvasMin = ImGui::GetCursorScreenPos();
+				const ImVec2 canvasMax(canvasMin.x + viewportSize.x, canvasMin.y + viewportSize.y);
+				const ImVec2 imageMin(
+					canvasMin.x + (viewportSize.x - renderSize.x) * 0.5f,
+					canvasMin.y + (viewportSize.y - renderSize.y) * 0.5f);
+				const ImVec2 imageMax(imageMin.x + renderSize.x, imageMin.y + renderSize.y);
+
+				ImGui::InvisibleButton("##GameViewCanvas", viewportSize);
+				ImDrawList* drawList = ImGui::GetWindowDrawList();
+				drawList->AddRectFilled(canvasMin, canvasMax, IM_COL32(0, 0, 0, 255));
+				if (m_GameViewHasRendered && m_GameViewFBO.IsValid()) {
+					drawList->AddImage(
+						static_cast<ImTextureID>(static_cast<intptr_t>(m_GameViewFBO.GetColorTextureBackendId())),
+						imageMin,
+						imageMax);
+				}
+				drawList->AddRect(imageMin, imageMax, IM_COL32(255, 255, 255, 40));
+
+				const char* message = "no main camera in scene";
+				const ImVec2 textSize = ImGui::CalcTextSize(message);
+				drawList->AddText(
+					ImVec2(imageMin.x + (renderSize.x - textSize.x) * 0.5f,
+						imageMin.y + (renderSize.y - textSize.y) * 0.5f),
+					ImGui::GetColorU32(ImGuiCol_TextDisabled),
+					message);
+
+				float statsRenderedHeight = 0.0f;
+				if (m_ShowGameViewStats) {
+					m_GameViewStatsOverlay.RefreshIfDue(fbW, fbH);
+					statsRenderedHeight = m_GameViewStatsOverlay.RenderInRect(imageMin, imageMax);
+				}
+				if (m_ShowGameViewLogs) {
+					if (!m_GameViewLogOverlay) {
+						m_GameViewLogOverlay = std::make_unique<Axiom::Diagnostics::LogOverlay>();
+					}
+					const float logYOffset = statsRenderedHeight > 0.0f
+						? statsRenderedHeight + 8.0f
+						: 0.0f;
+					m_GameViewLogOverlay->RenderInRect(imageMin, imageMax, logYOffset);
+				}
+			};
+
 			if (m_GameViewFBO.IsValid() && gameCam && gameCam->IsValid()) {
 				Viewport* savedViewport = gameCam->GetViewport();
 				if (!savedViewport) {
-					ImGui::TextDisabled("Main camera has no viewport");
+					drawNoCameraFallback();
 					m_IsGameViewHovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_RootAndChildWindows);
 					m_IsGameViewFocused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
 					ApplicationEditorAccess::SetGameInputEnabled(m_IsGameViewFocused);
@@ -1149,7 +1194,7 @@ namespace Axiom {
 				}
 			}
 			else {
-				ImGui::TextDisabled("No main camera in scene");
+				drawNoCameraFallback();
 			}
 		}
 		else {

@@ -1042,9 +1042,8 @@ namespace Axiom {
 				&& roCount == 0
 				&& withPools.empty()
 				&& withoutPools.empty()
-				&& enableFilter == 0
 				&& writePools[0].Info->fillRawPointers) {
-				return writePools[0].Info->fillRawPointers(scene->GetRegistry(), outPointers, maxRows);
+				return writePools[0].Info->fillRawPointers(scene->GetRegistry(), outPointers, maxRows, enableFilter);
 			}
 
 			int rowIndex = 0;

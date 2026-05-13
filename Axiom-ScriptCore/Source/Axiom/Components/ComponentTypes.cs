@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Reflection;
 using System.Runtime.CompilerServices;
 using Axiom.Interop;
 
@@ -31,6 +32,69 @@ internal static class ComponentTypes
     internal static string? TryGetNativeName(Type t)
         => s_NativeNames.TryGetValue(t, out string? n) ? n : null;
 
+    internal static string? ResolveNativeName(Type t, int managedSize, out int nativeSize)
+    {
+        var candidates = new List<string>(6);
+        if (s_NativeNames.TryGetValue(t, out string? registered))
+            candidates.Add(registered);
+
+        NativeComponentAttribute? attr = t.GetCustomAttribute<NativeComponentAttribute>();
+        if (!string.IsNullOrWhiteSpace(attr?.Name))
+            candidates.Add(attr.Name);
+
+        const BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static;
+        FieldInfo? nativeNameField = t.GetField("NativeName", flags);
+        if (nativeNameField?.FieldType == typeof(string)
+            && nativeNameField.GetValue(null) is string fieldName
+            && !string.IsNullOrWhiteSpace(fieldName))
+        {
+            candidates.Add(fieldName);
+        }
+
+        PropertyInfo? nativeNameProperty = t.GetProperty("NativeName", flags);
+        if (nativeNameProperty?.PropertyType == typeof(string)
+            && nativeNameProperty.GetValue(null) is string propertyName
+            && !string.IsNullOrWhiteSpace(propertyName))
+        {
+            candidates.Add(propertyName);
+        }
+
+        AddNameCandidates(t.Name, candidates);
+
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (string candidate in candidates)
+        {
+            if (string.IsNullOrWhiteSpace(candidate) || !seen.Add(candidate))
+                continue;
+
+            nativeSize = InternalCalls.Entity_GetComponentSize(candidate);
+            if (nativeSize != 0)
+                return candidate;
+        }
+
+        nativeSize = 0;
+        return null;
+    }
+
+    private static void AddNameCandidates(string typeName, List<string> candidates)
+    {
+        if (string.IsNullOrWhiteSpace(typeName))
+            return;
+
+        candidates.Add(typeName);
+
+        string stripped = typeName.StartsWith("Native", StringComparison.Ordinal)
+            ? typeName.Substring("Native".Length)
+            : typeName;
+
+        if (!string.IsNullOrWhiteSpace(stripped))
+            candidates.Add(stripped);
+
+        const string suffix = "Component";
+        if (stripped.EndsWith(suffix, StringComparison.Ordinal) && stripped.Length > suffix.Length)
+            candidates.Add(stripped.Substring(0, stripped.Length - suffix.Length));
+    }
+
     // Force the static constructor of every registered ComponentTypes<T> so
     // the layout-size guard runs at script-host init instead of lazily on
     // first GetRef<T>. A drift between C++ and C# struct sizes throws here,
@@ -56,20 +120,20 @@ internal static class ComponentTypes<T> where T : unmanaged, IComponent
 
     static ComponentTypes()
     {
-        string? name = ComponentTypes.TryGetNativeName(typeof(T));
+        int managedSize = Unsafe.SizeOf<T>();
+        string? name = ComponentTypes.ResolveNativeName(typeof(T), managedSize, out int nativeSize);
         if (name == null)
         {
             throw new InvalidOperationException(
                 $"Component '{typeof(T).Name}' is not registered for the ECS ref-API. " +
-                "Add it to ComponentTypes.s_NativeNames with its native serialized name.");
+                "Register the native component with the engine, or add [NativeComponent(\"Native Name\")] " +
+                "when the managed struct name cannot be inferred.");
         }
 
         // Layout drift guard: the C++ component is the source of truth. Any
         // change there (added/removed/reordered field) MUST be mirrored in
         // the C# struct or this check fires. Catches the failure mode where
         // a header edit lands without the matching C# update.
-        int nativeSize = InternalCalls.Entity_GetComponentSize(name);
-        int managedSize = Unsafe.SizeOf<T>();
         if (nativeSize != 0 && nativeSize != managedSize)
         {
             throw new InvalidOperationException(

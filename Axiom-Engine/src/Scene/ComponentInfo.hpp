@@ -51,7 +51,7 @@ namespace Axiom {
 		// component instance in the component's own EnTT storage and returns the full
 		// row count. If the count exceeds `maxRows`, only the prefix is written and
 		// the managed caller retries with a larger buffer.
-		int (*fillRawPointers)(entt::registry& registry, void** outPointers, int maxRows) = nullptr;
+		int (*fillRawPointers)(entt::registry& registry, void** outPointers, int maxRows, int enableFilter) = nullptr;
 
 		// sizeof(T) for the underlying C++ component, or 0 for empty/tag types.
 		// Used by the managed side at script-engine init to detect layout drift between

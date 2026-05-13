@@ -13,10 +13,12 @@
 #include "Core/Time.hpp"
 #include "Core/Window.hpp"
 #include "Graphics/Renderer2D.hpp"
+#include "Scene/SceneManager.hpp"
 
 #include <imgui.h>
 
 #include <cstdio>
+#include <iterator>
 #include <string>
 
 #ifdef AIM_PLATFORM_WINDOWS
@@ -36,6 +38,15 @@ namespace Axiom::Diagnostics {
 			char buf[32];
 			std::snprintf(buf, sizeof(buf), "%.1f MB", mb);
 			return std::string(buf);
+		}
+
+		std::size_t CountLoadedEntities() {
+			std::size_t count = 0;
+			SceneManager::Get().ForeachLoadedScene([&](const Scene& scene) {
+				auto view = scene.GetRegistry().view<entt::entity>();
+				count += static_cast<std::size_t>(std::distance(view.begin(), view.end()));
+			});
+			return count;
 		}
 	}
 
@@ -97,6 +108,7 @@ namespace Axiom::Diagnostics {
 
 		m_Cached.AudioPlaying = AudioManager::IsInitialized()
 			? AudioManager::GetActiveSoundCount() : 0u;
+		m_Cached.Entities = CountLoadedEntities();
 
 		return true;
 	}
@@ -116,7 +128,8 @@ namespace Axiom::Diagnostics {
 		ImGui::Text("Allocated:       %s", FormatBytesAsMb(s.MemAllocBytes).c_str());
 		ImGui::Text("Reserved:        %s", FormatBytesAsMb(s.MemReservedBytes).c_str());
 		ImGui::Separator();
-		ImGui::Text("Audio playing:   %u", s.AudioPlaying);
+		ImGui::Text("Audio Playing:   %u", s.AudioPlaying);
+		ImGui::Text("Entities:        %zu", s.Entities);
 	}
 
 	namespace {

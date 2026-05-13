@@ -89,11 +89,10 @@ namespace Axiom {
 		void CopyPathToClipboard(const std::string& path);
 		void CreateFolder(const std::string& parentDir);
 		void CreateScript(const std::string& parentDir);
-		void CreateNativeScript(const std::string& parentDir);
-		void CreateCSharpComponent(const std::string& parentDir);
+		void CreateManagedCSharpComponent(const std::string& parentDir);
+		void CreateNativeCSharpComponent(const std::string& parentDir);
 		void CreateGameSystem(const std::string& parentDir);
 		void CreateGlobalSystem(const std::string& parentDir);
-		void CreateNativeComponent(const std::string& parentDir);
 		void CreateScene(const std::string& parentDir);
 		void CreateEntityPrefab(const std::string& parentDir, EntityHandle sourceEntity = entt::null);
 		// Copy a built-in default texture (Square / Circle / 9Sliced /
@@ -142,7 +141,7 @@ namespace Axiom {
 		bool m_AssetClipboardCut = false;
 
 		// Deferred script creation - boilerplate/project script is written after rename is committed.
-		enum class PendingScriptType { None, CSharp, Native, CSharpComponent, CSharpGameSystem, CSharpGlobalSystem, NativeComponent, EntityPrefab };
+		enum class PendingScriptType { None, CSharp, CSharpComponent, CSharpNativeComponent, CSharpGameSystem, CSharpGlobalSystem, EntityPrefab };
 		PendingScriptType m_PendingScriptType = PendingScriptType::None;
 		std::string m_PendingScriptDir;  // parent directory for the new script
 		EntityHandle m_PendingPrefabSourceEntity = entt::null;

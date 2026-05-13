@@ -46,7 +46,7 @@ namespace Axiom {
 		struct ParticleSettings {
 			float LifeTime{ 1.f };
 			float Speed{ 5.f };
-			Vec2 Gravity{ 0.f };
+			Vec2 Gravity{ 0.0f, -9.7f };
 			bool UseGravity{ false };
 			bool UseRandomColors{ false };
 			float Scale{ 1.f };

@@ -9,6 +9,8 @@
 #include <Core/Time.hpp>
 #include <Core/Application.hpp>
 
+#include <cmath>
+
 namespace Axiom {
 	Transform2DComponent& ParticleSystem2DComponent::GetTransform2D() {
 		Transform2DComponent* transform = const_cast<Transform2DComponent*>(TryGetEmitterTransform());
@@ -103,11 +105,14 @@ namespace Axiom {
 			Vec2 position{ 0 };
 			Vec2 scale{ ParticleSettings.Scale, ParticleSettings.Scale };
 			float rot{ 0.f };
+			Vec2 velocity = ParticleSettings.MoveDirection * ParticleSettings.Speed;
 
 			std::visit([&](auto const& s) {
 				using T = std::decay_t<decltype(s)>;
 				if constexpr (std::is_same_v<T, CircleParams>) {
 					position = s.IsOnCircle ? RandomOnCircle(s.Radius) : RandomInCircle(s.Radius);
+					const float angle = Random::NextFloat(0.0f, TwoPi<float>());
+					velocity = Vec2{ std::cos(angle), std::sin(angle) } * ParticleSettings.Speed;
 				}
 				else if constexpr (std::is_same_v<T, SquareParams>) {
 					position = Vec2(Random::NextFloat(-s.HalfExtends.x, s.HalfExtends.x), Random::NextFloat(-s.HalfExtends.y, s.HalfExtends.y));
@@ -120,7 +125,7 @@ namespace Axiom {
 				}
 			}
 
-			particle.Velocity = ParticleSettings.MoveDirection * ParticleSettings.Speed;
+			particle.Velocity = velocity;
 			particle.Transform.Position = position;
 			particle.Transform.Rotation = rot;
 			particle.Transform.Scale = scale;

@@ -756,8 +756,6 @@ namespace Axiom {
 			ImDrawList* drawList = ImGui::GetWindowDrawList();
 			drawList->AddRectFilled(bgMin, bgMax,
 				ImGui::GetColorU32(EditorTheme::Colors::AssetTileSelection), rounding);
-			drawList->AddRect(bgMin, bgMax,
-				ImGui::GetColorU32(EditorTheme::Colors::AssetTileSelectionBorder), rounding);
 		}
 
 		// Dim cut items so the user can see at a glance that Ctrl+X took
@@ -907,6 +905,21 @@ namespace Axiom {
 			ImGui::PopStyleVar();
 		}
 
+		if (isSelected) {
+			const ImVec2 itemMin = ImGui::GetItemRectMin();
+			const ImVec2 itemMax = ImGui::GetItemRectMax();
+			constexpr float inset = 1.0f;
+			const ImVec2 outlineMin(itemMin.x + inset, itemMin.y + inset);
+			const ImVec2 outlineMax(itemMax.x - inset, itemMax.y - inset);
+			if (outlineMax.x > outlineMin.x && outlineMax.y > outlineMin.y) {
+				ImGui::GetWindowDrawList()->AddRect(
+					outlineMin,
+					outlineMax,
+					ImGui::GetColorU32(EditorTheme::Colors::AssetTileSelectionBorder),
+					ImGui::GetStyle().FrameRounding);
+			}
+		}
+
 		if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
 			m_PressedPath = entry.Path;
 		}
@@ -1018,91 +1031,86 @@ namespace Axiom {
 				ImGui::Separator();
 			}
 
-			if (ImGui::BeginMenu("Create")) {
-				if (ImGui::MenuItem("Entity Prefab")) {
-					CreateEntityPrefab(m_CurrentDirectory);
-				}
+			if (ImGui::MenuItem("Entity Prefab")) {
+				CreateEntityPrefab(m_CurrentDirectory);
+			}
 
-
-				if (ImGui::BeginMenu("Texture")) {
-					if (ImGui::MenuItem("Square")) {
-						CreateDefaultTexture(m_CurrentDirectory, "Square.png", "Square");
-					}
-					if (ImGui::MenuItem("Circle")) {
-						CreateDefaultTexture(m_CurrentDirectory, "circle.png", "Circle");
-					}
-					if (ImGui::MenuItem("Capsule")) {
-						CreateDefaultTexture(m_CurrentDirectory, "Capsule.png", "Capsule");
-					}
-					if (ImGui::MenuItem("9-Sliced")) {
-						CreateDefaultTexture(m_CurrentDirectory, "9Sliced.png", "9Sliced");
-					}
-					if (ImGui::MenuItem("Hexagon (Flat-Top)")) {
-						CreateDefaultTexture(m_CurrentDirectory, "HexagonFlatTop.png", "HexagonFlatTop");
-					}
-					if (ImGui::MenuItem("Hexagon (Pointed-Top)")) {
-						CreateDefaultTexture(m_CurrentDirectory, "HexagonPointedTop.png", "HexagonPointedTop");
-					}
-					if (ImGui::MenuItem("Isometric Diamond")) {
-						CreateDefaultTexture(m_CurrentDirectory, "IsometricDiamond.png", "IsometricDiamond");
-					}
-					if (ImGui::MenuItem("Pixel")) {
-						CreateDefaultTexture(m_CurrentDirectory, "Pixel.png", "Pixel");
-					}
-					if (ImGui::MenuItem("Invisible")) {
-						CreateDefaultTexture(m_CurrentDirectory, "Invisible.png", "Invisible");
-					}
-					ImGui::EndMenu();
+			if (ImGui::BeginMenu("Texture")) {
+				if (ImGui::MenuItem("Square")) {
+					CreateDefaultTexture(m_CurrentDirectory, "Square.png", "Square");
 				}
-
-				if (ImGui::BeginMenu("Scripting")) {
-					if (ImGui::MenuItem("EntityScript (C#)")) {
-						CreateScript(m_CurrentDirectory);
-					}
-					if (ImGui::MenuItem("Component (C#)")) {
-						CreateCSharpComponent(m_CurrentDirectory);
-					}
-					if (ImGui::MenuItem("GameSystem (C#)")) {
-						CreateGameSystem(m_CurrentDirectory);
-					}
-					if (ImGui::MenuItem("GlobalSystem (C#)")) {
-						CreateGlobalSystem(m_CurrentDirectory);
-					}
-					if (ImGui::MenuItem("Component (C++)")) {
-						CreateNativeComponent(m_CurrentDirectory);
-					}
-					ImGui::EndMenu();
+				if (ImGui::MenuItem("Circle")) {
+					CreateDefaultTexture(m_CurrentDirectory, "circle.png", "Circle");
 				}
-				if (ImGui::BeginMenu("File")) {
-					// Common loose file formats. Default content is the minimal
-					// well-formed payload for the format (or empty when there's
-					// no canonical "empty"). Extensions match the icon mapping
-					// in GetFileTypeIconName so the new file picks up its icon
-					// on the next refresh.
-					if (ImGui::MenuItem("Empty File")) {
-						CreateFile(m_CurrentDirectory, "NewFile", ".txt", "");
-					}
-					if (ImGui::MenuItem("Text File")) {
-						CreateFile(m_CurrentDirectory, "NewFile", ".txt", "");
-					}
-					if (ImGui::MenuItem("JSON File")) {
-						CreateFile(m_CurrentDirectory, "NewFile", ".json", "{\n}\n");
-					}
-					if (ImGui::MenuItem("Binary File")) {
-						CreateFile(m_CurrentDirectory, "NewFile", ".bin", "");
-					}
-					ImGui::EndMenu();
+				if (ImGui::MenuItem("Capsule")) {
+					CreateDefaultTexture(m_CurrentDirectory, "Capsule.png", "Capsule");
 				}
-				ImGui::Separator();
-				if (ImGui::MenuItem("Scene")) {
-					CreateScene(m_CurrentDirectory);
+				if (ImGui::MenuItem("9-Sliced")) {
+					CreateDefaultTexture(m_CurrentDirectory, "9Sliced.png", "9Sliced");
 				}
-				if (ImGui::MenuItem("Folder")) {
-					CreateFolder(m_CurrentDirectory);
+				if (ImGui::MenuItem("Hexagon (Flat-Top)")) {
+					CreateDefaultTexture(m_CurrentDirectory, "HexagonFlatTop.png", "HexagonFlatTop");
+				}
+				if (ImGui::MenuItem("Hexagon (Pointed-Top)")) {
+					CreateDefaultTexture(m_CurrentDirectory, "HexagonPointedTop.png", "HexagonPointedTop");
+				}
+				if (ImGui::MenuItem("Isometric Diamond")) {
+					CreateDefaultTexture(m_CurrentDirectory, "IsometricDiamond.png", "IsometricDiamond");
+				}
+				if (ImGui::MenuItem("Pixel")) {
+					CreateDefaultTexture(m_CurrentDirectory, "Pixel.png", "Pixel");
+				}
+				if (ImGui::MenuItem("Invisible")) {
+					CreateDefaultTexture(m_CurrentDirectory, "Invisible.png", "Invisible");
 				}
 				ImGui::EndMenu();
 			}
 
+			if (ImGui::BeginMenu("Scripting")) {
+				if (ImGui::MenuItem("EntityScript")) {
+					CreateScript(m_CurrentDirectory);
+				}
+				if (ImGui::MenuItem("Component")) {
+					CreateManagedCSharpComponent(m_CurrentDirectory);
+				}
+				if (ImGui::MenuItem("Component (Native)")) {
+					CreateNativeCSharpComponent(m_CurrentDirectory);
+				}
+				if (ImGui::MenuItem("GameSystem")) {
+					CreateGameSystem(m_CurrentDirectory);
+				}
+				if (ImGui::MenuItem("GlobalSystem")) {
+					CreateGlobalSystem(m_CurrentDirectory);
+				}
+				ImGui::EndMenu();
+			}
+			if (ImGui::BeginMenu("File")) {
+				// Common loose file formats. Default content is the minimal
+				// well-formed payload for the format (or empty when there's
+				// no canonical "empty"). Extensions match the icon mapping
+				// in GetFileTypeIconName so the new file picks up its icon
+				// on the next refresh.
+				if (ImGui::MenuItem("Empty File")) {
+					CreateFile(m_CurrentDirectory, "NewFile", "", "");
+				}
+				if (ImGui::MenuItem("Text File")) {
+					CreateFile(m_CurrentDirectory, "NewFile", ".txt", "");
+				}
+				if (ImGui::MenuItem("Binary File")) {
+					CreateFile(m_CurrentDirectory, "NewFile", ".bin", "");
+				}
+				if (ImGui::MenuItem("JSON File")) {
+					CreateFile(m_CurrentDirectory, "NewFile", ".json", "{\n}\n");
+				}
+				ImGui::EndMenu();
+			}
+			ImGui::Separator();
+			if (ImGui::MenuItem("New Scene")) {
+				CreateScene(m_CurrentDirectory);
+			}
+			if (ImGui::MenuItem("New Folder", "Shift + F")) {
+				CreateFolder(m_CurrentDirectory);
+			}
 			ImGui::EndPopup();
 		}
 	}
@@ -1138,7 +1146,7 @@ namespace Axiom {
 			}
 			ImGui::Separator();
 
-			if (ImGui::MenuItem("Delete")) {
+			if (ImGui::MenuItem("Delete", "Del")) {
 				const std::vector<std::string> paths = GetSelectedPaths();
 				for (const std::string& path : paths) {
 					DeleteEntry(path);
@@ -1146,7 +1154,7 @@ namespace Axiom {
 				ImGui::EndPopup();
 				return;
 			}
-			if (ImGui::MenuItem("Rename", nullptr, false, GetSelectedPaths().size() == 1)) {
+			if (ImGui::MenuItem("Rename", "F2", false, GetSelectedPaths().size() == 1)) {
 				BeginRename(entry.Path, entry.Name);
 			}
 			if (ImGui::MenuItem("Duplicate", "Ctrl+D")) {

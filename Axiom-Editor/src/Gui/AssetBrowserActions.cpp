@@ -293,10 +293,12 @@ namespace Axiom {
 			std::string className = newName;
 			const bool isCSharp = m_PendingScriptType == PendingScriptType::CSharp
 				|| m_PendingScriptType == PendingScriptType::CSharpComponent
+				|| m_PendingScriptType == PendingScriptType::CSharpNativeComponent
 				|| m_PendingScriptType == PendingScriptType::CSharpGameSystem
 				|| m_PendingScriptType == PendingScriptType::CSharpGlobalSystem;
-			const bool isComponent = m_PendingScriptType == PendingScriptType::CSharpComponent
-				|| m_PendingScriptType == PendingScriptType::NativeComponent;
+
+			const bool isComponent = m_PendingScriptType == PendingScriptType::CSharpComponent;
+			const bool isNativeComponent = m_PendingScriptType == PendingScriptType::CSharpNativeComponent;
 			const bool isGameSystem = m_PendingScriptType == PendingScriptType::CSharpGameSystem;
 			const bool isGlobalSystem = m_PendingScriptType == PendingScriptType::CSharpGlobalSystem;
 			std::string ext = isCSharp ? ".cs" : (isComponent ? ".hpp" : ".cpp");
@@ -330,8 +332,22 @@ namespace Axiom {
 						"\n"
 						"public class " + className + " : Component\n"
 						"{\n"
-						"    [ShowInEditor]\n"
 						"    public float Value = 0.0f;\n"
+						"}\n";
+				}
+				else if (isNativeComponent) {
+					boilerplate =
+						"using Axiom;\n"
+						"using Axiom.Components;\n"
+						"\n"
+						"public struct " + className + " : IComponent\n"
+						"{\n"
+						"    public float Value = 0.0f;\n"
+						"\n"
+						"    public " + className + "()\n"
+						"{\n"
+						"}\n"
+						"\n"
 						"}\n";
 				}
 				else if (isGameSystem) {
@@ -671,29 +687,8 @@ namespace Axiom {
 		std::string name = std::filesystem::path(scriptPath).stem().string();
 		BeginRename(scriptPath, name);
 	}
-
-	void AssetBrowser::CreateNativeScript(const std::string& parentDir) {
-		std::string baseName = "NewNativeScript";
-		std::string ext = ".cpp";
-		std::string scriptPath = (std::filesystem::path(parentDir) / (baseName + ext)).string();
-		int counter = 1;
-		while (std::filesystem::exists(scriptPath)) {
-			scriptPath = (std::filesystem::path(parentDir) / (baseName + std::to_string(counter) + ext)).string();
-			counter++;
-		}
-
-		m_PendingScriptType = PendingScriptType::Native;
-		m_PendingScriptDir = parentDir;
-
-		m_NeedsRefresh = true;
-		Refresh();
-
-		m_SelectedPath = scriptPath;
-		std::string name = std::filesystem::path(scriptPath).stem().string();
-		BeginRename(scriptPath, name);
-	}
-
-	void AssetBrowser::CreateCSharpComponent(const std::string& parentDir) {
+	
+	void AssetBrowser::CreateManagedCSharpComponent(const std::string& parentDir) {
 		std::string baseName = "NewComponent";
 		std::string ext = ".cs";
 		std::string componentPath = (std::filesystem::path(parentDir) / (baseName + ext)).string();
@@ -713,6 +708,28 @@ namespace Axiom {
 		std::string name = std::filesystem::path(componentPath).stem().string();
 		BeginRename(componentPath, name);
 	}
+
+	void AssetBrowser::CreateNativeCSharpComponent(const std::string& parentDir) {
+		std::string baseName = "NewNativeComponent";
+		std::string ext = ".cs";
+		std::string componentPath = (std::filesystem::path(parentDir) / (baseName + ext)).string();
+		int counter = 1;
+		while (std::filesystem::exists(componentPath)) {
+			componentPath = (std::filesystem::path(parentDir) / (baseName + std::to_string(counter) + ext)).string();
+			counter++;
+		}
+
+		m_PendingScriptType = PendingScriptType::CSharpNativeComponent;
+		m_PendingScriptDir = parentDir;
+
+		m_NeedsRefresh = true;
+		Refresh();
+
+		m_SelectedPath = componentPath;
+		std::string name = std::filesystem::path(componentPath).stem().string();
+		BeginRename(componentPath, name);
+	}
+
 
 	void AssetBrowser::CreateGameSystem(const std::string& parentDir) {
 		std::string baseName = "NewGameSystem";
@@ -756,27 +773,7 @@ namespace Axiom {
 		BeginRename(systemPath, name);
 	}
 
-	void AssetBrowser::CreateNativeComponent(const std::string& parentDir) {
-		std::string baseName = "NewComponent";
-		std::string ext = ".hpp";
-		std::string componentPath = (std::filesystem::path(parentDir) / (baseName + ext)).string();
-		int counter = 1;
-		while (std::filesystem::exists(componentPath)) {
-			componentPath = (std::filesystem::path(parentDir) / (baseName + std::to_string(counter) + ext)).string();
-			counter++;
-		}
-
-		m_PendingScriptType = PendingScriptType::NativeComponent;
-		m_PendingScriptDir = parentDir;
-
-		m_NeedsRefresh = true;
-		Refresh();
-
-		m_SelectedPath = componentPath;
-		std::string name = std::filesystem::path(componentPath).stem().string();
-		BeginRename(componentPath, name);
-	}
-
+	
 	void AssetBrowser::CreateDefaultTexture(const std::string& parentDir,
 		const std::string& sourceFile, const std::string& displayName)
 	{

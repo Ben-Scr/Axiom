@@ -4,6 +4,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "Scene/Scene.hpp"
@@ -20,6 +21,13 @@ namespace Axiom {
 		friend class Window;
 
 	public:
+		struct EntityPresetInfo {
+			std::string MenuPath;
+			std::string Label;
+			std::string DefaultName;
+			std::function<Entity(Scene&)> Create;
+		};
+
 		SceneManager() = default;
 		SceneManager(const SceneManager&) = delete;
 		SceneManager& operator=(const SceneManager&) = delete;
@@ -33,6 +41,22 @@ namespace Axiom {
 		}
 		const ComponentRegistry& GetComponentRegistry() const {
 			return m_ComponentRegistry;
+		}
+		void RegisterEntityPreset(EntityPresetInfo preset) {
+			if (preset.MenuPath.empty() || preset.Label.empty() || !preset.Create) {
+				return;
+			}
+
+			for (EntityPresetInfo& existing : m_EntityPresets) {
+				if (existing.MenuPath == preset.MenuPath && existing.Label == preset.Label) {
+					existing = std::move(preset);
+					return;
+				}
+			}
+			m_EntityPresets.push_back(std::move(preset));
+		}
+		const std::vector<EntityPresetInfo>& GetEntityPresets() const {
+			return m_EntityPresets;
 		}
 		SceneDefinition& RegisterScene(const std::string& name);
 		std::weak_ptr<Scene> LoadScene(const std::string& name);
@@ -122,6 +146,7 @@ namespace Axiom {
 		std::vector<std::string> m_SceneDefinitionOrder;
 		LoadedSceneList m_LoadedScenes;
 		ComponentRegistry m_ComponentRegistry;
+		std::vector<EntityPresetInfo> m_EntityPresets;
 		Scene* m_ActiveScene = nullptr;
 		bool m_IsInitialized = false;
 
