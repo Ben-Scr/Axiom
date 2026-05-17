@@ -318,6 +318,29 @@ public class Entity : IEquatable<Entity>
         return GetComponent<T>();
     }
 
+    // Native (`IComponent`) variant — adds a blittable native-backed component
+    // to the entity's C++ ECS pool. Mirrors the managed-`Component`
+    // `AddComponent<T>()` above but uses `ComponentTypes<T>.NativeName`
+    // (resolved once per T via the static-generic cache) instead of the
+    // s_NativeComponentNames map. Returns true if the component was newly
+    // added or already present after the call; false if the entity is a
+    // prefab asset or the native pool refused the insertion. Pair with
+    // `GetRef<T>()` to read/write the data.
+    //
+    // Distinct method name (not an overload of `AddComponent<T>`) because
+    // C# overload resolution ignores generic constraints — two
+    // `AddComponent<T>()` methods that differ only by `where T : Component`
+    // vs. `where T : unmanaged, IComponent` produce CS0111. For bulk
+    // creation of many entities use `EntityCommandBuffer` instead, which
+    // skips the per-call P/Invoke entirely.
+    public bool AddNativeComponent<T>() where T : unmanaged, IComponent
+    {
+        if (IsPrefabAsset)
+            return false;
+
+        return InternalCalls.Entity_AddComponent(ID, ComponentTypes<T>.NativeName);
+    }
+
     public bool HasComponent<T>() where T : Component, new()
     {
         if (IsPrefabAsset)
@@ -325,6 +348,16 @@ public class Entity : IEquatable<Entity>
 
         string? nativeName = GetNativeName<T>();
         return nativeName != null && InternalCalls.Entity_HasComponent(ID, nativeName);
+    }
+
+    /// Native (`IComponent`) variant — see <see cref="AddNativeComponent{T}"/>
+    /// for the naming rationale.
+    public bool HasNativeComponent<T>() where T : unmanaged, IComponent
+    {
+        if (IsPrefabAsset)
+            return false;
+
+        return InternalCalls.Entity_HasComponent(ID, ComponentTypes<T>.NativeName);
     }
 
     public bool RemoveComponent<T>() where T : Component, new()
@@ -340,6 +373,20 @@ public class Entity : IEquatable<Entity>
             InvalidateCachedComponent(typeof(T));
 
         return removed;
+    }
+
+    // Native (`IComponent`) variant — removes a blittable native-backed
+    // component from the entity's C++ ECS pool. No managed cache invalidation
+    // is needed because IComponent structs aren't cached via
+    // s_ManagedComponentStore / m_ComponentCache (those store Component class
+    // wrappers, not unmanaged structs). Renamed away from `RemoveComponent`
+    // for the same CS0111 reason as the Add/Has pair above.
+    public bool RemoveNativeComponent<T>() where T : unmanaged, IComponent
+    {
+        if (IsPrefabAsset)
+            return false;
+
+        return InternalCalls.Entity_RemoveComponent(ID, ComponentTypes<T>.NativeName);
     }
 
     public T? GetComponent<T>() where T : Component, new()

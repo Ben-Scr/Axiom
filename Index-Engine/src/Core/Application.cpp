@@ -8,6 +8,7 @@
 #include "Graphics/RenderApi.hpp"
 #include "Graphics/Renderer2D.hpp"
 #include "Graphics/GizmoRenderer.hpp"
+#include "Graphics/ShaderManager.hpp"
 #include "Graphics/TextureManager.hpp"
 #include "Core/PackageHost.hpp"
 #include "Gui/GuiRenderer.hpp"
@@ -19,6 +20,7 @@
 #include "Graphics/Text/FontManager.hpp"
 #include "Graphics/TextureManager.hpp"
 #include "Jobs/JobSystem.hpp"
+#include "Memory/FrameArenas.hpp"
 #include "Physics/PhysicsSystem2D.hpp"
 #include "Profiling/Profiler.hpp"
 #include "Scene/Scene.hpp"
@@ -53,8 +55,27 @@ namespace Index {
 		: m_SceneManager(std::make_unique<SceneManager>())
 		, m_FixedUpdateAccumulator{ 0 }
 	{
+		// Process-wide singleton. Constructing a second Application while the
+		// first is still alive would silently rebind s_Instance and leave the
+		// original instance reachable only through whatever pointers callers
+		// happen to hold — every subsystem keyed off Application::Get()
+		// (input, scripting, scene manager) would start dispatching to the
+		// new instance mid-frame. IDX_VERIFY is on in all build configs so
+		// this catches the misuse in release too.
+		IDX_VERIFY(s_Instance == nullptr,
+			"Application: a second instance was constructed while one is still alive — "
+			"only one Application is permitted per process.");
 		m_MainThreadId = std::this_thread::get_id();
 		Application::s_Instance = this;
+	}
+
+	Renderer2D* Application::GetRenderer2D() {
+		// Today Renderer2D is the only IRenderer impl installed during
+		// Initialize. When alternate backends (NullRenderer, custom 3D) become
+		// installable, this static_cast is the documented coupling point —
+		// callers that bypass IRenderer to reach Renderer2D-specific features
+		// must tolerate a nullptr return.
+		return static_cast<Renderer2D*>(m_Renderer2D.get());
 	}
 
 	Application::~Application()
@@ -228,16 +249,15 @@ namespace Index {
 					}
 
 					{
+						// Read Scene's cached live-entity counter instead of
+						// iterating entt's entity storage every frame. The
+						// previous scan was O(all entities) inside the
+						// profiler block; on a 10k-entity scene it dominated
+						// the profile sample it was meant to report on.
 						std::size_t totalEntities = 0;
 						if (m_SceneManager) {
 							m_SceneManager->ForeachLoadedScene([&totalEntities](Scene& scene) {
-								auto& registry = scene.GetRegistry();
-								auto& entityStorage = registry.storage<entt::entity>();
-								for (EntityHandle entity : entityStorage) {
-									if (registry.valid(entity)) {
-										++totalEntities;
-									}
-								}
+								totalEntities += scene.GetEntityCount();
 							});
 						}
 						INDEX_PROFILE_VALUE("Entity Count", float(totalEntities));
@@ -306,6 +326,17 @@ namespace Index {
 		IDX_INFO_TAG("JobSystem", "Initialization took " + StringHelper::ToString(timer));
 
 		timer.Reset();
+		// FrameArenas backs per-frame scratch (Renderer2D, Gizmo, etc.) and
+		// a persistent buffer for cross-frame engine scratch. Initialize
+		// before any subsystem that might use them; both capacities come
+		// from ApplicationConfig and either can be 0 to opt out.
+		FrameArenas::Initialize(FrameArenasSpec{
+			m_Configuration.FrameArenaCapacityBytes,
+			m_Configuration.PersistentArenaCapacityBytes,
+		});
+		IDX_INFO_TAG("FrameArenas", "Initialization took " + StringHelper::ToString(timer));
+
+		timer.Reset();
 		Window::Initialize();
 		m_Window = std::make_unique<Window>(m_Configuration.WindowSpecification);
 		m_Window->SetVsync(m_Configuration.Vsync);
@@ -326,15 +357,26 @@ namespace Index {
 			IDX_INFO_TAG("TextureManager", "Initialization took " + StringHelper::ToString(timer));
 		}
 
+		if (m_Configuration.EnableShaderManager) {
+			timer.Reset();
+			ShaderManager::Initialize();
+			IDX_INFO_TAG("ShaderManager", "Initialization took " + StringHelper::ToString(timer));
+		}
+
 		if (m_Configuration.EnableRenderer2D) {
 			timer.Reset();
-			m_Renderer2D = std::make_unique<Renderer2D>();
-			m_Renderer2D->Initialize();
-			m_Renderer2D->SetSceneProvider([this](const std::function<void(Scene&)>& fn) {
+			// Construct the concrete default renderer to do impl-specific
+			// configuration, then move into the IRenderer-typed member. Packages
+			// that want to substitute a different IRenderer can do so by
+			// installing it BEFORE Application reaches this point (future hook).
+			auto renderer = std::make_unique<Renderer2D>();
+			renderer->Initialize();
+			renderer->SetSceneProvider([this](const std::function<void(Scene&)>& fn) {
 				if (m_SceneManager) {
 					m_SceneManager->ForeachLoadedScene(fn);
 				}
 				});
+			m_Renderer2D = std::move(renderer);
 			IDX_INFO_TAG("Renderer2D", "Initialization took " + StringHelper::ToString(timer));
 		}
 
@@ -354,8 +396,11 @@ namespace Index {
 
 		if (m_Configuration.EnablePhysics2D) {
 			timer.Reset();
-			m_PhysicsSystem2D = std::make_unique<PhysicsSystem2D>();
-			m_PhysicsSystem2D->Initialize();
+			// Construct the concrete default impl, then move into the
+			// IPhysicsEngine-typed member — mirrors the renderer wiring.
+			auto physics = std::make_unique<PhysicsSystem2D>();
+			physics->Initialize();
+			m_PhysicsSystem2D = std::move(physics);
 			IDX_INFO_TAG("PhysicsSystem", "Initialization took " + StringHelper::ToString(timer));
 		}
 
@@ -609,6 +654,13 @@ namespace Index {
 		}
 
 		m_IsRenderingFrame = false;
+
+		// Wipe per-frame scratch after rendering completes. O(1) bump-
+		// pointer reset; pointers handed out during this frame become
+		// dangling here, which is the contract callers opted into. Runs
+		// every frame including the paused branch — paused frames may
+		// still have allocated scratch via OnPaused / UI layers.
+		FrameArenas::OnEndFrame();
 	}
 
 	void Application::DispatchEvent(IndexEvent& event) {
@@ -866,6 +918,7 @@ namespace Index {
 		if (ScriptEngine::IsInitialized()) ScriptEngine::Shutdown();
 		if (FontManager::IsInitialized()) FontManager::Shutdown();
 		if (m_Configuration.EnableTextureManager) TextureManager::Shutdown();
+		if (ShaderManager::IsInitialized()) ShaderManager::Shutdown();
 
 		if (m_PhysicsSystem2D) m_PhysicsSystem2D->Shutdown();
 		if (m_GuiRenderer) m_GuiRenderer->Shutdown();
@@ -891,6 +944,13 @@ namespace Index {
 		m_Renderer2D.reset();
 		m_PhysicsSystem2D.reset();
 		m_Window.reset();
+
+		// Release FrameArenas backing buffers. Pairs with the Initialize
+		// call. After this, Frame()/Persistent() still return valid
+		// references but with zero capacity, so any late callers fail
+		// gracefully (Allocate returns nullptr) instead of touching freed
+		// memory.
+		FrameArenas::Shutdown();
 
 		if (JobSystem::IsInitialized()) {
 			JobSystem::Shutdown();

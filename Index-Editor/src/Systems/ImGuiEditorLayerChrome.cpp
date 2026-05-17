@@ -5,7 +5,10 @@
 
 #include <cstdio>
 
-#include "Components/Components.hpp"
+#include "Components/Forward.hpp"
+#include "Components/General/General.hpp"
+#include "Components/UI/UI.hpp"
+#include "Components/Tags.hpp"
 #include "Core/Application.hpp"
 #include "Core/Window.hpp"
 #include "Graphics/Framebuffer.hpp"
@@ -53,6 +56,22 @@ namespace Index {
 
 	void ImGuiEditorLayer::OnPreRender(Application& app) {
 		(void)app;
+
+		// Drain prefab-edit-mode entry BEFORE the active-scene early-return.
+		// The previous order gated prefab opening on an active scene being
+		// present, which is the wrong dependency: a prefab can be opened
+		// even when no scene is currently active (the detached prefab scene
+		// is self-contained). Without this hoist, the asset browser's
+		// "double-click .prefab" and right-click → Open paths would silently
+		// do nothing in the no-active-scene case.
+		if (!Application::GetIsPlaying() && m_AssetBrowserInitialized) {
+			std::string earlyPendingPrefabEdit = m_AssetBrowser.TakePendingPrefabEdit();
+			if (!earlyPendingPrefabEdit.empty()) {
+				IDX_INFO_TAG("PrefabEdit", "Opening prefab from asset browser: {}", earlyPendingPrefabEdit);
+				OpenPrefabForEditing(earlyPendingPrefabEdit);
+			}
+		}
+
 		Scene* activeScene = SceneManager::Get().GetActiveScene();
 		if (!activeScene) {
 			return;
@@ -194,8 +213,20 @@ namespace Index {
 			std::string switchPath = m_PendingSceneSwitch;
 			m_PendingSceneSwitch.clear();
 
-			Scene* active = SceneManager::Get().GetActiveScene();
+			auto& sm = SceneManager::Get();
+			Scene* active = sm.GetActiveScene();
 			if (active) {
+				// Opening a scene from the asset browser is an exclusive
+				// switch — close every other loaded scene so the new one
+				// is the only entry in the hierarchy afterwards. Keep the
+				// active scene (its contents get overwritten below); we
+				// iterate a snapshot of names so UnloadScene calls don't
+				// invalidate the loop.
+				const std::string activeName = active->GetName();
+				for (const std::string& name : sm.GetLoadedSceneNames()) {
+					if (name != activeName) sm.UnloadScene(name);
+				}
+
 				SceneSerializer::LoadFromFile(*active, switchPath);
 				m_EntityOrder.clear(); m_EntityOrderDirty = true;
 				IndexProject* project = ProjectManager::GetCurrentProject();
@@ -220,16 +251,8 @@ namespace Index {
 			}
 		}
 
-		// Intercept Asset Browser prefab double-click → enter prefab-edit
-		// mode. Blocked during Play Mode (same as scene load) — editing
-		// a prefab while a game is running would corrupt running scripts'
-		// view of selection.
-		if (!Application::GetIsPlaying()) {
-			std::string pendingPrefabEdit = m_AssetBrowser.TakePendingPrefabEdit();
-			if (!pendingPrefabEdit.empty()) {
-				OpenPrefabForEditing(pendingPrefabEdit);
-			}
-		}
+		// (Prefab-edit drain is hoisted above the active-scene early return
+		// at the top of OnPreRender — see comment there.)
 
 		// Ctrl+S: routes to whatever the editor is currently editing.
 		// Priority: full prefab-edit mode > asset-side prefab inspector > active scene.
@@ -298,6 +321,7 @@ namespace Index {
 			ImGui::OpenPopup("Save Changes?");
 			m_ShowSaveConfirmDialog = false;
 		}
+		ImGuiUtils::CenterNextModal();
 		if (ImGui::BeginPopupModal("Save Changes?", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
 			Scene* active = SceneManager::Get().GetActiveScene();
 			std::string activeName = active ? active->GetName() : "Scene";
@@ -339,6 +363,7 @@ namespace Index {
 			ImGui::OpenPopup("Discard Prefab Edits?");
 			m_ShowPrefabEditDiscardPrompt = false;
 		}
+		ImGuiUtils::CenterNextModal();
 		if (ImGui::BeginPopupModal("Discard Prefab Edits?", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
 			std::string editPrefabName = std::filesystem::path(m_PrefabEditPath).filename().string();
 			if (editPrefabName.empty()) editPrefabName = "the prefab";
@@ -368,6 +393,7 @@ namespace Index {
 			ImGui::OpenPopup("Save Prefab Changes?");
 			m_ShowPrefabSavePrompt = false;
 		}
+		ImGuiUtils::CenterNextModal();
 		if (ImGui::BeginPopupModal("Save Prefab Changes?", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
 			std::string prefabName = std::filesystem::path(m_PrefabInspector.GetCurrentPath()).filename().string();
 			if (prefabName.empty()) prefabName = "the prefab";
@@ -413,6 +439,7 @@ namespace Index {
 			ImGui::OpenPopup("Save Before Quit?");
 			m_ShowQuitSaveDialog = false;
 		}
+		ImGuiUtils::CenterNextModal();
 		if (ImGui::BeginPopupModal("Save Before Quit?", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
 			Scene* active = SceneManager::Get().GetActiveScene();
 			std::string activeName = active ? active->GetName() : "Scene";
@@ -480,9 +507,11 @@ namespace Index {
 		RenderProjectPanel();
 		RenderLogPanel();
 		RenderBuildPanel();
+		RenderBuildProfilesPanel();
 		RenderPlayerSettingsPanel();
 		RenderProjectSettingsPanel();
 		RenderPackageManagerPanel();
+		m_EditorPreferencesPanel.Render(&m_ShowEditorPreferences);
 
 		// Splash preview — replays the runtime's splash timeline as
 		// a foreground overlay over the editor when the user clicks
@@ -507,27 +536,56 @@ namespace Index {
 		// now reports actual stage completion.
 		if (m_BuildState > 0) {
 			ImGuiViewport* viewport = ImGui::GetMainViewport();
+
+			// Fullscreen dim background. Submitted first and explicitly
+			// focused so it sits behind the overlay but above every other
+			// editor window.
+			ImGui::SetNextWindowPos(viewport->Pos);
+			ImGui::SetNextWindowSize(viewport->Size);
+			ImGuiWindowFlags dimFlags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize
+				| ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar
+				| ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoDocking
+				| ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoNav
+				| ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoBringToFrontOnFocus;
+			ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+			ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+			ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+			ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.0f, 0.0f, 0.0f, 0.5f));
+			ImGui::SetNextWindowFocus();
+			ImGui::Begin("##BuildDim", nullptr, dimFlags);
+			ImGui::End();
+			ImGui::PopStyleColor();
+			ImGui::PopStyleVar(3);
+
 			ImVec2 center(viewport->Pos.x + viewport->Size.x * 0.5f,
 				viewport->Pos.y + viewport->Size.y * 0.5f);
 
 			ImGui::SetNextWindowPos(center, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
 			ImGui::SetNextWindowSize(ImVec2(360, 110));
 			ImGui::SetNextWindowBgAlpha(0.92f);
+			// Force the overlay to the top every frame so other panels
+			// (asset browser dialogs, inspectors, popups) can't end up
+			// drawing above it.
+			ImGui::SetNextWindowFocus();
 
 			ImGuiWindowFlags overlayFlags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize
 				| ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar
-				| ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoDocking;
+				| ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoDocking
+				| ImGuiWindowFlags_NoSavedSettings;
 
 			ImGui::Begin("##BuildOverlay", nullptr, overlayFlags);
 			ImGui::TextUnformatted("Building Project...");
 			ImGui::Spacing();
 
 			std::string stage;
+			float progress;
 			{
+				// Snapshot both under the same lock so the stage label always
+				// matches the bar fraction in any given frame.
 				std::lock_guard<std::mutex> lk(m_BuildProgressMutex);
 				stage = m_BuildStage;
+				progress = m_BuildProgress;
 			}
-			const float progress = m_BuildProgress.load(std::memory_order_relaxed);
 			ImGui::ProgressBar(progress, ImVec2(-1, 0), "");
 			ImGui::TextDisabled("%s", stage.empty() ? "Working..." : stage.c_str());
 			ImGui::End();

@@ -133,23 +133,32 @@ namespace Index {
 			return;
 		}
 
-		// Snapshot the callback under the state lock before invoking it. Without
-		// the lock, the worker thread could mid-Poll mutate m_Callback (e.g. via
-		// Stop()), leaving us with a torn std::function — and the callback itself
-		// may run code that mutates other watcher state, which would race the
-		// worker without a quiesce point. We do NOT hold the lock across the
-		// invocation: callbacks frequently re-enter the file system / scene
-		// system and a held lock would invite deadlocks.
+		// Snapshot the callback AND the description under the state lock
+		// before invoking. Reading m_WatchDescription outside the lock would
+		// race Stop()/dtor clearing it (line 125). We do NOT hold the lock
+		// across the invocation itself: callbacks frequently re-enter the
+		// file system / scene system and a held lock would invite deadlocks.
+		//
+		// We also re-check m_Watching under the lock: if Stop() flipped it
+		// after this Poll() started but before we got here, the callback no
+		// longer represents live state and may close over freed resources
+		// (e.g. a hot-reload pipeline owning this watcher). Bail in that
+		// case rather than firing a stale notification.
 		Callback callbackCopy;
+		std::string descriptionCopy;
 		{
 			std::scoped_lock<std::mutex> lock(m_StateMutex);
+			if (!m_Watching.load()) {
+				return;
+			}
 			callbackCopy = m_Callback;
+			descriptionCopy = m_WatchDescription;
 		}
 		if (!callbackCopy) {
 			return;
 		}
 
-		IDX_CORE_INFO_TAG("FileWatcher", "Changes detected in {}", m_WatchDescription);
+		IDX_CORE_INFO_TAG("FileWatcher", "Changes detected in {}", descriptionCopy);
 		callbackCopy();
 	}
 

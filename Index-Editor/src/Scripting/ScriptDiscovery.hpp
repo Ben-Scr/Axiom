@@ -24,7 +24,21 @@ namespace Index::EditorScriptDiscovery {
 		std::filesystem::path Path;
 		std::string Extension;
 		ScriptType Type = ScriptType::Unknown;
+		// `IsManagedComponent` and `IsNativeComponent` are mutually exclusive
+		// — a .cs file is either a managed class (`: Component`) hosted by the
+		// ScriptComponent's managed slot, OR a native-backed struct
+		// (`: IComponent`) that maps onto a C++ ECS pool. The two attach via
+		// completely different paths (ScriptComponent::AddManagedComponent vs.
+		// ComponentRegistry::AddWithDependencies), so the popup needs to tell
+		// them apart.
 		bool IsManagedComponent = false;
+		bool IsNativeComponent = false;
+		// Display name of the paired C++ component. For native-backed structs,
+		// this is the value of `[NativeComponent("...")]` when present, or the
+		// struct's class name as fallback. The Add Component popup uses this
+		// to look up the matching ComponentInfo and to hide the C++ entry from
+		// the regular General/Rendering/Physics/Audio categories.
+		std::string NativeName;
 		bool IsGameSystem = false;
 		bool IsGlobalSystem = false;
 	};
@@ -103,6 +117,8 @@ namespace Index::EditorScriptDiscovery {
 		const std::string& extension,
 		ScriptType type,
 		bool isManagedComponent = false,
+		bool isNativeComponent = false,
+		std::string nativeName = {},
 		bool isGameSystem = false,
 		bool isGlobalSystem = false)
 	{
@@ -110,7 +126,17 @@ namespace Index::EditorScriptDiscovery {
 			return;
 		}
 
-		entries.push_back({ className, path, extension, type, isManagedComponent, isGameSystem, isGlobalSystem });
+		ScriptEntry entry;
+		entry.ClassName = className;
+		entry.Path = path;
+		entry.Extension = extension;
+		entry.Type = type;
+		entry.IsManagedComponent = isManagedComponent;
+		entry.IsNativeComponent = isNativeComponent;
+		entry.NativeName = std::move(nativeName);
+		entry.IsGameSystem = isGameSystem;
+		entry.IsGlobalSystem = isGlobalSystem;
+		entries.push_back(std::move(entry));
 	}
 
 	inline std::string ReadSourceWithoutWhitespace(const std::filesystem::path& filePath)
@@ -151,6 +177,46 @@ namespace Index::EditorScriptDiscovery {
 			|| compactSource.find(":IComponent") != std::string::npos
 			|| compactSource.find(":Index.Components.IComponent") != std::string::npos
 			|| compactSource.find(":global::Index.Components.IComponent") != std::string::npos;
+	}
+
+	// Pulls the string argument out of `[NativeComponent("…")]` in the *raw*
+	// source. Cannot use the whitespace-stripped buffer here — that path
+	// collapses interior spaces inside string literals (so "New Native" would
+	// become "NewNative" and never match the registered C++ display name).
+	inline std::string ExtractNativeComponentAttributeName(const std::filesystem::path& filePath)
+	{
+		std::ifstream input(filePath, std::ios::binary);
+		if (!input) {
+			return {};
+		}
+
+		const std::string source((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+		constexpr std::string_view marker = "NativeComponent";
+		std::size_t pos = 0;
+		while ((pos = source.find(marker, pos)) != std::string::npos) {
+			// Look back for the `[` that opens the attribute — skip
+			// whitespace so `[ NativeComponent(...)]` is accepted. Bail if
+			// the prior non-whitespace char isn't `[`; that filters out the
+			// `using Index.Components` / `: IComponent` / interface-name
+			// occurrences of the token "NativeComponent".
+			std::size_t bracket = pos;
+			while (bracket > 0 && std::isspace(static_cast<unsigned char>(source[bracket - 1]))) {
+				--bracket;
+			}
+			if (bracket == 0 || source[bracket - 1] != '[') {
+				pos += marker.size();
+				continue;
+			}
+
+			std::size_t open = source.find('(', pos + marker.size());
+			if (open == std::string::npos) return {};
+			std::size_t quoteOpen = source.find('"', open);
+			if (quoteOpen == std::string::npos) return {};
+			std::size_t quoteClose = source.find('"', quoteOpen + 1);
+			if (quoteClose == std::string::npos) return {};
+			return TrimWhitespace(source.substr(quoteOpen + 1, quoteClose - quoteOpen - 1));
+		}
+		return {};
 	}
 
 	inline std::vector<std::string> ExtractRegisteredNativeScriptClasses(const std::filesystem::path& filePath)
@@ -198,12 +264,33 @@ namespace Index::EditorScriptDiscovery {
 		std::string extension = ToLowerCopy(filePath.extension().string());
 		if (IsCSharpScriptExtension(extension)) {
 			const std::string compactSource = ReadSourceWithoutWhitespace(filePath);
-			const bool isManagedComponent = SourceHasBaseClass(compactSource, "Component")
-				|| SourceHasBaseClass(compactSource, "IComponent")
+			// `: IComponent` (or qualified variants) means this .cs is a
+			// native-backed struct paired with a C++ ECS pool. `: Component`
+			// alone is a regular managed class hosted by the ScriptComponent.
+			// The two are mutually exclusive — IComponent wins because the
+			// substring check for ":Component" would otherwise also fire for
+			// classes that happen to inherit from a base named Component.
+			const bool isNativeComponent = SourceHasBaseClass(compactSource, "IComponent")
 				|| SourceHasBaseClass(compactSource, "Components.IComponent");
+			const bool isManagedComponent = !isNativeComponent
+				&& (SourceHasBaseClass(compactSource, "Component")
+					|| SourceHasBaseClass(compactSource, "Index.Component"));
+			std::string nativeName;
+			if (isNativeComponent) {
+				nativeName = ExtractNativeComponentAttributeName(filePath);
+				if (nativeName.empty()) {
+					// Fallback to the struct name when no attribute hint is
+					// provided. ComponentTypes<T>.ResolveNativeName tries the
+					// same candidate, so this keeps the popup and the runtime
+					// lookup in sync for the no-attribute case.
+					nativeName = filePath.stem().string();
+				}
+			}
 			const bool isGameSystem = SourceHasBaseClass(compactSource, "GameSystem");
 			const bool isGlobalSystem = SourceHasBaseClass(compactSource, "GlobalSystem");
-			AppendScriptEntry(entries, filePath.stem().string(), filePath, extension, ScriptType::Managed, isManagedComponent, isGameSystem, isGlobalSystem);
+			AppendScriptEntry(entries, filePath.stem().string(), filePath, extension, ScriptType::Managed,
+				isManagedComponent, isNativeComponent, std::move(nativeName),
+				isGameSystem, isGlobalSystem);
 			return;
 		}
 

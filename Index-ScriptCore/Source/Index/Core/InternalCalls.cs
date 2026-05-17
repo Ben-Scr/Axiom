@@ -426,6 +426,27 @@ internal static unsafe class InternalCalls
         fixed (byte* ptr = buf) return NativeCallbacks.Bindings.Entity_Create(ptr);
     }
 
+    // ── EntityCommandBuffer ─────────────────────────────────────────
+    // Resolve a component name to its stable u32 type ID. Called once per
+    // type from ComponentTypes<T>'s static constructor; the result is the
+    // cache key the recorder uses on every AddComponent. Zero indicates
+    // the name didn't resolve.
+    internal static uint Component_GetTypeId(string componentName)
+    {
+        byte[] buf = EncodeUtf8Z(componentName);
+        fixed (byte* ptr = buf) return NativeCallbacks.Bindings.Component_GetTypeId(ptr);
+    }
+
+    // Single-call playback of a pre-recorded ECB byte stream. `buffer` is
+    // pinned by the caller (the managed recorder owns the underlying byte[]
+    // and holds it pinned for the duration of this call). Returns the
+    // number of entities created (>= 0) or a negative error code:
+    //   -1 truncated, -2 no scene, -3 output buffer too small.
+    internal static int Ecb_Playback(byte* buffer, int length, ulong* outRuntimeIds, int maxOut)
+    {
+        return NativeCallbacks.Bindings.Ecb_Playback(buffer, length, outRuntimeIds, maxOut);
+    }
+
     // ── NameComponent ───────────────────────────────────────────────
 
     internal static string NameComponent_GetName(ulong entityID)

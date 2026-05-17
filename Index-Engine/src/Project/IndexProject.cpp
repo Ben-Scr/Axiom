@@ -1,5 +1,6 @@
 #include "pch.hpp"
 #include "Project/IndexProject.hpp"
+#include "Project/IndexBuildProfile.hpp"
 #include "Project/ProjectManager.hpp"
 #include "Serialization/Path.hpp"
 #include "Serialization/Directory.hpp"
@@ -621,16 +622,11 @@ endforeach()
 			root.AddMember("showRuntimeLogs", false);
 		}
 
-		if (project.AutoSaveScenes) {
-			root.AddMember("autoSaveScenes", true);
-		}
-		// Persist the interval only when it differs from the default — the
-		// hand-rolled JSON tries to keep noise down for projects that haven't
-		// touched these settings.
-		if (project.AutoSaveIntervalSeconds != 120.0f) {
-			root.AddMember("autoSaveIntervalSeconds",
-				Json::Value(project.AutoSaveIntervalSeconds));
-		}
+		// autoSaveScenes / autoSaveIntervalSeconds / showFileExtensions
+		// moved to user-scoped EditorPreferences (2026-05). Save() no
+		// longer emits them; legacy values present in pre-migration
+		// project files are loaded into LegacyEditorPrefs and dropped
+		// from disk on this Save.
 		if (!project.AutoRecompileScripts) {
 			root.AddMember("autoRecompileScripts", false);
 		}
@@ -639,10 +635,6 @@ endforeach()
 		}
 		root.AddMember("assetSerializationFormat",
 			std::string(IndexProject::ProjectAssetSerializationFormatToString(project.AssetSerializationFormat)));
-
-		if (project.ShowFileExtensions) {
-			root.AddMember("showFileExtensions", true);
-		}
 
 		if (!project.EditorEnsureUniqueEntityNames) {
 			root.AddMember("editorEnsureUniqueEntityNames", false);
@@ -674,6 +666,12 @@ endforeach()
 		if (project.ActiveRenderBackend != IndexProject::RenderBackend::Auto) {
 			root.AddMember("renderBackend",
 				std::string(IndexProject::RenderBackendToString(project.ActiveRenderBackend)));
+		}
+		// Empty == "no build profile selected" (the default). Skip the
+		// field entirely in that case so legacy projects round-trip
+		// cleanly through the new editor.
+		if (!project.ActiveBuildProfileName.empty()) {
+			root.AddMember("activeBuildProfile", project.ActiveBuildProfileName);
 		}
 		if (project.DefaultFontAssetId != k_DefaultFontAssetId) {
 			root.AddMember("defaultFontAsset",
@@ -850,6 +848,13 @@ endforeach()
 			return EditorEntityNameSuffixStyle::UnderscoreNumber;
 		}
 		return EditorEntityNameSuffixStyle::ParenthesizedNumber;
+	}
+
+	std::string IndexProject::GetBuildProfilesDirectory() const {
+		if (RootDirectory.empty()) {
+			return {};
+		}
+		return Path::Combine(RootDirectory, "BuildProfiles");
 	}
 
 	std::string IndexProject::GetNativeDllPath() const {
@@ -1197,7 +1202,13 @@ endforeach()
 				}
 				if (const Json::Value* buildScenesValue = root.FindMember("buildScenes")) {
 					project.BuildSceneList.clear();
-					for (const Json::Value& sceneValue : buildScenesValue->GetArray()) {
+					// Mirror the packages-block pattern: degrade gracefully on
+					// malformed input instead of asserting inside GetArray().
+					if (!buildScenesValue->IsArray()) {
+						IDX_CORE_WARN_TAG("IndexProject",
+							"Project '{}': 'buildScenes' field is not a JSON array; ignoring.", configPath);
+					}
+					else for (const Json::Value& sceneValue : buildScenesValue->GetArray()) {
 						const std::string sceneName = sceneValue.AsStringOr();
 						if (sceneName.empty()) continue;
 						if (!IsValidSceneName(sceneName)) {
@@ -1210,7 +1221,11 @@ endforeach()
 				}
 				if (const Json::Value* globalSystemsValue = root.FindMember("globalSystems")) {
 					project.GlobalSystems.clear();
-					for (const Json::Value& systemValue : globalSystemsValue->GetArray()) {
+					if (!globalSystemsValue->IsArray()) {
+						IDX_CORE_WARN_TAG("IndexProject",
+							"Project '{}': 'globalSystems' field is not a JSON array; ignoring.", configPath);
+					}
+					else for (const Json::Value& systemValue : globalSystemsValue->GetArray()) {
 						if (systemValue.IsString()) {
 							const std::string className = systemValue.AsStringOr();
 							if (!className.empty()) {
@@ -1260,7 +1275,11 @@ endforeach()
 						project.Profiler.TrackingSpan = static_cast<int>(v->AsInt64Or(200));
 					if (const Json::Value* modulesValue = profilerValue->FindMember("modules")) {
 						project.Profiler.ModuleEnabled.clear();
-						for (const auto& [name, value] : modulesValue->GetObject()) {
+						if (!modulesValue->IsObject()) {
+							IDX_CORE_WARN_TAG("IndexProject",
+								"Project '{}': 'profiler.modules' is not a JSON object; ignoring.", configPath);
+						}
+						else for (const auto& [name, value] : modulesValue->GetObject()) {
 							project.Profiler.ModuleEnabled.emplace_back(
 								std::string(name), value.AsBoolOr(true));
 						}
@@ -1270,10 +1289,20 @@ endforeach()
 					project.ShowRuntimeStats = v->AsBoolOr(true);
 				if (const Json::Value* v = root.FindMember("showRuntimeLogs"))
 					project.ShowRuntimeLogs = v->AsBoolOr(true);
-				if (const Json::Value* v = root.FindMember("autoSaveScenes"))
-					project.AutoSaveScenes = v->AsBoolOr(false);
-				if (const Json::Value* v = root.FindMember("autoSaveIntervalSeconds"))
-					project.AutoSaveIntervalSeconds = static_cast<float>(v->AsDoubleOr(120.0));
+				// autoSaveScenes / autoSaveIntervalSeconds migrated to
+				// user-scoped EditorPreferences. We still parse the keys
+				// here so legacy projects can hand the values off (via
+				// LegacyEditorPrefs) before they drop from the project
+				// file on the next Save.
+				if (const Json::Value* v = root.FindMember("autoSaveScenes")) {
+					project.LegacyEditorPrefs.AutoSaveScenes = v->AsBoolOr(false);
+					project.LegacyEditorPrefs.AutoSaveScenesPresent = true;
+				}
+				if (const Json::Value* v = root.FindMember("autoSaveIntervalSeconds")) {
+					project.LegacyEditorPrefs.AutoSaveIntervalSeconds =
+						static_cast<float>(v->AsDoubleOr(120.0));
+					project.LegacyEditorPrefs.AutoSaveIntervalSecondsPresent = true;
+				}
 				if (const Json::Value* v = root.FindMember("autoRecompileScripts"))
 					project.AutoRecompileScripts = v->AsBoolOr(true);
 				if (const Json::Value* v = root.FindMember("recompileScriptsOnPlay"))
@@ -1281,8 +1310,10 @@ endforeach()
 				if (const Json::Value* v = root.FindMember("assetSerializationFormat"))
 					project.AssetSerializationFormat = IndexProject::ProjectAssetSerializationFormatFromString(
 						v->AsStringOr("Binary"));
-				if (const Json::Value* v = root.FindMember("showFileExtensions"))
-					project.ShowFileExtensions = v->AsBoolOr(false);
+				if (const Json::Value* v = root.FindMember("showFileExtensions")) {
+					project.LegacyEditorPrefs.ShowFileExtensions = v->AsBoolOr(false);
+					project.LegacyEditorPrefs.ShowFileExtensionsPresent = true;
+				}
 				if (const Json::Value* v = root.FindMember("editorEnsureUniqueEntityNames"))
 					project.EditorEnsureUniqueEntityNames = v->AsBoolOr(true);
 				if (const Json::Value* v = root.FindMember("editorEntityNameSuffix"))
@@ -1299,6 +1330,8 @@ endforeach()
 					project.ActiveBuildProfile = IndexProject::BuildProfileFromString(v->AsStringOr("Development"));
 				if (const Json::Value* v = root.FindMember("renderBackend"))
 					project.ActiveRenderBackend = IndexProject::RenderBackendFromString(v->AsStringOr("Auto"));
+				if (const Json::Value* v = root.FindMember("activeBuildProfile"))
+					project.ActiveBuildProfileName = v->AsStringOr();
 				if (const Json::Value* v = root.FindMember("defaultFontAsset")) {
 					project.DefaultFontAssetId = v->IsString()
 						? ParseUInt64String(v->AsStringOr(), k_DefaultFontAssetId)
@@ -1368,6 +1401,7 @@ endforeach()
 		Directory::Create(project.NativeScriptsDir);
 		Directory::Create(project.NativeSourceDir);
 		Directory::Create(project.PackagesDirectory);
+		Directory::Create(project.GetBuildProfilesDirectory());
 		Directory::Create(Path::Combine(project.RootDirectory, "bin"));
 		Directory::Create(Path::Combine(project.RootDirectory, ".vscode"));
 	}
@@ -1381,11 +1415,25 @@ endforeach()
 		std::filesystem::path packageDir = std::filesystem::path(project.PackagesDirectory) / "Index-ScriptCore";
 		std::filesystem::create_directories(packageDir);
 
-		if (std::filesystem::exists(scriptCoreOutput))
-			std::filesystem::copy_file(scriptCoreOutput, packageDir / "Index-ScriptCore.dll", std::filesystem::copy_options::overwrite_existing);
+		// Atomic-ish install: if the PDB copy fails after the DLL copy succeeds we
+		// leave a half-installed package on disk that "looks" valid to the next
+		// launch but has no symbols. Wrap both copies; on failure, remove the
+		// package directory so the next ConfigurePackages call starts clean.
+		try {
+			if (std::filesystem::exists(scriptCoreOutput))
+				std::filesystem::copy_file(scriptCoreOutput, packageDir / "Index-ScriptCore.dll", std::filesystem::copy_options::overwrite_existing);
 
-		if (std::filesystem::exists(scriptCorePdb))
-			std::filesystem::copy_file(scriptCorePdb, packageDir / "Index-ScriptCore.pdb", std::filesystem::copy_options::overwrite_existing);
+			if (std::filesystem::exists(scriptCorePdb))
+				std::filesystem::copy_file(scriptCorePdb, packageDir / "Index-ScriptCore.pdb", std::filesystem::copy_options::overwrite_existing);
+		}
+		catch (const std::filesystem::filesystem_error& ex) {
+			IDX_CORE_ERROR_TAG("IndexProject",
+				"ConfigurePackages: copy failed ({}). Rolling back partial install at '{}'.",
+				ex.what(), packageDir.string());
+			std::error_code ec;
+			std::filesystem::remove_all(packageDir, ec);
+			throw;
+		}
 	}
 
 	IndexProject IndexProject::Create(const std::string& name, const std::string& parentDir,
@@ -1400,6 +1448,8 @@ endforeach()
 		CreateDirectoryTree(project);
 		ReportCreateProgress(progressCallback, 0.18f, "Configuring engine packages...");
 		ConfigurePackages(project);
+		ReportCreateProgress(progressCallback, 0.20f, "Creating default build profiles...");
+		IndexBuildProfile::WriteDefaultProfiles(project.GetBuildProfilesDirectory());
 
 		std::string engineAssets = Path::ResolveIndexAssets("");
 		if (!engineAssets.empty() && Directory::Exists(engineAssets)) {

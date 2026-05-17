@@ -68,7 +68,7 @@ struct VertexInput {
 	@location(0) position: vec3<f32>,
 	@location(1) i_data0: vec4<f32>,  // Pos.xy, Scale.xy
 	@location(2) i_data1: vec4<f32>,  // Color RGBA
-	@location(3) i_data2: vec4<f32>,  // cos, sin, _, _
+	@location(3) i_data2: vec4<f32>,  // rotation (radians), _, _, _
 };
 
 struct VertexOutput {
@@ -79,10 +79,14 @@ struct VertexOutput {
 
 @vertex
 fn vs_main(in: VertexInput) -> VertexOutput {
-	// Per-instance scale, then rotate by (cos, sin), then translate.
+	// Per-instance scale, then rotate by the rotation angle, then translate.
+	// sin/cos previously ran once per instance on the CPU during
+	// EncodeInstance44; doing it here parallelises it across the GPU and
+	// keeps the CPU encode path as branch-free struct stores.
 	let scaled = in.position.xy * in.i_data0.zw;
-	let c = in.i_data2.x;
-	let s = in.i_data2.y;
+	let r = in.i_data2.x;
+	let c = cos(r);
+	let s = sin(r);
 	let rotated = vec2<f32>(
 		scaled.x * c - scaled.y * s,
 		scaled.x * s + scaled.y * c

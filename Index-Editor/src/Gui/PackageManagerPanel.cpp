@@ -1114,14 +1114,51 @@ namespace Index {
 		}
 
 		if (success) {
+			// Verify the expected package DLLs landed where IndexPackages.props
+			// points. If they're missing, the namespace won't resolve in the
+			// user's IDE — diagnose loudly so the user knows to check the
+			// build output (rather than re-clicking Install and getting the
+			// same silent failure).
+			if (IndexProject* project = ProjectManager::GetCurrentProject()) {
+				const std::string engineRoot = IndexProject::GetEngineRootDir();
+				if (!engineRoot.empty()) {
+					const std::string config =
+#if defined(IDX_DEBUG)
+						"Debug";
+#elif defined(IDX_RELEASE)
+						"Release";
+#else
+						"Dist";
+#endif
+					for (const std::string& pkg : project->Packages) {
+						const std::string dllRel = "bin/" + config + "-windows-x86_64/Pkg." +
+							pkg + "/Pkg." + pkg + ".dll";
+						std::filesystem::path dllPath = std::filesystem::path(engineRoot) / dllRel;
+						std::error_code ec;
+						if (std::filesystem::exists(dllPath, ec) && !ec) {
+							IDX_INFO_TAG("IndexPackages", "Built package DLL present: {}", dllPath.generic_string());
+						} else {
+							IDX_WARN_TAG("IndexPackages",
+								"Expected package DLL missing after install: {} — "
+								"the C# namespace won't resolve until this file exists. "
+								"Check that package '{}' declares a 'csharp' layer in "
+								"its index-package.lua and that MSBuild produced the project.",
+								dllPath.generic_string(), pkg);
+						}
+					}
+				}
+			}
+
 			// Hot-load new package DLLs so their components appear in the Add Component popup without a restart.
 			const size_t newlyLoaded = PackageHost::LoadInstalled();
 			if (newlyLoaded > 0) {
 				m_StatusMessage = "Package operation complete; loaded " +
-					std::to_string(newlyLoaded) + " new package(s) — components are available now.";
+					std::to_string(newlyLoaded) + " new package(s) — components are available now. " +
+					"If your C# IDE still shows the namespace as unresolved, reload the .csproj.";
 			}
 			else {
-				m_StatusMessage = "Package operation complete; engine solution rebuilt.";
+				m_StatusMessage = "Package operation complete; engine solution rebuilt. "
+					"If a newly-added namespace doesn't resolve in your C# IDE, reload the .csproj.";
 			}
 			m_StatusIsError = false;
 		}

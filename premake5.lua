@@ -174,7 +174,20 @@ function GetIndexModuleDefines()
         "INDEX_WITH_PHYSICS=" .. (IndexModules.Physics and "1" or "0"),
         "INDEX_WITH_SCRIPTING=" .. (IndexModules.Scripting and "1" or "0"),
         "INDEX_WITH_EDITOR=" .. (IndexModules.Editor and "1" or "0"),
-        "INDEX_WITH_APPLICATION=" .. (hasApplication and "1" or "0")
+        "INDEX_WITH_APPLICATION=" .. (hasApplication and "1" or "0"),
+        -- Shrink magic_enum's default reflection window [-128, 127] -> [-1, 64].
+        -- All engine-side reflected enums are small `enum class : uint8_t`
+        -- with sequential values in [0, ~16] (see Index-Engine/src/Components/
+        -- and Index-Engine/src/Graphics/Wrap.hpp for the only customized
+        -- range). The default window instantiates 256 template specializations
+        -- per reflected enum; ComponentInspectors.cpp reflects so many enums
+        -- via Properties::MakeWith<T>() that even 64-bit cl.exe runs out of
+        -- heap (C1060 in magic_enum.hpp). Shrinking the window cuts template
+        -- bloat ~4x. If a new enum exceeds [-1, 64], specialize
+        -- magic_enum::customize::enum_range<T> in its header (see
+        -- Index-Engine/src/Graphics/Wrap.hpp for the existing pattern).
+        "MAGIC_ENUM_RANGE_MIN=-1",
+        "MAGIC_ENUM_RANGE_MAX=32"
     }
 
     if IndexModules.FullCompatibility then

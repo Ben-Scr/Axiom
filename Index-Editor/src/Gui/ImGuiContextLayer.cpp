@@ -1,9 +1,12 @@
 #include "ImGuiContextLayer.hpp"
 
+#include "Assets/AssetRegistry.hpp"
 #include "Core/Application.hpp"
 #include "Core/Assert.hpp"
 #include "Core/Window.hpp"
+#include "Editor/EditorPreferences.hpp"
 #include "Events/IndexEvent.hpp"
+#include "Graphics/Text/FontHandle.hpp"
 #include "Gui/ImGuiFonts.hpp"
 #include "Packages/PackageImGuiBridge.hpp"
 #include "Serialization/Path.hpp"
@@ -235,7 +238,39 @@ namespace Index {
 		glfwGetWindowContentScale(glfwWindow, &xScale, &yScale);
 		const float dpiScale = std::max(1.0f, xScale);
 
-		LoadIndexImGuiFont(io, dpiScale);
+		// Honor the user's Editor Font preference. Engine-side LoadIndexImGuiFont
+		// is hardcoded to GoogleSans and stays the default; resolve the picked
+		// asset here so engine code doesn't have to know about EditorPreferences.
+		// Startup-only — the prefs panel tells the user a restart is required,
+		// so we don't rebuild the font atlas mid-session.
+		{
+			const uint64_t fontId = EditorPreferences::GetEditorFontAssetId();
+			bool loadedCustom = false;
+			if (fontId != 0 && fontId != k_DefaultFontAssetId) {
+				const std::string path = AssetRegistry::ResolvePath(fontId);
+				if (!path.empty() && std::filesystem::exists(path)) {
+					const float fontSize = k_IndexImGuiFontSize * dpiScale;
+					ImFontConfig fontCfg;
+					fontCfg.SizePixels = fontSize;
+					fontCfg.PixelSnapH = true;
+					if (io.Fonts->AddFontFromFileTTF(
+							path.c_str(), fontSize, &fontCfg, io.Fonts->GetGlyphRangesDefault())) {
+						loadedCustom = true;
+					} else {
+						IDX_CORE_WARN_TAG("ImGui",
+							"Editor font '{}' failed to load (unsupported or corrupt); falling back to default.",
+							path);
+					}
+				} else {
+					IDX_CORE_WARN_TAG("ImGui",
+						"Editor font asset id {} could not be resolved; falling back to default.",
+						fontId);
+				}
+			}
+			if (!loadedCustom) {
+				LoadIndexImGuiFont(io, dpiScale);
+			}
+		}
 
 		// GLFW_NO_API means there's no GL context; use ImGui's "Other"
 		// GLFW init that doesn't bind one.
@@ -608,7 +643,15 @@ namespace Index {
 		style.WindowMenuButtonPosition = ImGuiDir_None;
 		style.SeparatorTextBorderSize  = 2.0f;
 
-		// ── Colors ──────────────────────────────────────────────────
+		// Colour body lives in ApplyIndexThemeColors so EditorPreferences
+		// can re-apply just the palette on a runtime theme switch without
+		// stomping the DPI-scaled sizing that ScaleAllSizes layered on top
+		// of the values we just set.
+		ApplyIndexThemeColors();
+	}
+
+	void ImGuiContextLayer::ApplyIndexThemeColors() {
+		ImGuiStyle& style = ImGui::GetStyle();
 		ImVec4* c = style.Colors;
 
 		const ImVec4 bg        = ImVec4(0.12f, 0.12f, 0.14f, 1.00f);

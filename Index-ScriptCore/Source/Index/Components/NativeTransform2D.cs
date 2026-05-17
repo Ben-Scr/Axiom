@@ -19,18 +19,28 @@ namespace Index.Components;
 [StructLayout(LayoutKind.Sequential)]
 public struct NativeTransform2D : IComponent
 {
+    // Parameterless constructor exists so `new NativeTransform2D()` (and
+    // object-initializer syntax like `new NativeTransform2D { Position = p }`)
+    // triggers the field initializers below. WARNING: C# language rule —
+    // `default(NativeTransform2D)` and uninitialized struct declarations
+    // (e.g. `NativeTransform2D t;`) still produce a zero-init value where
+    // Scale = (0,0) and m_Dirty = false. Callers using EntityCommandBuffer
+    // should prefer `new NativeTransform2D { ... }` to keep the defaults.
+    public NativeTransform2D() { }
+
     private Vector2 m_Position;
-    private Vector2 m_Scale;
+    private Vector2 m_Scale = new(1f, 1f);
     private float  m_RotationRadians;
 
     private Vector2 m_LocalPosition;
-    private Vector2 m_LocalScale;
+    private Vector2 m_LocalScale = new(1f, 1f);
     private float  m_LocalRotationRadians;
 
-    // C++ `bool m_Dirty` is 1 byte. The native struct then pads up to the
-    // following 8-byte Scene* field.
+    // C++ `bool m_Dirty = true;` in Transform2DComponent.hpp — newly-created
+    // transforms are dirty until TransformHierarchySystem composes them, so
+    // mirror that default here to match the C++ component byte-for-byte.
     [MarshalAs(UnmanagedType.U1)]
-    private bool m_Dirty;
+    private bool m_Dirty = true;
     // Native owner metadata: Scene* + EntityHandle. These fields are intentionally
     // private to scripting, but they must exist so the managed layout stays byte-
     // identical to the C++ Transform2DComponent.

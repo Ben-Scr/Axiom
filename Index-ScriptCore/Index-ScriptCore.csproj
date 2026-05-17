@@ -120,9 +120,18 @@
     <Compile Include="Source\Index\Interop\PackageNativeResolver.cs" />
     <Compile Include="Source\Index\Interop\ScriptHostBridge.cs" />
     <Compile Include="Source\Index\Interop\ScriptInstanceManager.cs" />
+    <Compile Include="Source\Index\Jobs\AtomicBool.cs" />
+    <Compile Include="Source\Index\Jobs\AtomicDouble.cs" />
+    <Compile Include="Source\Index\Jobs\AtomicFloat.cs" />
+    <Compile Include="Source\Index\Jobs\AtomicInt.cs" />
+    <Compile Include="Source\Index\Jobs\AtomicLong.cs" />
+    <Compile Include="Source\Index\Jobs\AtomicRef.cs" />
+    <Compile Include="Source\Index\Jobs\IJobQuery.cs" />
     <Compile Include="Source\Index\Jobs\Job.cs" />
+    <Compile Include="Source\Index\Jobs\ParallelReducer.cs" />
     <Compile Include="Source\Index\Math\Color.cs" />
     <Compile Include="Source\Index\Math\Mathf.cs" />
+    <Compile Include="Source\Index\Math\PerlinNoise2D.cs" />
     <Compile Include="Source\Index\Math\Quaternion.cs" />
     <Compile Include="Source\Index\Math\Random.cs" />
     <Compile Include="Source\Index\Math\RandomHandler.cs" />
@@ -140,6 +149,8 @@
     <Compile Include="Source\Index\Scene\Component.cs" />
     <Compile Include="Source\Index\Scene\Components.cs" />
     <Compile Include="Source\Index\Scene\Entity.cs" />
+    <Compile Include="Source\Index\Scene\EntityCommandBuffer.cs" />
+    <Compile Include="Source\Index\Scene\EntityRef.cs" />
     <Compile Include="Source\Index\Scene\EntityScript.cs" />
     <Compile Include="Source\Index\Scene\GameSystem.cs" />
     <Compile Include="Source\Index\Scene\GlobalSystem.cs" />

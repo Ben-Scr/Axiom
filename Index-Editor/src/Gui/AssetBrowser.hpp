@@ -14,6 +14,11 @@ namespace Index {
 		void Render();
 		void RequestRefresh() { m_NeedsRefresh = true; }
 
+		// Drop every cached thumbnail. Called by the editor's hot-reload
+		// callback after image files on disk change so the asset-tile
+		// previews re-fetch from the updated files on the next frame.
+		void InvalidateAllThumbnails() { m_Thumbnails.Clear(); }
+
 		/// Returns true when the user is currently naming a new script (rename in progress).
 		bool IsCreatingScript() const { return m_PendingScriptType != PendingScriptType::None; }
 		bool BeginRenameSelected();

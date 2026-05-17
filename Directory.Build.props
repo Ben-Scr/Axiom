@@ -1,0 +1,21 @@
+<Project>
+  <!--
+    Pin the MSVC toolset to a version that fully implements the C++20 features
+    used by EnTT (CWG2074 typename deduction, consteval). MSVC 14.38 (VS 17.8)
+    miscompiles entt/core/hashed_string.hpp and related headers; 14.43 (VS 17.13)
+    builds cleanly. PlatformToolset stays v143 — only the VCTools sub-version is
+    pinned so the build is reproducible across machines that have multiple
+    toolsets side-by-side installed.
+  -->
+  <PropertyGroup>
+    <VCToolsVersion>14.43.34808</VCToolsVersion>
+    <!--
+      Force the 64-bit hosted cl.exe. The 32-bit compiler is limited to a
+      ~2 GB process heap and runs out during template-heavy translation
+      units (magic_enum reflection in ComponentInspectors.cpp / inspector
+      registrations) producing MSVC fatal error C1060 "out of heap space".
+      The 64-bit host raises that ceiling to the machine's physical memory.
+    -->
+    <PreferredToolArchitecture>x64</PreferredToolArchitecture>
+  </PropertyGroup>
+</Project>

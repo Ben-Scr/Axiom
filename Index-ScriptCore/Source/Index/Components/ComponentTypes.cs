@@ -116,12 +116,21 @@ internal static class ComponentTypes
     }
 }
 
-// One per `T : IComponent` — `ComponentTypes<T>.NativeName` is a JIT-time
-// constant for each T, and the static constructor runs the size check exactly
-// once per type, lazily on first use.
+// One per `T : IComponent` — `ComponentTypes<T>.NativeName` and `.NativeId`
+// are JIT-time constants for each T, and the static constructor runs the
+// size check and ID resolution exactly once per type, lazily on first use.
 internal static class ComponentTypes<T> where T : unmanaged, IComponent
 {
     internal static readonly string NativeName;
+    // Stable u32 component ID assigned by the native ComponentRegistry at
+    // engine startup. The EntityCommandBuffer recorder writes this u32 into
+    // its wire stream so playback can resolve the target component in one
+    // vector indirection — zero string marshaling on the spawn path.
+    // Resolved exactly once per T (this static ctor), cached for the
+    // process lifetime. A zero ID would mean the component name didn't
+    // resolve on the native side; we throw at type-init rather than ship
+    // a silently broken ECB.
+    internal static readonly uint NativeId;
 
     static ComponentTypes()
     {
@@ -148,5 +157,13 @@ internal static class ComponentTypes<T> where T : unmanaged, IComponent
         }
 
         NativeName = name;
+        NativeId   = InternalCalls.Component_GetTypeId(name);
+        if (NativeId == 0)
+        {
+            throw new InvalidOperationException(
+                $"Component '{typeof(T).Name}' (native '{name}') did not resolve to a stable type ID. " +
+                "The native ComponentRegistry must register the component with a non-zero typeIdU32 " +
+                "before any managed code references ComponentTypes<T>.");
+        }
     }
 }

@@ -13,6 +13,8 @@
 #include <string>
 #include <type_traits>
 
+namespace Index { class Texture2D; }
+
 namespace Index::ImGuiUtils {
 	float GetInspectorLabelColumnWidth();
 	void BeginInspectorFieldRow(const char* label);
@@ -142,6 +144,17 @@ namespace Index::ImGuiUtils {
 	}
 
 	void DrawTexturePreview(uint64_t rendererId, float texWidth, float texHeight, float previewSize = 96.0f);
+
+	// Canonical Texture2D preview. Picks the correct UV orientation from
+	// tex.IsFlippedY() so the same call site works regardless of whether
+	// the texture was loaded with stb's "flipVertical" load path. Prefer
+	// this over the raw-handle overload for any new editor preview.
+	void DrawTexturePreview(const Texture2D& tex, float previewSize = 96.0f);
+
+	// Anchor the next modal window to the center of the main viewport. Call
+	// immediately before BeginPopupModal(). Uses ImGuiCond_Appearing so the
+	// user can drag the modal afterward without it snapping back.
+	void CenterNextModal();
 	std::string Ellipsize(const std::string& text, float maxWidth, bool* outTruncated = nullptr);
 	void TextEllipsis(const std::string& text, float maxWidth = -1.0f);
 	void TextDisabledEllipsis(const std::string& text, float maxWidth = -1.0f);

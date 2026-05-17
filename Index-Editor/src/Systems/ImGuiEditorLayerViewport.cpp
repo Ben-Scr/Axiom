@@ -3,7 +3,22 @@
 
 #include <imgui.h>
 
-#include "Components/Components.hpp"
+#include "Components/Forward.hpp"
+#include "Components/General/General.hpp"
+#include "Components/UI/UI.hpp"
+#include "Components/Tags.hpp"
+#include "Components/Graphics/SpriteRendererComponent.hpp"
+#include "Components/Graphics/ImageComponent.hpp"
+#include "Components/Graphics/Camera2DComponent.hpp"
+#include "Components/Graphics/ParticleSystem2DComponent.hpp"
+#include "Components/Graphics/TextRendererComponent.hpp"
+#include "Components/Physics/BoxCollider2DComponent.hpp"
+#include "Components/Physics/CircleCollider2DComponent.hpp"
+#include "Components/Physics/PolygonCollider2DComponent.hpp"
+#include "Components/Physics/Rigidbody2DComponent.hpp"
+#include "Components/Physics/FastBody2DComponent.hpp"
+#include "Components/Physics/FastBoxCollider2DComponent.hpp"
+#include "Components/Physics/FastCircleCollider2DComponent.hpp"
 #include "Core/Application.hpp"
 #include "Core/Window.hpp"
 #include "Diagnostics/StatsOverlay.hpp"
@@ -92,12 +107,15 @@ namespace Index {
 		RenderApi::SetClearColor(clearColor);
 		RenderApi::Clear(ClearFlags::Color | ClearFlags::Depth);
 
-		// Sprites + UI + (optional) gizmos extracted into a callable so
-		// the Mixed draw mode can run the scene twice — once filled and
-		// once in wireframe — into the same FBO without duplicating the
-		// surrounding setup. Triangle mode flips polygon mode to GL_LINE
-		// for a single pass; Default keeps the historical behaviour.
-		auto runSceneRender = [&]() {
+		// Split into sprites-only vs overlays (UI + gizmos) so the wireframe
+		// pass can submit ONLY the sprite pipeline — which is the only
+		// renderer that honours PolygonMode::Wireframe. GuiRenderer and
+		// GizmoRenderer2D draw filled quads regardless of the wireframe flag,
+		// so re-running them during the wireframe overlay would paint
+		// fully-filled (and forceBlack'd) quads on top of the filled pass's
+		// output and mask it out — which is the "Mixed mode renders sprites
+		// purely black" bug.
+		auto runSpriteRender = [&]() {
 			if (onlyPassedScene) {
 				renderer->RenderSceneWithVP(scene, vp, viewportAABB);
 			}
@@ -106,7 +124,9 @@ namespace Index {
 					renderer->RenderSceneWithVP(s, vp, viewportAABB);
 					});
 			}
+		};
 
+		auto runOverlayRender = [&]() {
 			// UI must paint into this panel's FBO (not the OS window
 			// backbuffer that ImGui will cover). The auto BeginFrame path
 			// is skipped in editor mode, so we drive RenderScene here while
@@ -164,7 +184,9 @@ namespace Index {
 			RenderApi::SetPolygonMode(PolygonMode::Wireframe);
 			RenderApi::BeginColorLogicOpClear();
 			RenderApi::SetColorMask(true, true, true, false);
-			runSceneRender();
+			// Sprites only — UI and gizmos don't honour the wireframe flag
+			// and would paint filled quads on top of the wireframe edges.
+			runSpriteRender();
 			RenderApi::SetColorMask(true, true, true, true);
 			RenderApi::EndColorLogicOpClear();
 			RenderApi::SetPolygonMode(PolygonMode::Filled);
@@ -172,9 +194,9 @@ namespace Index {
 
 		auto runFilledPass = [&]() {
 			RenderApi::SetPolygonMode(PolygonMode::Filled);
-			RenderApi::EndColorLogicOpClear();
 			RenderApi::SetColorMask(true, true, true, true);
-			runSceneRender();
+			runSpriteRender();
+			runOverlayRender();
 		};
 
 		switch (drawMode) {
@@ -511,6 +533,27 @@ namespace Index {
 			if (ImGui::IsItemHovered()) {
 				ImGui::SetTooltip("Editor View draw mode (Default / Triangle wireframe / Mixed overlay)");
 			}
+
+			// Gizmos visibility toggle for this panel. Mirrors the
+			// "depressed when active" style used by the Game View's
+			// Stats / Logs buttons so the user can tell at a glance
+			// whether gizmos are currently being drawn into the FBO.
+			ImGui::SameLine();
+			{
+				const bool active = m_ShowGizmos;
+				if (active) {
+					ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+				}
+				if (ImGui::Button("Gizmos##EditorView")) {
+					m_ShowGizmos = !m_ShowGizmos;
+				}
+				if (active) {
+					ImGui::PopStyleColor();
+				}
+				if (ImGui::IsItemHovered()) {
+					ImGui::SetTooltip("Toggle gizmos in the Editor View");
+				}
+			}
 		}
 
 		// In prefab-edit mode, every reference to the inspector's "scene"
@@ -559,7 +602,9 @@ namespace Index {
 				glm::mat4 vp = m_EditorCamera.GetViewProjectionMatrix();
 				AABB viewAABB = m_EditorCamera.GetViewportAABB();
 				Gizmo::SetViewportAABBOverride(viewAABB);
-				DrawEditorComponentGizmos(*renderScene);
+				if (m_ShowGizmos) {
+					DrawEditorComponentGizmos(*renderScene);
+				}
 
 				static const Color k_EditorClearColor(0.18f, 0.18f, 0.20f, 1.0f);
 				const Color k_PrefabClearColor(k_PrefabEditClearR, k_PrefabEditClearG, k_PrefabEditClearB, 1.0f);
@@ -567,7 +612,7 @@ namespace Index {
 				// uiInWorldSpace=true: UI joins sprites and gizmos in
 				// the editor camera's world space so the user can pan
 				// and zoom around the UI like any scene object.
-				RenderSceneIntoFBO(m_EditorViewFBO, *renderScene, vp, viewAABB, true, false, clearColor, IsInPrefabEditMode(), true, m_EditorViewDrawMode);
+				RenderSceneIntoFBO(m_EditorViewFBO, *renderScene, vp, viewAABB, m_ShowGizmos, false, clearColor, IsInPrefabEditMode(), true, m_EditorViewDrawMode);
 				Gizmo::ClearViewportAABBOverride();
 
 				// FBO color textures use the renderer's native top-left

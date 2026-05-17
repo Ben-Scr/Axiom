@@ -52,11 +52,11 @@
 ## Known issues / tech debt
 
 - `Debugging/Logger.hpp/.cpp` is dead code (superseded by `Core/Log`). Can be deleted.
-- `IndexProject.cpp` has hand-rolled JSON parsing — fragile for nested structures.
+- `IndexProject.cpp` has hand-rolled JSON parsing — verbose, but `Json::Value::FindMember` null-guards on non-object so degraded inputs are handled. Migrating to typed accessors would still cut LOC.
 - `SoundRequest::GetHandle` is a data member named like an accessor.
 - `Scene::CreateDetachedScene` / `Scene::IsDetached` (renamed from `CreateDetachedEditorScene` / `IsEditorPreview`) are still in the core surface — kept engine-neutral so the editor *uses* them but the engine doesn't *know* about the editor.
-- `Application::SetPlaymodePaused` / `IsPlaymodePaused` / `IsGameInputEnabled` leak editor concepts into the core API surface (Application.hpp:106-109).
-- `TextureManager::UnloadTexture` and `AudioManager::UnloadAudio` are exposed but never called — assets accumulate across scene reloads.
+- Editor-only Application state (`m_IsGameplayPaused`, `m_IsScriptInputEnabled`, `m_EditorStopPlayRequested`) is mutated through `ApplicationEditorAccess` (Index-Editor side, friend class). The single exception is `Application::RequestEditorStopPlay()`, which Core exposes for the engine-side script bindings (`ScriptBindingsScene.cpp`); it's a no-op outside the editor.
+- Texture / audio lifecycle is managed via `TextureManager::PurgeUnreferenced` and `AudioManager::PurgeUnreferenced`, called from `SceneManager::LoadScene` / `UnloadAllScenes` (SceneManager.cpp:362, 485). The bare `UnloadTexture` / `UnloadAudio` entry points are not the primary cleanup path; non-ECS holders opt in via the `ReferenceProvider` hook.
 - `Cereal` is in the dependency list but has zero callers — `Serialization/Cereal.hpp` is dead code (only `CsprojParser.cpp` uses one rapidxml header from inside the Cereal repo).
 
 ## File structure (engine)

@@ -14,6 +14,8 @@
 #ifdef IDX_PLATFORM_WINDOWS
 #include <windows.h>
 #include <shellapi.h>
+#include <objbase.h>
+#include <oleauto.h>
 #endif
 
 namespace Index {
@@ -265,7 +267,7 @@ namespace Index {
 	// Check if Visual Studio specifically has a window open containing the search string.
 	// Requires BOTH the search title AND "Visual Studio" to be in the window title,
 	// to avoid false positives from the Index editor or other windows.
-	static bool IsVisualStudioOpen(const std::string& searchTitle) {
+	[[maybe_unused]] static bool IsVisualStudioOpen(const std::string& searchTitle) {
 		if (searchTitle.empty()) return false;
 		std::wstring wSearch = Utf8ToWide(searchTitle);
 		std::wstring wVS = L"Visual Studio";
@@ -286,6 +288,241 @@ namespace Index {
 			return TRUE;
 		}, reinterpret_cast<LPARAM>(&ctx));
 		return found;
+	}
+
+	// Late-bound IDispatch helper. We deliberately do NOT #import the EnvDTE
+	// type library to avoid pulling a generated .tlh into the build; instead
+	// we resolve names with GetIDsOfNames + Invoke. DISPPARAMS::rgvarg expects
+	// arguments in REVERSE order — the caller fills `args` accordingly.
+	static HRESULT InvokeByName(IDispatch* disp, const wchar_t* name, WORD flags,
+		VARIANT* args, UINT cArgs, VARIANT* result)
+	{
+		if (!disp || !name) return E_POINTER;
+		LPOLESTR n = const_cast<LPOLESTR>(name);
+		DISPID dispid = 0;
+		HRESULT hr = disp->GetIDsOfNames(IID_NULL, &n, 1, LOCALE_USER_DEFAULT, &dispid);
+		if (FAILED(hr)) return hr;
+		DISPPARAMS params{};
+		params.rgvarg = args;
+		params.cArgs = cArgs;
+		if (flags == DISPATCH_PROPERTYPUT) {
+			static DISPID putDispid = DISPID_PROPERTYPUT;
+			params.rgdispidNamedArgs = &putDispid;
+			params.cNamedArgs = 1;
+		}
+		return disp->Invoke(dispid, IID_NULL, LOCALE_USER_DEFAULT, flags,
+			&params, result, nullptr, nullptr);
+	}
+
+	// Walk the Running Object Table for !VisualStudio.DTE.<ver>:<pid> monikers
+	// and return the AddRef'd IDispatch* of the instance whose loaded solution
+	// matches `slnPath` (canonical, case-insensitive). Returns nullptr if no
+	// instance matches — caller then takes the cold-launch path.
+	//
+	// On match, also writes the devenv process ID to *outPid (0 if the moniker
+	// suffix couldn't be parsed). The caller uses this PID with
+	// AllowSetForegroundWindow so the matched VS instance can pull itself to
+	// the foreground — without that grant, Windows' foreground-lock policy
+	// silently demotes DTE.MainWindow.Activate to a taskbar flash.
+	//
+	// This replaces the window-title substring match in IsVisualStudioOpen,
+	// which could not distinguish between multiple running devenv instances.
+	static IDispatch* FindVSDTEForSolution(const std::wstring& slnPath, DWORD* outPid) {
+		if (outPid) *outPid = 0;
+		if (slnPath.empty()) return nullptr;
+
+		std::error_code ec;
+		std::wstring canonTarget = std::filesystem::weakly_canonical(slnPath, ec).wstring();
+		if (canonTarget.empty()) canonTarget = slnPath;
+
+		IRunningObjectTable* rot = nullptr;
+		if (FAILED(GetRunningObjectTable(0, &rot)) || !rot) return nullptr;
+
+		IBindCtx* bindCtx = nullptr;
+		if (FAILED(CreateBindCtx(0, &bindCtx)) || !bindCtx) {
+			rot->Release();
+			return nullptr;
+		}
+
+		IEnumMoniker* enumMoniker = nullptr;
+		if (FAILED(rot->EnumRunning(&enumMoniker)) || !enumMoniker) {
+			bindCtx->Release();
+			rot->Release();
+			return nullptr;
+		}
+
+		IDispatch* matched = nullptr;
+		IMoniker* moniker = nullptr;
+		while (!matched && enumMoniker->Next(1, &moniker, nullptr) == S_OK) {
+			LPOLESTR displayName = nullptr;
+			if (SUCCEEDED(moniker->GetDisplayName(bindCtx, nullptr, &displayName)) && displayName) {
+				std::wstring name(displayName);
+				CoTaskMemFree(displayName);
+
+				if (name.rfind(L"!VisualStudio.DTE.", 0) == 0) {
+					IUnknown* unk = nullptr;
+					if (SUCCEEDED(rot->GetObject(moniker, &unk)) && unk) {
+						IDispatch* dte = nullptr;
+						if (SUCCEEDED(unk->QueryInterface(IID_IDispatch, reinterpret_cast<void**>(&dte))) && dte) {
+							VARIANT solVar; VariantInit(&solVar);
+							HRESULT hr = InvokeByName(dte, L"Solution", DISPATCH_PROPERTYGET, nullptr, 0, &solVar);
+							if (SUCCEEDED(hr) && solVar.vt == VT_DISPATCH && solVar.pdispVal) {
+								VARIANT nameVar; VariantInit(&nameVar);
+								hr = InvokeByName(solVar.pdispVal, L"FullName", DISPATCH_PROPERTYGET, nullptr, 0, &nameVar);
+								if (SUCCEEDED(hr) && nameVar.vt == VT_BSTR && nameVar.bstrVal) {
+									std::wstring full(nameVar.bstrVal, SysStringLen(nameVar.bstrVal));
+									if (!full.empty()) {
+										std::error_code ec2;
+										std::wstring canonFull = std::filesystem::weakly_canonical(full, ec2).wstring();
+										if (canonFull.empty()) canonFull = full;
+										if (_wcsicmp(canonFull.c_str(), canonTarget.c_str()) == 0) {
+											matched = dte;   // transfer ownership (already AddRef'd by QI)
+											dte = nullptr;
+											if (outPid) {
+												// Moniker name is "!VisualStudio.DTE.<ver>:<pid>".
+												// Parse the PID suffix; leave 0 on parse failure.
+												auto colon = name.find_last_of(L':');
+												if (colon != std::wstring::npos && colon + 1 < name.size()) {
+													wchar_t* end = nullptr;
+													unsigned long pid = wcstoul(name.c_str() + colon + 1, &end, 10);
+													if (end && *end == L'\0') *outPid = static_cast<DWORD>(pid);
+												}
+											}
+										}
+									}
+								}
+								VariantClear(&nameVar);
+							}
+							VariantClear(&solVar);
+							if (dte) dte->Release();
+						}
+						unk->Release();
+					}
+				}
+			}
+			moniker->Release();
+			moniker = nullptr;
+		}
+
+		enumMoniker->Release();
+		bindCtx->Release();
+		rot->Release();
+		return matched;
+	}
+
+	// Open `file` in the specific running VS instance represented by `dte`,
+	// optionally jumping to `line`. Retries on RPC_E_CALL_REJECTED so the
+	// call survives a VS busy with solution load. Returns true on success;
+	// caller falls back to a cold launch if false.
+	static bool OpenFileViaDTE(IDispatch* dte, const std::wstring& file, int line) {
+		if (!dte) return false;
+		// vsViewKindPrimary — opens whichever editor is registered as primary
+		// for the file extension (avoids forcing the XML/code view).
+		const wchar_t* kViewKindPrimary = L"{00000000-0000-0000-0000-000000000000}";
+
+		for (int attempt = 0; attempt < 5; ++attempt) {
+			VARIANT itemOpsVar; VariantInit(&itemOpsVar);
+			HRESULT hr = InvokeByName(dte, L"ItemOperations", DISPATCH_PROPERTYGET,
+				nullptr, 0, &itemOpsVar);
+			if (hr == RPC_E_CALL_REJECTED) {
+				VariantClear(&itemOpsVar);
+				Sleep(500);
+				continue;
+			}
+			if (FAILED(hr) || itemOpsVar.vt != VT_DISPATCH || !itemOpsVar.pdispVal) {
+				VariantClear(&itemOpsVar);
+				return false;
+			}
+
+			BSTR fileBstr = SysAllocStringLen(file.c_str(), static_cast<UINT>(file.size()));
+			BSTR viewBstr = SysAllocString(kViewKindPrimary);
+
+			// DISPPARAMS::rgvarg is in REVERSE order:
+			// args[0] = 2nd parameter (ViewKind), args[1] = 1st parameter (File).
+			VARIANT args[2];
+			VariantInit(&args[0]); args[0].vt = VT_BSTR; args[0].bstrVal = viewBstr;
+			VariantInit(&args[1]); args[1].vt = VT_BSTR; args[1].bstrVal = fileBstr;
+
+			VARIANT openResult; VariantInit(&openResult);
+			hr = InvokeByName(itemOpsVar.pdispVal, L"OpenFile", DISPATCH_METHOD,
+				args, 2, &openResult);
+
+			SysFreeString(fileBstr);
+			SysFreeString(viewBstr);
+			VariantClear(&openResult);
+			VariantClear(&itemOpsVar);
+
+			if (hr == RPC_E_CALL_REJECTED) {
+				Sleep(500);
+				continue;
+			}
+			if (FAILED(hr)) return false;
+
+			// Bring the matched VS window to the foreground so the user sees
+			// the file land. DTE.MainWindow.Activate calls SetForegroundWindow
+			// inside devenv, which Windows' foreground-lock policy blocks
+			// unless we (the current foreground process) already granted
+			// devenv that right via AllowSetForegroundWindow(pid) — see the
+			// VS launcher in OpenFile. Belt-and-suspenders: also pull the
+			// HWND from MainWindow.HWnd and call SetForegroundWindow /
+			// BringWindowToTop ourselves, restoring from minimised first.
+			VARIANT mainWinVar; VariantInit(&mainWinVar);
+			if (SUCCEEDED(InvokeByName(dte, L"MainWindow", DISPATCH_PROPERTYGET,
+				nullptr, 0, &mainWinVar)) && mainWinVar.vt == VT_DISPATCH && mainWinVar.pdispVal)
+			{
+				VARIANT trueVar; VariantInit(&trueVar);
+				trueVar.vt = VT_BOOL; trueVar.boolVal = VARIANT_TRUE;
+				InvokeByName(mainWinVar.pdispVal, L"Visible", DISPATCH_PROPERTYPUT,
+					&trueVar, 1, nullptr);
+				VARIANT actResult; VariantInit(&actResult);
+				InvokeByName(mainWinVar.pdispVal, L"Activate", DISPATCH_METHOD,
+					nullptr, 0, &actResult);
+				VariantClear(&actResult);
+
+				VARIANT hwndVar; VariantInit(&hwndVar);
+				if (SUCCEEDED(InvokeByName(mainWinVar.pdispVal, L"HWnd", DISPATCH_PROPERTYGET,
+					nullptr, 0, &hwndVar)))
+				{
+					LONG_PTR raw = 0;
+					if (hwndVar.vt == VT_I4)      raw = hwndVar.lVal;
+					else if (hwndVar.vt == VT_I8) raw = static_cast<LONG_PTR>(hwndVar.llVal);
+					HWND hwnd = reinterpret_cast<HWND>(static_cast<intptr_t>(raw));
+					if (hwnd && IsWindow(hwnd)) {
+						if (IsIconic(hwnd)) ShowWindow(hwnd, SW_RESTORE);
+						BringWindowToTop(hwnd);
+						SetForegroundWindow(hwnd);
+					}
+				}
+				VariantClear(&hwndVar);
+			}
+			VariantClear(&mainWinVar);
+
+			// Jump to line via ActiveDocument.Selection.GotoLine(line, Select=false)
+			if (line > 0) {
+				VARIANT docVar; VariantInit(&docVar);
+				if (SUCCEEDED(InvokeByName(dte, L"ActiveDocument", DISPATCH_PROPERTYGET,
+					nullptr, 0, &docVar)) && docVar.vt == VT_DISPATCH && docVar.pdispVal)
+				{
+					VARIANT selVar; VariantInit(&selVar);
+					if (SUCCEEDED(InvokeByName(docVar.pdispVal, L"Selection", DISPATCH_PROPERTYGET,
+						nullptr, 0, &selVar)) && selVar.vt == VT_DISPATCH && selVar.pdispVal)
+					{
+						VARIANT gotoArgs[2];
+						VariantInit(&gotoArgs[0]); gotoArgs[0].vt = VT_BOOL; gotoArgs[0].boolVal = VARIANT_FALSE;
+						VariantInit(&gotoArgs[1]); gotoArgs[1].vt = VT_I4;   gotoArgs[1].lVal    = line;
+						VARIANT gotoResult; VariantInit(&gotoResult);
+						InvokeByName(selVar.pdispVal, L"GotoLine", DISPATCH_METHOD,
+							gotoArgs, 2, &gotoResult);
+						VariantClear(&gotoResult);
+					}
+					VariantClear(&selVar);
+				}
+				VariantClear(&docVar);
+			}
+
+			return true;
+		}
+		return false;
 	}
 #endif
 
@@ -319,8 +556,6 @@ namespace Index {
 #ifdef IDX_PLATFORM_WINDOWS
 		std::string fullCmd;
 
-		std::string projectName = project ? project->Name : "";
-
 		switch (editor.Type) {
 		case ExternalEditorType::VSCode: {
 			// VS Code needs the FOLDER (not .sln) as primary argument for IntelliSense.
@@ -338,80 +573,103 @@ namespace Index {
 		}
 
 		case ExternalEditorType::VisualStudio: {
-			// VS2022 approach:
-			// 1. If VS already has this solution open (check window title for "Visual Studio" + project name):
-			//    → devenv /edit "file" (reuses running instance)
-			// 2. If VS is NOT open with this project:
-			//    → First: launch devenv with the .sln to load the full solution
-			//    → Then: after a delay, use devenv /edit to open the specific file
-			//    This two-step approach is needed because /command "File.OpenFile"
-			//    has quoting issues with paths containing spaces.
-			bool vsHasProject = IsVisualStudioOpen(projectName);
+			// VS2022 approach (instance-targeted via COM Running Object Table):
+			//
+			//   1. Enumerate running devenv instances via the ROT and find the
+			//      one whose loaded Solution.FullName matches our .sln path.
+			//      If found → call DTE.ItemOperations.OpenFile on THAT instance.
+			//      This handles both "this project already open" and the
+			//      "multiple VS instances running" cases without ambiguity.
+			//
+			//   2. If no running VS has our .sln loaded, cold-launch devenv
+			//      with the .sln AND the file as trailing arguments in a SINGLE
+			//      CreateProcessW call. The new instance loads the solution and
+			//      opens the file inside itself — no Sleep, no /edit follow-up
+			//      (which is the bug that routed files to the wrong VS instance
+			//      when an unrelated devenv was already running).
+			//
+			//   3. Last-resort fallback when there is no .sln context: plain
+			//      `devenv /edit "file"`. Behaviour unchanged from before.
+			std::string devenvPath = editor.ExecutablePath;
+			std::string sln = slnPath;
+			std::string file = absPath;
+			int lineNum = line;
 
-			if (vsHasProject) {
-				// VS already has it — just navigate to the file
-				fullCmd = "\"" + editor.ExecutablePath + "\" /edit \"" + absPath + "\"";
-			}
-			else if (!slnPath.empty()) {
-				// VS not open — launch solution, then open file after delay
-				std::string devenvPath = editor.ExecutablePath;
-				std::string sln = slnPath;
-				std::string file = absPath;
+			// All COM work (ROT enumeration + DTE.OpenFile) runs inside the
+			// tracked launcher thread so the main editor thread never blocks
+			// on a busy/loading VS. JoinPendingLaunchThreads still drains us
+			// on shutdown.
+			std::thread vsLauncher([devenvPath, sln, file, lineNum]() {
+				HRESULT comHr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+				const bool needUninit = SUCCEEDED(comHr);
 
-				// M29: tracked instead of detached so editor shutdown can
-				// join. The Sleep(4000) below means JoinPendingLaunchThreads
-				// may block for up to ~4 seconds on a cold-start VS open
-				// that's still in flight when the editor closes — that's
-				// the deliberate trade-off vs. a process leak / stranded
-				// thread past main(). PARTIAL: the secondary CreateProcessW
-				// logic doesn't translate to Process::Run because the
-				// two-step quoting workaround is required for VS2022.
-				std::thread vsLauncher([devenvPath, sln, file]() {
-					// Step 1: Open the solution
-					std::string cmd1 = "\"" + devenvPath + "\" \"" + sln + "\"";
-					std::wstring wcmd1 = Utf8ToWide(cmd1);
-					std::vector<wchar_t> buf1(wcmd1.begin(), wcmd1.end());
-					buf1.push_back(L'\0');
+				std::wstring wsln = Utf8ToWide(sln);
+				std::wstring wfile = Utf8ToWide(file);
 
-					STARTUPINFOW si1{};
-					si1.cb = sizeof(si1);
-					PROCESS_INFORMATION pi1{};
+				DWORD matchedPid = 0;
+				IDispatch* matchedDTE = sln.empty()
+					? nullptr
+					: FindVSDTEForSolution(wsln, &matchedPid);
+				bool handled = false;
+				if (matchedDTE) {
+					IDX_CORE_INFO_TAG("ExternalEditor",
+						"Matched running VS instance (pid={}) for sln '{}' — opening file via DTE",
+						matchedPid, sln);
+					// Grant devenv the right to take foreground once. Index-Editor
+					// is the foreground process (user just double-clicked here),
+					// so the grant is accepted. Without it, the file opens but
+					// VS stays behind our window. Best-effort: ignore the BOOL
+					// return — failure just means the user has to alt-tab.
+					if (matchedPid != 0) AllowSetForegroundWindow(matchedPid);
+					handled = OpenFileViaDTE(matchedDTE, wfile, lineNum);
+					if (!handled) {
+						IDX_CORE_WARN_TAG("ExternalEditor",
+							"DTE.OpenFile failed on matched instance, falling back to cold launch");
+					}
+					matchedDTE->Release();
+				}
 
-					CreateProcessW(nullptr, buf1.data(), nullptr, nullptr,
-						FALSE, CREATE_NEW_PROCESS_GROUP, nullptr, nullptr, &si1, &pi1);
-					if (pi1.hProcess) {
-						CloseHandle(pi1.hProcess);
-						CloseHandle(pi1.hThread);
+				if (!handled) {
+					std::string cmd;
+					if (!sln.empty()) {
+						// Combined launch: one devenv invocation loads the
+						// solution AND opens the file inside the SAME new
+						// instance. This is what fixes the case-3 bug.
+						cmd = "\"" + devenvPath + "\" \"" + sln + "\" \"" + file + "\"";
+						if (lineNum > 0) {
+							cmd += " /command \"Edit.GoTo " + std::to_string(lineNum) + "\"";
+						}
+						IDX_CORE_INFO_TAG("ExternalEditor",
+							"No running VS matched sln '{}' — cold launching devenv with sln + file",
+							sln);
+					}
+					else {
+						cmd = "\"" + devenvPath + "\" /edit \"" + file + "\"";
+						IDX_CORE_WARN_TAG("ExternalEditor",
+							"No .sln context — falling back to devenv /edit '{}'", file);
 					}
 
-					// Step 2: Wait for VS to load, then open the file
-					Sleep(4000);
+					std::wstring wcmd = Utf8ToWide(cmd);
+					std::vector<wchar_t> buf(wcmd.begin(), wcmd.end());
+					buf.push_back(L'\0');
 
-					std::string cmd2 = "\"" + devenvPath + "\" /edit \"" + file + "\"";
-					std::wstring wcmd2 = Utf8ToWide(cmd2);
-					std::vector<wchar_t> buf2(wcmd2.begin(), wcmd2.end());
-					buf2.push_back(L'\0');
-
-					STARTUPINFOW si2{};
-					si2.cb = sizeof(si2);
-					PROCESS_INFORMATION pi2{};
-
-					CreateProcessW(nullptr, buf2.data(), nullptr, nullptr,
-						FALSE, CREATE_NEW_PROCESS_GROUP, nullptr, nullptr, &si2, &pi2);
-					if (pi2.hProcess) {
-						CloseHandle(pi2.hProcess);
-						CloseHandle(pi2.hThread);
+					STARTUPINFOW si{}; si.cb = sizeof(si);
+					PROCESS_INFORMATION pi{};
+					if (CreateProcessW(nullptr, buf.data(), nullptr, nullptr,
+						FALSE, CREATE_NEW_PROCESS_GROUP, nullptr, nullptr, &si, &pi))
+					{
+						CloseHandle(pi.hProcess);
+						CloseHandle(pi.hThread);
 					}
-				});
-				TrackLaunchThread(std::move(vsLauncher));
+				}
 
-				// Return early — the thread handles everything
-				return;
-			}
-			else {
-				fullCmd = "\"" + editor.ExecutablePath + "\" /edit \"" + absPath + "\"";
-			}
-			break;
+				if (needUninit) CoUninitialize();
+			});
+			TrackLaunchThread(std::move(vsLauncher));
+
+			// Return early — the thread handles everything (matching the
+			// original cold-start path's contract).
+			return;
 		}
 
 		case ExternalEditorType::Rider: {

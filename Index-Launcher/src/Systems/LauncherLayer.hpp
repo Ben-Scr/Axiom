@@ -89,6 +89,7 @@ namespace Index {
 		void RenderCreateProjectPopup();
 		void RenderDeleteProjectPopups();
 		void RenderSettingsPopup();
+		void RenderProjectInfoPopup();
 		void OpenProject(const LauncherProjectEntry& entry);
 		void OpenProjectInExplorer(const LauncherProjectEntry& entry);
 		void BrowseForExistingProject();
@@ -142,6 +143,16 @@ namespace Index {
 		bool m_OpenDeleteConfirmPopup = false;
 		bool m_OpenDeleteFinalConfirmPopup = false;
 		std::string m_DeleteError;
+
+		// "Project Info" right-click dialog state. m_PendingInfoProject holds the
+		// project whose details are being shown; m_OpenInfoPopup is the deferred
+		// "open the modal next frame" flag (same pattern as m_OpenDeleteConfirmPopup).
+		// m_EngineVersionCache memoises the engineVersion field parsed out of each
+		// project's index-project.json so the dialog doesn't re-read the file every
+		// frame — invalidated alongside m_CreatedAtCache in RefreshProjectsList.
+		std::optional<LauncherProjectEntry> m_PendingInfoProject;
+		bool m_OpenInfoPopup = false;
+		mutable std::unordered_map<std::string, std::string> m_EngineVersionCache;
 
 #ifdef IDX_PLATFORM_WINDOWS
 		std::unordered_map<std::string, DWORD> m_RunningProjects;

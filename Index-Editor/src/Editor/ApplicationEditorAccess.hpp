@@ -44,12 +44,9 @@ namespace Index {
 			return requested;
 		}
 
-		static void RequestEditorStopPlay()
-		{
-			if (Application::s_Instance) {
-				Application::s_Instance->m_EditorStopPlayRequested = true;
-			}
-		}
+		// Note: `RequestEditorStopPlay()` lives on `Application` (Core) because the
+		// engine-side script bindings (ScriptBindingsScene) need to signal the editor
+		// without depending on editor-side headers. Don't duplicate it here.
 
 		// Resets Time.TimeSinceStartup / Time.RealtimeSinceStartup to zero. Called
 		// at editor play-mode entry so every play session starts at t=0; built games

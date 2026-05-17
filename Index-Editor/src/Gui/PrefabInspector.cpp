@@ -12,6 +12,8 @@
 #include "Scene/Entity.hpp"
 #include "Scene/Scene.hpp"
 #include "Scene/SceneManager.hpp"
+#include "Scripting/ScriptComponent.hpp"
+#include "Scripting/ScriptDiscovery.hpp"
 #include "Serialization/File.hpp"
 #include "Serialization/Json.hpp"
 #include "Serialization/SceneSerializer.hpp"
@@ -151,6 +153,43 @@ namespace Index {
 			ImGui::OpenPopup("AddPrefabComponentPopup");
 			m_AddComponentSearchBuffer[0] = '\0';
 		}
+
+		// Drag-drop target on the Add Component button — accept .cs script
+		// files and attach them to the prefab root. Mirrors the entity
+		// inspector's drop behaviour so the UX matches between the two.
+		// GameSystems / GlobalSystems are skipped — those belong on the
+		// Add System button in the scene-systems inspector, not on a prefab.
+		if (ImGui::BeginDragDropTarget()) {
+			if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ASSET_BROWSER_ITEM")) {
+				std::string droppedPath(static_cast<const char*>(payload->Data));
+				std::vector<EditorScriptDiscovery::ScriptEntry> droppedScripts;
+				EditorScriptDiscovery::CollectScriptFile(std::filesystem::path(droppedPath), droppedScripts);
+				for (const auto& scriptEntry : droppedScripts) {
+					if (scriptEntry.IsGameSystem || scriptEntry.IsGlobalSystem) {
+						continue;
+					}
+					if (scriptEntry.ClassName.empty() || scriptEntry.Type == ScriptType::Unknown) {
+						continue;
+					}
+					if (!rootEntity.HasComponent<ScriptComponent>()) {
+						rootEntity.AddComponent<ScriptComponent>();
+					}
+					auto& scriptComponent = rootEntity.GetComponent<ScriptComponent>();
+					if (scriptEntry.IsManagedComponent) {
+						if (!scriptComponent.HasManagedComponent(scriptEntry.ClassName)) {
+							scriptComponent.AddManagedComponent(scriptEntry.ClassName);
+							m_PrefabScene->MarkDirty();
+						}
+					}
+					else if (!scriptComponent.HasScript(scriptEntry.ClassName, scriptEntry.Type)) {
+						scriptComponent.AddScript(scriptEntry.ClassName, scriptEntry.Type);
+						m_PrefabScene->MarkDirty();
+					}
+				}
+			}
+			ImGui::EndDragDropTarget();
+		}
+
 		RenderAddComponentPopup("AddPrefabComponentPopup", *m_PrefabScene, entitySpan,
 			m_AddComponentSearchBuffer, sizeof(m_AddComponentSearchBuffer));
 

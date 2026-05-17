@@ -220,6 +220,7 @@ namespace Index {
 		, m_WrapU(other.m_WrapU)
 		, m_WrapV(other.m_WrapV)
 		, m_HasMips(other.m_HasMips)
+		, m_FlippedY(other.m_FlippedY)
 	{
 		other.m_Tex = 0;
 		other.m_Width = 0;
@@ -238,6 +239,7 @@ namespace Index {
 		m_WrapU    = other.m_WrapU;
 		m_WrapV    = other.m_WrapV;
 		m_HasMips  = other.m_HasMips;
+		m_FlippedY = other.m_FlippedY;
 		other.m_Tex = 0;
 		other.m_Width = 0;
 		other.m_Height = 0;
@@ -257,6 +259,7 @@ namespace Index {
 
 	bool Texture2D::Load(const char* path, bool generateMipmaps, bool srgb, bool flipVertical) {
 		Destroy();
+		m_FlippedY = flipVertical;
 		(void)srgb;  // Stage 2 follow-up — wgpu::TextureFormat::RGBA8UnormSrgb when wired
 
 		if (!WebGPUBackend::IsInitialized()) {

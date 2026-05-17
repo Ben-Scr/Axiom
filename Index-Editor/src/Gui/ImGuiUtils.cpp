@@ -1,5 +1,6 @@
 #include <pch.hpp>
 #include "Gui/ImGuiUtils.hpp"
+#include "Graphics/Texture2D.hpp"
 #include "Scene/Scene.hpp"
 #include <imgui.h>
 
@@ -150,62 +151,84 @@ namespace Index::ImGuiUtils {
 		return activated;
 	}
 
+	namespace {
+		void DrawTexturePreviewImpl(uint64_t rendererId, float texWidth, float texHeight,
+			float previewSize, bool flippedY)
+		{
+			const ImVec2 previewMin = ImGui::GetCursorScreenPos();
+			const ImVec2 previewMax = ImVec2(previewMin.x + previewSize, previewMin.y + previewSize);
+
+			ImDrawList* drawList = ImGui::GetWindowDrawList();
+
+			drawList->AddRectFilled(previewMin, previewMax, IM_COL32(35, 35, 35, 255), 6.0f);
+
+			const float checkerSize = 8.0f;
+			for (float y = previewMin.y; y < previewMax.y; y += checkerSize) {
+				for (float x = previewMin.x; x < previewMax.x; x += checkerSize) {
+					const int ix = static_cast<int>((x - previewMin.x) / checkerSize);
+					const int iy = static_cast<int>((y - previewMin.y) / checkerSize);
+					const bool even = ((ix + iy) % 2) == 0;
+
+					drawList->AddRectFilled(
+						ImVec2(x, y),
+						ImVec2(
+							(x + checkerSize < previewMax.x) ? x + checkerSize : previewMax.x,
+							(y + checkerSize < previewMax.y) ? y + checkerSize : previewMax.y
+						),
+						even ? IM_COL32(70, 70, 70, 255) : IM_COL32(100, 100, 100, 255)
+					);
+				}
+			}
+
+			float drawWidth = previewSize;
+			float drawHeight = previewSize;
+
+			if (texWidth > 0.0f && texHeight > 0.0f) {
+				const float aspect = texWidth / texHeight;
+				if (aspect > 1.0f) {
+					drawHeight = previewSize / aspect;
+				}
+				else {
+					drawWidth = previewSize * aspect;
+				}
+			}
+
+			const ImVec2 imageMin = ImVec2(
+				previewMin.x + (previewSize - drawWidth) * 0.5f,
+				previewMin.y + (previewSize - drawHeight) * 0.5f
+			);
+			const ImVec2 imageMax = ImVec2(imageMin.x + drawWidth, imageMin.y + drawHeight);
+
+			// Canonical UV pick: ImGui expects top-down sample coords. If
+			// the texture was uploaded with stb's flipVertical=true (bottom
+			// row first) we sample (0,1)→(1,0) to compensate; otherwise we
+			// use the natural (0,0)→(1,1). One rule, every preview path.
+			const ImVec2 uv0 = flippedY ? ImVec2(0.0f, 1.0f) : ImVec2(0.0f, 0.0f);
+			const ImVec2 uv1 = flippedY ? ImVec2(1.0f, 0.0f) : ImVec2(1.0f, 1.0f);
+			drawList->AddImage((ImTextureID)(intptr_t)rendererId,
+				imageMin, imageMax, uv0, uv1);
+
+			ImGui::Dummy(ImVec2(previewSize, previewSize));
+		}
+	}
+
 	void DrawTexturePreview(uint64_t rendererId, float texWidth, float texHeight, float previewSize)
 	{
-		const ImVec2 previewMin = ImGui::GetCursorScreenPos();
-		const ImVec2 previewMax = ImVec2(previewMin.x + previewSize, previewMin.y + previewSize);
+		// Raw-handle overload: assumes the natural top-down sprite/UI load
+		// path. New call sites should prefer the Texture2D overload below
+		// so the canonical flip rule applies automatically.
+		DrawTexturePreviewImpl(rendererId, texWidth, texHeight, previewSize, /*flippedY=*/false);
+	}
 
-		ImDrawList* drawList = ImGui::GetWindowDrawList();
+	void DrawTexturePreview(const Texture2D& tex, float previewSize)
+	{
+		DrawTexturePreviewImpl(tex.GetHandle(), tex.GetWidth(), tex.GetHeight(),
+			previewSize, tex.IsFlippedY());
+	}
 
-		drawList->AddRectFilled(previewMin, previewMax, IM_COL32(35, 35, 35, 255), 6.0f);
-
-		const float checkerSize = 8.0f;
-		for (float y = previewMin.y; y < previewMax.y; y += checkerSize) {
-			for (float x = previewMin.x; x < previewMax.x; x += checkerSize) {
-				const int ix = static_cast<int>((x - previewMin.x) / checkerSize);
-				const int iy = static_cast<int>((y - previewMin.y) / checkerSize);
-				const bool even = ((ix + iy) % 2) == 0;
-
-				drawList->AddRectFilled(
-					ImVec2(x, y),
-					ImVec2(
-						(x + checkerSize < previewMax.x) ? x + checkerSize : previewMax.x,
-						(y + checkerSize < previewMax.y) ? y + checkerSize : previewMax.y
-					),
-					even ? IM_COL32(70, 70, 70, 255) : IM_COL32(100, 100, 100, 255)
-				);
-			}
-		}
-
-		float drawWidth = previewSize;
-		float drawHeight = previewSize;
-
-		if (texWidth > 0.0f && texHeight > 0.0f) {
-			const float aspect = texWidth / texHeight;
-			if (aspect > 1.0f) {
-				drawHeight = previewSize / aspect;
-			}
-			else {
-				drawWidth = previewSize * aspect;
-			}
-		}
-
-		const ImVec2 imageMin = ImVec2(
-			previewMin.x + (previewSize - drawWidth) * 0.5f,
-			previewMin.y + (previewSize - drawHeight) * 0.5f
-		);
-		const ImVec2 imageMax = ImVec2(imageMin.x + drawWidth, imageMin.y + drawHeight);
-
-		// Default UV (0..1) — TextureManager now loads sprite/UI textures
-		// in their natural top-down orientation (stb's default), so
-		// sampling with the default UV displays them right-side-up. The
-		// old (0,1)/(1,0) flip was the visual compensation for the
-		// previous flipVertical=true load path; it's been removed in
-		// lockstep with TextureManager.cpp.
-		drawList->AddImage((ImTextureID)(intptr_t)rendererId,
-			imageMin, imageMax);
-
-		ImGui::Dummy(ImVec2(previewSize, previewSize));
+	void CenterNextModal() {
+		const ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+		ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
 	}
 
 	bool BeginComponentSection(const char* label, bool& removeRequested, const std::function<void()>& contextMenu)

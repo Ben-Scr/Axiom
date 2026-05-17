@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace Index {
@@ -165,6 +166,25 @@ namespace Index {
 		std::vector<EditorScriptDiscovery::ScriptEntry> scriptEntries;
 		EditorScriptDiscovery::CollectProjectScriptEntries(scriptEntries);
 
+		// Index the .cs files that pair with a C++ component by display name
+		// so we can:
+		//   (a) hide the C++ entry from the regular General/Rendering/Physics/
+		//       Audio buckets — it would otherwise be a duplicate of the entry
+		//       under Native Components (C#);
+		//   (b) render Native Components (C#) using the C++ display name (what
+		//       the user sees in the runtime, e.g. "New Native") instead of
+		//       the raw .cs file stem.
+		// The lookup is keyed on `ComponentInfo::displayName` since that's the
+		// string the [NativeComponent("...")] attribute matches against.
+		std::unordered_map<std::string, const EditorScriptDiscovery::ScriptEntry*> nativeBackingByDisplayName;
+		for (const auto& scriptEntry : scriptEntries) {
+			if (!scriptEntry.IsNativeComponent || scriptEntry.NativeName.empty()) continue;
+			nativeBackingByDisplayName.emplace(scriptEntry.NativeName, &scriptEntry);
+		}
+		const auto isNativeBacked = [&](const ComponentInfo& info) {
+			return nativeBackingByDisplayName.find(info.displayName) != nativeBackingByDisplayName.end();
+		};
+
 		if (hasFilter) {
 			// Flat filtered list when searching across both built-in components
 			// and project scripts.
@@ -172,6 +192,40 @@ namespace Index {
 				if (info.category != ComponentCategory::Component) return;
 				if (info.displayName == "Scripts") return;
 				if (!componentMissingFromAny(info)) return;
+				// Native-backed C++ entries surface under the Native
+				// Components (C#) heading below — skip here to avoid the
+				// duplicate ("New Native" appeared both in General and as
+				// the .cs entry).
+				if (isNativeBacked(info)) return;
+
+				std::string lowerName = info.displayName;
+				std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(), ::tolower);
+				if (lowerName.find(filter) == std::string::npos) return;
+
+				std::string conflictName;
+				const bool conflicts = componentConflictsWithSelection(typeId, &conflictName);
+				const bool enabled = !conflicts;
+				if (ImGuiUtils::MenuItemEllipsis(info.displayName, info.displayName.c_str(), nullptr, false, enabled, 260.0f)) {
+					if (enabled) {
+						addComponentToAll(info);
+						ImGui::CloseCurrentPopup();
+					}
+				}
+				if (conflicts && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+					ImGui::SetTooltip("Conflicts with %s", conflictName.c_str());
+				}
+			});
+
+			// Native Components (C#) — search hits use the C++ display name
+			// so "New Native" matches even though the .cs file is named
+			// "NewNativeComponent.cs". Click path goes through the C++
+			// registry (same as adding the native component from its
+			// regular subcategory would).
+			registry.ForEachComponentInfo([&](const std::type_index& typeId, const ComponentInfo& info) {
+				if (info.category != ComponentCategory::Component) return;
+				if (info.displayName == "Scripts") return;
+				if (!componentMissingFromAny(info)) return;
+				if (!isNativeBacked(info)) return;
 
 				std::string lowerName = info.displayName;
 				std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(), ::tolower);
@@ -193,6 +247,14 @@ namespace Index {
 
 			for (const auto& scriptEntry : scriptEntries) {
 				if (scriptEntry.IsGameSystem || scriptEntry.IsGlobalSystem) {
+					continue;
+				}
+				// Native-backed .cs files were already surfaced in the
+				// previous registry pass under their C++ display name. The
+				// raw .cs entry here would duplicate that listing — and
+				// clicking the .cs row would route through the managed-
+				// component path, which is wrong for native structs.
+				if (scriptEntry.IsNativeComponent) {
 					continue;
 				}
 				std::string lowerClassName = EditorScriptDiscovery::ToLowerCopy(scriptEntry.ClassName);
@@ -236,6 +298,10 @@ namespace Index {
 				if (info.category != ComponentCategory::Component) return;
 				if (info.displayName == "Scripts") return;
 				if (!componentMissingFromAny(info)) return;
+				// Routed to the Native Components (C#) tree below — keeps
+				// the regular General/Rendering/... categories free of
+				// duplicate entries for scripts that own a paired C++ pool.
+				if (isNativeBacked(info)) return;
 
 				std::string sub = info.subcategory.empty() ? "General" : info.subcategory;
 				auto it = categoryIndex.find(sub);
@@ -270,6 +336,46 @@ namespace Index {
 				}
 			}
 
+			// Native Components (C#) — every C# `: IComponent` struct that
+			// pairs with a registered C++ component shows up here using the
+			// C++ display name. Clicking routes through the registry's
+			// AddWithDependencies path (same as the regular subcategory
+			// rows would), NOT through ScriptComponent::AddManagedComponent:
+			// the data lives in the C++ ECS pool, not in a managed slot.
+			struct NativeEntry { std::type_index TypeId; const ComponentInfo* Info; };
+			std::vector<NativeEntry> nativeBackedComponents;
+			registry.ForEachComponentInfo([&](const std::type_index& typeId, const ComponentInfo& info) {
+				if (info.category != ComponentCategory::Component) return;
+				if (info.displayName == "Scripts") return;
+				if (!isNativeBacked(info)) return;
+				if (!componentMissingFromAny(info)) return;
+				nativeBackedComponents.push_back({ typeId, &info });
+			});
+			if (!nativeBackedComponents.empty()) {
+				if (ImGui::TreeNode("Native Components (C#)")) {
+					for (const auto& entry : nativeBackedComponents) {
+						const ComponentInfo* info = entry.Info;
+						std::string conflictName;
+						const bool conflicts = componentConflictsWithSelection(entry.TypeId, &conflictName);
+						const bool enabled = !conflicts;
+						if (ImGuiUtils::MenuItemEllipsis(info->displayName, info->displayName.c_str(), nullptr, false, enabled, 260.0f)) {
+							if (enabled) {
+								addComponentToAll(*info);
+								ImGui::CloseCurrentPopup();
+							}
+						}
+						if (conflicts && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+							ImGui::SetTooltip("Conflicts with %s", conflictName.c_str());
+						}
+					}
+					ImGui::TreePop();
+				}
+			}
+
+			// Components (C#) — managed `class : Component` types only.
+			// IsManagedComponent and IsNativeComponent are mutually
+			// exclusive in CollectScriptFile, so the IsManagedComponent
+			// filter implicitly excludes native structs.
 			bool hasManagedComponents = false;
 			for (const auto& scriptEntry : scriptEntries) {
 				if (scriptEntry.IsManagedComponent && !scriptEntry.IsGameSystem && !scriptEntry.IsGlobalSystem) {
@@ -308,7 +414,8 @@ namespace Index {
 			if (!scriptEntries.empty()) {
 				if (ImGui::TreeNode("Scripts")) {
 					for (const auto& scriptEntry : scriptEntries) {
-						if (scriptEntry.IsManagedComponent || scriptEntry.IsGameSystem || scriptEntry.IsGlobalSystem) {
+						if (scriptEntry.IsManagedComponent || scriptEntry.IsNativeComponent
+							|| scriptEntry.IsGameSystem || scriptEntry.IsGlobalSystem) {
 							continue;
 						}
 						const std::string label = BuildScriptMenuLabel(scriptEntry);

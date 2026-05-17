@@ -69,6 +69,18 @@ namespace Index {
             static uint32_t AddReferenceProvider(ReferenceProvider provider);
             static void RemoveReferenceProvider(uint32_t token);
 
+            // Notification fired BEFORE a texture slot is destroyed or its
+            // GPU resource is replaced (UnloadTexture, UnloadAll, ReloadTexture
+            // move-in). Subscribers like Renderer2D's bind-group cache use
+            // this to evict entries keyed off the soon-to-be-invalid
+            // Texture2D::GetHandle() pool ID. The handle is still resolvable
+            // via GetTexture(handle) when the listener fires — callers should
+            // capture whatever they need from the live texture before
+            // returning, since the slot is invalidated immediately after.
+            using DestroyListener = std::function<void(TextureHandle)>;
+            static uint32_t AddDestroyListener(DestroyListener listener);
+            static void RemoveDestroyListener(uint32_t token);
+
             /// Returns the texture path relative to a texture root directory.
             /// This is the same format accepted by LoadTexture().
             static std::string GetTextureName(TextureHandle handle) {

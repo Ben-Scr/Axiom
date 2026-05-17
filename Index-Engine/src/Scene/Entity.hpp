@@ -22,6 +22,19 @@ namespace Index {
 		// downstream null-check. Defined in Entity.cpp.
 		static const Entity Null;
 
+		// Scene-bound placeholder: an Entity with no underlying handle but
+		// a live Scene pointer, for code paths that need to dispatch
+		// scene-scoped logic (e.g. PropertyDrawer's MarkSceneDirty hook,
+		// which only reads Scene* via Entity::GetScene()) through an API
+		// that takes an Entity. The returned wrapper reports IsValid() ==
+		// false and asserts on any component operation — it exists purely
+		// to carry the scene reference, not to stand in for a real entity.
+		//
+		// Public so editor / inspector translation units can call it without
+		// being added to the Entity friend list; the private constructors
+		// remain off-limits to general callers.
+		static Entity MakeScenePlaceholder(Scene& scene);
+
 
 		template<typename TComponent, typename... Args>
 			requires (!std::is_empty_v<TComponent>)

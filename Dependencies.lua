@@ -10,6 +10,7 @@ IncludeDir["EnTT"] = "External/entt/src"
 IncludeDir["STB"] = "External/stb"
 IncludeDir["MagicEnum"] = "External/magic_enum/include"
 IncludeDir["MiniAudio"] = "External/miniaudio"
+IncludeDir["ConcurrentQueue"] = "External/concurrentqueue"
 IncludeDir["Cereal"] = "External/cereal/include"
 IncludeDir["Glad"] = "External/glad/include"
 IncludeDir["DotNet"] = "External/dotnet"
@@ -160,7 +161,13 @@ Dependency["EngineCore"] =
         -- AdditionalIncludeDirectories on vcxproj — keeping it global is the
         -- pragmatic fix; it's a one-line cost for a header path that only
         -- one .cpp actually consumes.
-        "%{IncludeDir.Cereal}"
+        "%{IncludeDir.Cereal}",
+        -- moodycamel::ConcurrentQueue — header-only, BSD-2-Clause / Boost
+        -- dual-licensed. Consumed only by Jobs/JobSystem.cpp as a lock-free
+        -- MPMC replacement for the prior std::mutex + std::deque queue.
+        -- Added globally for the same reason Cereal is (per-file scoping
+        -- doesn't emit on vcxproj reliably).
+        "%{IncludeDir.ConcurrentQueue}"
     },
 
     LibDirs = {},

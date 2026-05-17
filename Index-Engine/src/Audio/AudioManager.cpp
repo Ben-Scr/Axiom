@@ -7,6 +7,8 @@
 
 #include "Serialization/Path.hpp"
 
+#include "Audio/IAudioBackend.hpp"
+#include "Audio/Backends/MiniaudioBackend.hpp"
 #include "Components/Audio/AudioSourceComponent.hpp"
 #include "Core/Application.hpp"
 #include "Scene/Scene.hpp"
@@ -69,10 +71,26 @@ namespace Index {
 		}
 	}
 
-	ma_engine AudioManager::s_Engine{};
+	std::unique_ptr<IAudioBackend> AudioManager::s_Backend;
 	bool AudioManager::s_IsInitialized = false;
+
+	void AudioManager::SetBackend(std::unique_ptr<IAudioBackend> backend) {
+		IDX_CORE_ASSERT(Application::IsMainThread(), IndexErrorCode::Undefined,
+			"AudioManager::SetBackend must be called on the main thread");
+		IDX_CORE_ASSERT(!s_IsInitialized, IndexErrorCode::Undefined,
+			"AudioManager::SetBackend must be called before Initialize");
+		s_Backend = std::move(backend);
+	}
+
+	// Internal accessor: backends that don't speak miniaudio return nullptr. The
+	// remaining ma_* call sites in this file fall back to a quiet no-op when the
+	// active backend doesn't provide an engine pointer.
+	static ma_engine* GetActiveMiniaudioEngine() {
+		return AudioManager::GetBackend() ? AudioManager::GetBackend()->GetMiniaudioEngine() : nullptr;
+	}
 	std::unordered_map<AudioHandle::HandleType, std::unique_ptr<Audio>> AudioManager::s_audioMap;
 	std::unordered_map<std::string, AudioHandle::HandleType> AudioManager::s_audioPathToHandle;
+	std::unordered_map<std::string, AudioHandle::HandleType> AudioManager::s_audioRawPathToHandle;
 	AudioHandle::HandleType AudioManager::s_nextHandle = 1;
 	std::vector<std::unique_ptr<AudioManager::SoundInstance>> AudioManager::s_soundInstances;
 	std::vector<uint32_t> AudioManager::s_freeInstanceIndices;
@@ -101,9 +119,15 @@ namespace Index {
 		}
 		s_RootPath = audioDir;
 
-		ma_result result = ma_engine_init(nullptr, &s_Engine);
-		if (result != MA_SUCCESS) {
-			IDX_CORE_ERROR("[{}] Failed to initialize miniaudio engine. Error: {}", ErrorCodeToString(IndexErrorCode::LoadFailed), static_cast<int>(result));
+		// Install the default backend if no package overrode it via SetBackend().
+		if (!s_Backend) {
+			s_Backend = std::make_unique<MiniaudioBackend>();
+		}
+
+		if (!s_Backend->Initialize()) {
+			IDX_CORE_ERROR("[{}] AudioManager: backend Initialize failed",
+				ErrorCodeToString(IndexErrorCode::LoadFailed));
+			s_Backend.reset();
 			return false;
 		}
 
@@ -132,8 +156,12 @@ namespace Index {
 		s_soundsPlayedThisFrame = 0;
 		s_soundQueue = {};
 		s_audioPathToHandle.clear();
+		s_audioRawPathToHandle.clear();
 
-		ma_engine_uninit(&s_Engine);
+		if (s_Backend) {
+			s_Backend->Shutdown();
+			s_Backend.reset();
+		}
 		s_IsInitialized = false;
 	}
 
@@ -181,9 +209,20 @@ namespace Index {
 		uint32_t requeueGuard = 0;
 		const uint32_t requeueGuardLimit = static_cast<uint32_t>(s_soundQueue.size()) + 16;
 
+		// Local in-flight counter — added to s_activeSoundCount *only for the loop
+		// bound check*. We deliberately do NOT mutate s_activeSoundCount here:
+		// RecalculateActiveSoundCount (called once per Update tick) is the single
+		// source of truth, since incrementing here would drift under any unmodelled
+		// lifecycle event (failed start that half-allocated a slot, mid-frame
+		// stop race with the audio thread, RecycleSoundInstance that bypassed
+		// CleanupFinishedSounds). The recalc is O(MAX_CONCURRENT_SOUNDS)=64 —
+		// cheap enough to stay authoritative, and we just avoid burning it
+		// per-iteration of the queue drain.
+		uint32_t inFlightStarts = 0;
+
 		while (!s_soundQueue.empty() && startsThisCall < maxStartsPerFrame &&
 			s_soundsPlayedThisFrame < s_maxSoundsPerFrame &&
-			s_activeSoundCount < s_maxConcurrentSounds) {
+			(s_activeSoundCount + inFlightStarts) < s_maxConcurrentSounds) {
 
 			if (++requeueGuard > requeueGuardLimit) break;
 
@@ -203,16 +242,7 @@ namespace Index {
 			if (StartOneShotInstance(request.Handle, request.Volume)) {
 				s_soundsPlayedThisFrame++;
 				ThrottleSound(request.Handle);
-				// Don't ++s_activeSoundCount here. The increment-and-decrement-per-call
-				// pattern drifts under any unmodelled lifecycle event (failed start that
-				// half-allocated a slot, sound-stopped-mid-frame race with the audio
-				// thread, RecycleSoundInstance that bypassed CleanupFinishedSounds).
-				// RecalculateActiveSoundCount is O(MAX_CONCURRENT_SOUNDS) = 64 — cheap
-				// enough to be the single source of truth. The next Update tick refreshes
-				// the count via Update -> CleanupFinishedSounds -> RecalculateActiveSoundCount.
-				// Update the in-flight count locally so the next loop iteration's bound
-				// check stays accurate within this call.
-				RecalculateActiveSoundCount();
+				inFlightStarts++;
 				startsThisCall++;
 			}
 		}
@@ -259,14 +289,26 @@ namespace Index {
 		}
 
 		const std::string requestedPath(path);
+
+		// Raw-string fast path: hot scripts re-issue LoadAudio for the same
+		// literal path many times. Probe the raw cache before touching the
+		// filesystem so cache-hit cost is one hash lookup, not three syscalls.
+		if (const AudioHandle existing = FindAudioByRawPath(requestedPath); existing.IsValid()) {
+			return existing;
+		}
+
 		const std::string fullpath = NormalizeAudioPath(std::filesystem::path(requestedPath));
 		if (const AudioHandle existing = FindAudioByPath(fullpath); existing.IsValid()) {
+			// Promote into the raw-cache so the next LoadAudio for this exact
+			// input string skips normalization too.
+			s_audioRawPathToHandle[requestedPath] = existing.GetHandle();
 			return existing;
 		}
 
 		const std::string rootPath = NormalizeAudioPath(std::filesystem::path(Path::Combine(s_RootPath, requestedPath)));
 		if (!rootPath.empty() && rootPath != fullpath) {
 			if (const AudioHandle existing = FindAudioByPath(rootPath); existing.IsValid()) {
+				s_audioRawPathToHandle[requestedPath] = existing.GetHandle();
 				return existing;
 			}
 		}
@@ -288,6 +330,7 @@ namespace Index {
 		}
 		s_audioMap[id] = std::move(audio);
 		s_audioPathToHandle[resolvedPath] = id;
+		s_audioRawPathToHandle[requestedPath] = id;
 		return AudioHandle(id);
 	}
 
@@ -297,22 +340,24 @@ namespace Index {
 			return AudioHandle();
 		}
 
-		if (!AssetRegistry::IsAudio(assetId)) {
+		// Optimistic path: probe both predicates first, only burn a full
+		// AssetRegistry Sync (filesystem scan) if either misses. Collapses
+		// two MarkDirty + Sync cycles into at most one, so a successful
+		// lookup costs zero filesystem hits.
+		bool isAudio = AssetRegistry::IsAudio(assetId);
+		std::string path = isAudio ? AssetRegistry::ResolvePath(assetId) : std::string{};
+
+		if (!isAudio || path.empty()) {
 			AssetRegistry::MarkDirty();
 			AssetRegistry::Sync();
-			if (!AssetRegistry::IsAudio(assetId)) {
+			isAudio = AssetRegistry::IsAudio(assetId);
+			if (!isAudio) {
 				return AudioHandle();
 			}
-		}
-
-		std::string path = AssetRegistry::ResolvePath(assetId);
-		if (path.empty()) {
-			AssetRegistry::MarkDirty();
-			AssetRegistry::Sync();
 			path = AssetRegistry::ResolvePath(assetId);
-		}
-		if (path.empty()) {
-			return AudioHandle();
+			if (path.empty()) {
+				return AudioHandle();
+			}
 		}
 
 		return LoadAudio(path);
@@ -371,6 +416,7 @@ namespace Index {
 
 		s_audioMap.clear();
 		s_audioPathToHandle.clear();
+		s_audioRawPathToHandle.clear();
 		s_nextHandle = 1;
 		s_soundLimits.clear();
 		s_soundQueue = {};
@@ -502,8 +548,8 @@ namespace Index {
 		IDX_CORE_ASSERT(Application::IsMainThread(), IndexErrorCode::Undefined, "AudioManager::SetMasterVolume must be called on the main thread");
 		s_masterVolume = Max(0.0f, volume);
 
-		if (s_IsInitialized) {
-			ma_engine_set_volume(&s_Engine, s_masterVolume);
+		if (s_IsInitialized && s_Backend) {
+			s_Backend->SetMasterVolume(s_masterVolume);
 		}
 	}
 
@@ -526,10 +572,13 @@ namespace Index {
 
 		if (StartOneShotInstance(audioHandle, volume)) {
 			s_soundsPlayedThisFrame++;
-			// See ProcessSoundQueue — RecalculateActiveSoundCount() is the single
-			// source of truth so the count can't drift across recycle/stop paths
-			// that skip a paired decrement.
-			RecalculateActiveSoundCount();
+			// Don't recalc here. The next Update tick's
+			// CleanupFinishedSounds + RecalculateActiveSoundCount pair is
+			// the single source of truth (see ProcessSoundQueue). A local
+			// increment would risk drift, and the once-per-frame recalc
+			// is cheap enough to handle this slot count too — keeping it
+			// out of the hot PlayOneShot path matters when scripts fire
+			// many one-shots in a single frame.
 			ThrottleSound(audioHandle);
 		}
 	}
@@ -539,7 +588,11 @@ namespace Index {
 			return false;
 		}
 
-		ma_resource_manager* resourceManager = ma_engine_get_resource_manager(&s_Engine);
+		ma_engine* engine = GetActiveMiniaudioEngine();
+		if (!engine) {
+			return false;
+		}
+		ma_resource_manager* resourceManager = ma_engine_get_resource_manager(engine);
 		if (!resourceManager) {
 			return false;
 		}
@@ -565,8 +618,10 @@ namespace Index {
 			return;
 		}
 
-		if (ma_resource_manager* resourceManager = ma_engine_get_resource_manager(&s_Engine)) {
-			ma_resource_manager_unregister_data(resourceManager, audio.GetFilepath().c_str());
+		if (ma_engine* engine = GetActiveMiniaudioEngine()) {
+			if (ma_resource_manager* resourceManager = ma_engine_get_resource_manager(engine)) {
+				ma_resource_manager_unregister_data(resourceManager, audio.GetFilepath().c_str());
+			}
 		}
 	}
 
@@ -621,6 +676,26 @@ namespace Index {
 		return AudioHandle();
 	}
 
+	AudioHandle AudioManager::FindAudioByRawPath(const std::string& rawPath) {
+		// Fast-path cache probe keyed on whatever the caller handed in.
+		// Skips NormalizeAudioPath (3–4 syscalls) on repeated loads of the
+		// same string. The raw key is not authoritative — if the entry is
+		// stale (audio was unloaded), erase it and let the caller fall
+		// through to the normalized lookup.
+		auto it = s_audioRawPathToHandle.find(rawPath);
+		if (it == s_audioRawPathToHandle.end()) {
+			return AudioHandle();
+		}
+
+		auto audioIt = s_audioMap.find(it->second);
+		if (audioIt != s_audioMap.end() && audioIt->second) {
+			return AudioHandle(it->second);
+		}
+
+		s_audioRawPathToHandle.erase(it);
+		return AudioHandle();
+	}
+
 	uint32_t AudioManager::CreateSoundInstance(const AudioHandle& audioHandle) {
 		if (!audioHandle.IsValid()) {
 			return 0;
@@ -628,6 +703,11 @@ namespace Index {
 
 		const Audio* audio = GetAudio(audioHandle);
 		if (!audio || !audio->IsLoaded()) {
+			return 0;
+		}
+
+		ma_engine* engine = GetActiveMiniaudioEngine();
+		if (!engine) {
 			return 0;
 		}
 
@@ -653,7 +733,7 @@ namespace Index {
 		SoundInstance& instance = *s_soundInstances[index];
 		const ma_uint32 dataSourceFlags = MA_RESOURCE_MANAGER_DATA_SOURCE_FLAG_DECODE;
 		ma_result result = ma_resource_manager_data_source_init(
-			ma_engine_get_resource_manager(&s_Engine),
+			ma_engine_get_resource_manager(engine),
 			audio->GetFilepath().c_str(),
 			dataSourceFlags,
 			nullptr,
@@ -682,7 +762,7 @@ namespace Index {
 		}
 
 		instance.HasDataSource = true;
-		result = ma_sound_init_from_data_source(&s_Engine, &instance.DataSource, 0, nullptr, &instance.Sound);
+		result = ma_sound_init_from_data_source(engine, &instance.DataSource, 0, nullptr, &instance.Sound);
 		if (result != MA_SUCCESS) {
 			ma_resource_manager_data_source_uninit(&instance.DataSource);
 			instance.HasDataSource = false;

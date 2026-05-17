@@ -623,6 +623,9 @@ namespace Index {
 			if (extension == ".ttf" || extension == ".otf") {
 				return AssetKind::Font;
 			}
+			if (extension == ".wgsl" || extension == ".vs" || extension == ".fs" || extension == ".vert" || extension == ".frag" || extension == ".glsl") {
+				return AssetKind::Shader;
+			}
 			if (!extension.empty()) {
 				return AssetKind::Other;
 			}
@@ -632,7 +635,43 @@ namespace Index {
 
 		static uint64_t ReadMetaId(const std::string& assetPath) {
 			const std::string metaPath = GetMetaPath(assetPath);
+
+			// Fingerprint the meta file by (mtime, size). On Rebuild we
+			// otherwise re-read + re-JSON-parse every .meta on disk every
+			// time the dirty flag flips — for a 1000-asset project that's
+			// ~1000 file reads and 1000 parses per dirty cycle. Cache the
+			// extracted AssetGUID and skip the read/parse whenever the
+			// fingerprint matches the prior call.
+			std::error_code ec;
+			std::filesystem::file_time_type mtime{};
+			std::uintmax_t size = 0;
+			bool fingerprintOk = false;
+			if (std::filesystem::exists(metaPath, ec) && !ec) {
+				mtime = std::filesystem::last_write_time(metaPath, ec);
+				if (!ec) {
+					size = std::filesystem::file_size(metaPath, ec);
+					fingerprintOk = !ec;
+				}
+			}
+			if (!fingerprintOk) {
+				// Fall through to the slow path — either the meta doesn't
+				// exist (early return below) or stat failed, in which case
+				// re-parsing the contents (if any) is the safer choice.
+			}
+			else {
+				const auto cacheIt = s_MetaIdCache.find(metaPath);
+				if (cacheIt != s_MetaIdCache.end()
+					&& cacheIt->second.Mtime == mtime
+					&& cacheIt->second.Size == size)
+				{
+					return cacheIt->second.AssetGuid;
+				}
+			}
+
 			if (!File::Exists(metaPath)) {
+				if (fingerprintOk) {
+					s_MetaIdCache.erase(metaPath);
+				}
 				return 0;
 			}
 
@@ -650,16 +689,23 @@ namespace Index {
 				return 0;
 			}
 
+			uint64_t parsed = 0;
 			if (uuidValue->IsString()) {
 				try {
-					return static_cast<uint64_t>(std::stoull(uuidValue->AsStringOr()));
+					parsed = static_cast<uint64_t>(std::stoull(uuidValue->AsStringOr()));
 				}
 				catch (...) {
-					return 0;
+					parsed = 0;
 				}
 			}
+			else {
+				parsed = uuidValue->AsUInt64Or(0);
+			}
 
-			return uuidValue->AsUInt64Or(0);
+			if (fingerprintOk && parsed != 0) {
+				s_MetaIdCache[metaPath] = MetaIdCacheEntry{ mtime, size, parsed };
+			}
+			return parsed;
 		}
 
 		static void WriteMeta(const std::string& assetPath, uint64_t id, AssetKind kind) {
@@ -678,6 +724,7 @@ namespace Index {
 			case AssetKind::Prefab: return "Prefab";
 			case AssetKind::Script: return "Script";
 			case AssetKind::Font: return "Font";
+			case AssetKind::Shader: return "Shader";
 			case AssetKind::Other: return "Other";
 			case AssetKind::Unknown:
 			default:
@@ -697,6 +744,18 @@ namespace Index {
 		inline static std::string s_TrackedRoot;
 		inline static std::unordered_map<uint64_t, Record> s_IdToRecord;
 		inline static std::unordered_map<std::string, uint64_t> s_PathToId;
+
+		// Per-meta-file fingerprint cache. Lets ReadMetaId skip the
+		// File::ReadAllText + JSON parse pair when the meta file's
+		// (mtime, size) match the previously-observed pair. Sized
+		// alongside s_IdToRecord because there's one entry per indexed
+		// asset.
+		struct MetaIdCacheEntry {
+			std::filesystem::file_time_type Mtime{};
+			std::uintmax_t Size = 0;
+			uint64_t AssetGuid = 0;
+		};
+		inline static std::unordered_map<std::string, MetaIdCacheEntry> s_MetaIdCache;
 		// GUIDs where ResolvePath already failed and a Rebuild() didn't
 		// recover the path. Cleared on MarkDirty() and Rebuild() so that
 		// FileWatcher events let recovered files re-resolve.

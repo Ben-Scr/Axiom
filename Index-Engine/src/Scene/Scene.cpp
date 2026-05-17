@@ -258,8 +258,125 @@ namespace Index {
 		return Entity(entityHandle, *this);
 	}
 
+	Scene::LoadGuard::LoadGuard(Scene& scene)
+		: m_Scene(scene)
+		// Nested-guard collapse: only the outermost guard flips the flag and
+		// is responsible for clearing it on destruction. Inner guards
+		// observe the flag is already true and become no-ops — this makes
+		// it safe for a bulk-loader (e.g. ECB playback) to call into
+		// another bulk-loader (e.g. prefab instantiation) without worrying
+		// about who owns the suppression scope.
+		, m_OwnsSuppression(!scene.m_SuppressConstructHooks)
+	{
+		if (m_OwnsSuppression) {
+			m_Scene.m_SuppressConstructHooks = true;
+		}
+	}
+
+	Scene::LoadGuard::~LoadGuard() {
+		if (!m_OwnsSuppression) {
+			return;
+		}
+		// Clear the flag FIRST so the recorded hooks run their normal
+		// body when we re-invoke them below (each hook short-circuits
+		// when m_SuppressConstructHooks is true).
+		m_Scene.m_SuppressConstructHooks = false;
+
+		if (m_Scene.m_DeferredConstructHooks.empty()) {
+			return;
+		}
+
+		// Move-out so a hook body that itself triggers a new construct
+		// (during the flush) is appended to a fresh vector instead of
+		// silently mutating the one we're iterating. The flushing latch
+		// also keeps any such nested constructs on the "run immediately"
+		// path even if downstream code spins up a new LoadGuard
+		// transiently.
+		auto hooks = std::move(m_Scene.m_DeferredConstructHooks);
+		m_Scene.m_FlushingDeferredHooks = true;
+		for (auto& h : hooks) {
+			(m_Scene.*h.fn)(m_Scene.m_Registry, h.entity);
+		}
+		m_Scene.m_FlushingDeferredHooks = false;
+	}
+
+	void Scene::ReserveForLoadRuntime(std::size_t entityCount,
+		std::span<const std::pair<uint32_t, std::size_t>> /*perTypeCounts*/)
+	{
+		// Entity pool + identity maps — the dominant reservation savings.
+		// EnTT grows the entity pool by powers of two and rehashes the
+		// underlying vector on every threshold, so reserving up front
+		// collapses ~log2(N) pool reallocations into one.
+		m_Registry.storage<EntityHandle>().reserve(entityCount);
+		m_RuntimeIdToEntity.reserve(m_RuntimeIdToEntity.size() + entityCount);
+		m_SceneGuidToEntity.reserve(m_SceneGuidToEntity.size() + entityCount);
+		// NOTE: per-component-storage reservation is intentionally omitted
+		// here. EnTT exposes typed storages via its compile-time type_hash
+		// table, but our stable u32 component ID is registry-private and
+		// doesn't map cleanly back to entt::id_type. The component storages
+		// still grow on demand during emplace — O(log N) reallocations
+		// versus the entity pool's single growth, which is negligible
+		// compared to the eliminated P/Invoke and string-marshal overhead.
+		// The templated Scene::ReserveForLoad<T...> overload remains the
+		// statically-typed fast path for the scene loader.
+	}
+
+	void Scene::SetEntityMetaDataNoFlags(
+		EntityHandle entity,
+		EntityOrigin origin,
+		AssetGUID prefabGuid,
+		AssetGUID sceneGuid,
+		EntityID runtimeId)
+	{
+		// SetEntityMetaData only pulses m_Dirty for non-Runtime origin
+		// while NOT playing — i.e. the editor case. For ECB playback at
+		// runtime (the dominant case), origin == Runtime and IsPlaying()
+		// is true, so the regular function never touches the flags.
+		// The "NoFlags" suffix is a contract guarantee for callers — we
+		// snapshot the flags around the inner call and restore them, so
+		// the function is a no-op on m_Dirty / m_UIDirty regardless of
+		// origin or play state. End-of-batch MarkAllDirtyOnce() is the
+		// authoritative pulse.
+		const bool savedDirty = m_Dirty;
+		const bool savedUIDirty = m_UIDirty;
+		SetEntityMetaData(entity, origin, prefabGuid, sceneGuid, runtimeId);
+		m_Dirty = savedDirty;
+		m_UIDirty = savedUIDirty;
+	}
+
+	void Scene::MarkAllDirtyOnce()
+	{
+		// Single end-of-batch pulse for editor save-state and UI rebuild.
+		// Mirrors the two-flag pattern used by CreateEntityHandle, but
+		// without the per-entity edit-mode guard — the bulk caller (ECB
+		// playback, scene deserialize) has already decided to pulse once
+		// for the whole batch.
+		m_Dirty = true;
+		m_UIDirty = true;
+	}
+
+	void Scene::CreateEntitiesBulk(std::size_t n, std::span<EntityHandle> out) {
+		// Caller-allocates so we don't smuggle a heap allocation into the
+		// loader's hot path — the loader typically reuses one buffer across
+		// the entire load. Short-circuit the zero case so EnTT's
+		// range-create isn't asked to operate on an empty iterator pair.
+		if (n == 0) {
+			return;
+		}
+		IDX_CORE_ASSERT(out.size() >= n, IndexErrorCode::InvalidValue,
+			"Scene::CreateEntitiesBulk: output span is smaller than the requested count");
+		// EnTT's range-create writes one entity per iterator slot. Reserving
+		// up front bounds the entity pool's growth to a single allocation
+		// even when this is the first batch on a fresh scene.
+		m_Registry.storage<EntityHandle>().reserve(
+			m_Registry.storage<EntityHandle>().size() + n);
+		m_Registry.create(out.begin(), out.begin() + n);
+		m_EntityCount += n;
+	}
+
 	EntityHandle Scene::CreateEntityHandle(EntityOrigin origin, AssetGUID prefabGuid, AssetGUID sceneGuid, EntityID runtimeId) {
 		EntityHandle entityHandle = m_Registry.create();
+		++m_EntityCount;
 		SetEntityMetaData(entityHandle, origin, prefabGuid, sceneGuid, runtimeId);
 		if (origin != EntityOrigin::Runtime && !Application::GetIsPlaying()) {
 			m_Dirty = true;
@@ -899,6 +1016,9 @@ namespace Index {
 		TrackEntityDestruction(nativeEntity);
 		m_Registry.destroy(nativeEntity);
 		UntrackEntityDestruction(nativeEntity);
+		if (m_EntityCount > 0) {
+			--m_EntityCount;
+		}
 	}
 
 	void Scene::TrackEntityDestruction(EntityHandle entity) {
@@ -1134,6 +1254,17 @@ namespace Index {
 
 	void Scene::OnTransform2DComponentConstruct(entt::registry& registry, EntityHandle entity)
 	{
+		// LoadGuard suppression: idempotent hook (binds owner + flips dirty
+		// flags, doesn't read siblings), so deferring it during ECB playback
+		// is safe — at flush time the same body runs with no observable
+		// difference. The suppression check itself is the entire deferral
+		// surface for this hook; the flush loop in ~LoadGuard re-invokes
+		// this same member function with the flag cleared, which then runs
+		// the body below normally.
+		if (m_SuppressConstructHooks) {
+			m_DeferredConstructHooks.push_back({ &Scene::OnTransform2DComponentConstruct, entity });
+			return;
+		}
 		auto& transform = registry.get<Transform2DComponent>(entity);
 		transform.BindOwner(this, entity);
 		transform.MarkDirty();
@@ -1146,8 +1277,15 @@ namespace Index {
 		MarkStaticRenderDataDirty();
 	}
 
-	void Scene::OnSpriteRendererComponentConstruct(entt::registry&, EntityHandle)
+	void Scene::OnSpriteRendererComponentConstruct(entt::registry&, EntityHandle entity)
 	{
+		// LoadGuard suppression: stateless hook (only bumps a version
+		// counter), safe to defer to the end of an ECB / load batch so a
+		// 1 000-entity spawn pulses the version once instead of 1 000 times.
+		if (m_SuppressConstructHooks) {
+			m_DeferredConstructHooks.push_back({ &Scene::OnSpriteRendererComponentConstruct, entity });
+			return;
+		}
 		MarkStaticRenderDataDirty();
 	}
 
@@ -1291,10 +1429,21 @@ namespace Index {
 		}
 		else {
 			boxCollider2D.Destroy();
-			// Body ownership invariant (mirror): if some other path leaves a stale
-			// Rigidbody2D adjacent to a destroyed collider-owned body, zero its mirror.
-			if (registry.all_of<Rigidbody2DComponent>(entity)) {
-				registry.get<Rigidbody2DComponent>(entity).m_BodyId = b2_nullBodyId;
+		}
+		// Body ownership invariant (mirror): if a Rigidbody2D survives the
+		// collider's destroy hook (it was the body owner above, or — for the
+		// belt-and-braces case below — the registry transiently holds both
+		// components while teardown is in flight), make sure no stale b2BodyId
+		// is left pointing at a slot Box2D may recycle. Doing this AFTER
+		// boxCollider2D.Destroy()/DestroyShape() means we zero the mirror
+		// regardless of which branch ran. Previously this clear lived inside
+		// the `else` and tested all_of<Rigidbody2DComponent> a second time —
+		// the inner predicate was always false in that branch, so the guard
+		// the author documented was statically dead.
+		if (registry.all_of<Rigidbody2DComponent>(entity)) {
+			auto& rb = registry.get<Rigidbody2DComponent>(entity);
+			if (!b2Body_IsValid(rb.m_BodyId)) {
+				rb.m_BodyId = b2_nullBodyId;
 			}
 		}
 	}
@@ -1490,8 +1639,14 @@ namespace Index {
 		}
 	}
 
-	void Scene::OnStaticTagConstruct(entt::registry&, EntityHandle)
+	void Scene::OnStaticTagConstruct(entt::registry&, EntityHandle entity)
 	{
+		// LoadGuard suppression: stateless hook — defer for the same reason
+		// as the sprite renderer hook above.
+		if (m_SuppressConstructHooks) {
+			m_DeferredConstructHooks.push_back({ &Scene::OnStaticTagConstruct, entity });
+			return;
+		}
 		MarkStaticRenderDataDirty();
 	}
 
@@ -1504,6 +1659,12 @@ namespace Index {
 	}
 
 	void Scene::OnParticleSystem2DComponentConstruct(entt::registry& registry, EntityHandle entity) {
+		// LoadGuard suppression: only touches own component fields, no
+		// sibling reads — safe to defer.
+		if (m_SuppressConstructHooks) {
+			m_DeferredConstructHooks.push_back({ &Scene::OnParticleSystem2DComponentConstruct, entity });
+			return;
+		}
 		auto& ps = registry.get<ParticleSystem2DComponent>(entity);
 		ps.m_EmitterScene = this;
 		ps.m_EmitterEntity = entity;

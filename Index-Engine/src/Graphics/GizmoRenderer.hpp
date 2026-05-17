@@ -5,9 +5,10 @@
 
 #include <glm/glm.hpp>
 
-#include <memory>
-#include <vector>
 #include <cstdint>
+#include <memory>
+#include <span>
+#include <vector>
 
 namespace Index {
     class Camera2DComponent;
@@ -39,14 +40,16 @@ namespace Index {
         static void RenderWithVP(const glm::mat4& vp, GizmoLayerMask layerMask = GizmoLayerMask::All);
 
     private:
-        static void BuildGeometry(GizmoLayerMask layerMask);
+        // Returned span is backed by FrameArenas::Frame() and is invalidated
+        // by the next Application::EndFrame. Do not cache across frames.
+        static std::span<const PosColorVertex> BuildGeometry(GizmoLayerMask layerMask);
         // Draw the built geometry through `vp`. No fallback to a global
         // camera — if you don't have a VP, you don't have a draw.
-        static void FlushGizmosImpl(const glm::mat4& vp);
+        static void FlushGizmosImpl(const glm::mat4& vp,
+            std::span<const PosColorVertex> verts);
 
         static bool m_IsInitialized;
         static std::unique_ptr<Shader> m_GizmoShader;
-        static std::vector<PosColorVertex> m_GizmoVertices;
         // 32-bit indices: Gizmo::s_MaxVertices is 100k, well above the uint16_t
         // ceiling of 65535. The previous uint16_t buffer silently truncated
         // indices 65536+ down to 0+, aliasing them onto early vertices and

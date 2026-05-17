@@ -8,7 +8,24 @@
 
 #include <cstdio>
 
-#include "Components/Components.hpp"
+#include "Components/Forward.hpp"
+#include "Components/General/General.hpp"
+#include "Components/UI/UI.hpp"
+#include "Components/Tags.hpp"
+#include "Components/Audio/AudioSourceComponent.hpp"
+#include "Scripting/ScriptComponent.hpp"
+#include "Components/Graphics/SpriteRendererComponent.hpp"
+#include "Components/Graphics/ImageComponent.hpp"
+#include "Components/Graphics/Camera2DComponent.hpp"
+#include "Components/Graphics/ParticleSystem2DComponent.hpp"
+#include "Components/Graphics/TextRendererComponent.hpp"
+#include "Components/Physics/BoxCollider2DComponent.hpp"
+#include "Components/Physics/CircleCollider2DComponent.hpp"
+#include "Components/Physics/PolygonCollider2DComponent.hpp"
+#include "Components/Physics/Rigidbody2DComponent.hpp"
+#include "Components/Physics/FastBody2DComponent.hpp"
+#include "Components/Physics/FastBoxCollider2DComponent.hpp"
+#include "Components/Physics/FastCircleCollider2DComponent.hpp"
 #include "Core/Application.hpp"
 #include "Core/Window.hpp"
 #include "Events/EventDispatcher.hpp"
@@ -36,6 +53,7 @@
 #include "Packages/GitHubSource.hpp"
 #include "Editor/ApplicationEditorAccess.hpp"
 #include "Editor/EditorComponentRegistration.hpp"
+#include "Editor/EditorPreferences.hpp"
 #include "Editor/ExternalEditor.hpp"
 #include "Inspector/ReferencePicker.hpp"
 #include "Gui/AddComponentPopup.hpp"
@@ -339,6 +357,38 @@ namespace Index {
 		// before a project is loaded is fine.
 		m_ProfilerPanel.Initialize();
 
+		// User-scoped preferences (theme, editor font, asset-browser /
+		// auto-save toggles). Load BEFORE ApplyTheme so the chosen mode
+		// is honored on the first frame; the ImGuiContextLayer ran its
+		// initial ApplyIndexTheme during its own OnAttach (before this
+		// layer's OnAttach), so a subsequent ApplyTheme here just reskins
+		// the already-initialized style.
+		EditorPreferences::Load();
+		EditorPreferences::ApplyTheme();
+		m_EditorPreferencesPanel.Initialize();
+
+		// Legacy-project migration: pre-2026-05 index-project.json files
+		// stored ShowFileExtensions / AutoSaveScenes / AutoSaveIntervalSeconds
+		// inline. Seed EditorPreferences from those values on a fresh
+		// install (the user has no prefs file yet, so we can't be clobbering
+		// anything). Subsequent project opens skip migration so we don't
+		// trample the user's choices. The next IndexProject::Save() drops
+		// the legacy fields regardless.
+		if (EditorPreferences::WasFreshlyCreated()) {
+			if (IndexProject* project = ProjectManager::GetCurrentProject()) {
+				const auto& lp = project->LegacyEditorPrefs;
+				if (lp.ShowFileExtensionsPresent) {
+					EditorPreferences::SetShowFileExtensions(lp.ShowFileExtensions);
+				}
+				if (lp.AutoSaveScenesPresent) {
+					EditorPreferences::SetAutoSaveScenes(lp.AutoSaveScenes);
+				}
+				if (lp.AutoSaveIntervalSecondsPresent) {
+					EditorPreferences::SetAutoSaveIntervalSeconds(lp.AutoSaveIntervalSeconds);
+				}
+			}
+		}
+
 		ClearLogEntries();
 		m_LogDispatchState = std::make_shared<LogDispatchState>();
 		std::weak_ptr<LogDispatchState> weakLogDispatchState = m_LogDispatchState;
@@ -378,6 +428,7 @@ namespace Index {
 	void ImGuiEditorLayer::OnDetach(Application& app) {
 		(void)app;
 		m_ProfilerPanel.Shutdown();
+		m_EditorPreferencesPanel.Shutdown();
 		ApplicationEditorAccess::SetGameInputEnabled(true);
 		Gizmo::SetShowInRuntime(true);
 		if (m_LogSubscriptionId.value != 0) {
@@ -440,6 +491,10 @@ namespace Index {
 						AssetRegistry::MarkDirty();
 						AssetRegistry::Sync();
 						m_AssetBrowser.RequestRefresh();
+						// Clear thumbnail tile cache too — otherwise the asset
+						// browser keeps showing the pre-edit file icon until
+						// LRU evicts the stale entry.
+						m_AssetBrowser.InvalidateAllThumbnails();
 						ClearPreviewTextureCache();
 						if (reloaded > 0) {
 							IDX_INFO_TAG("Editor", "Hot-reloaded {} texture(s)", reloaded);
@@ -597,6 +652,13 @@ namespace Index {
 		if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_V, false)) {
 			PasteEntities(shortcutScene);
 		}
+		// Esc cancels a pending Cut: entities stay alive and un-dim. The
+		// clipboard JSON itself is left intact so Ctrl+V still pastes a
+		// copy, matching the behaviour of typical OS file managers.
+		if (!m_CutEntities.empty() && ImGui::IsKeyPressed(ImGuiKey_Escape, false)
+			&& m_RenamingEntity == entt::null) {
+			m_CutEntities.clear();
+		}
 		if (!hasEntitySelection) {
 			return;
 		}
@@ -639,8 +701,11 @@ namespace Index {
 	}
 
 	void ImGuiEditorLayer::RunAutoSaveTick(Application& app, float dt) {
+		// Auto-save toggle + interval live on EditorPreferences (user-
+		// scoped) since 2026-05; the project pointer is only needed
+		// below to resolve the on-disk path for the active scene.
 		IndexProject* project = ProjectManager::GetCurrentProject();
-		if (!project || !project->AutoSaveScenes) {
+		if (!project || !EditorPreferences::GetAutoSaveScenes()) {
 			m_AutoSaveAccumulator = 0.0f;
 			return;
 		}
@@ -679,7 +744,7 @@ namespace Index {
 		}
 
 		m_AutoSaveAccumulator += dt;
-		const float interval = std::max(5.0f, project->AutoSaveIntervalSeconds);
+		const float interval = std::max(5.0f, EditorPreferences::GetAutoSaveIntervalSeconds());
 		if (m_AutoSaveAccumulator < interval) {
 			return;
 		}
@@ -729,24 +794,6 @@ namespace Index {
 	}
 
 	void ImGuiEditorLayer::RenderMainMenu(Scene& scene) {
-		// Layout preset state. Kept TU-static (not in the layer header)
-		// so the editor's ImGuiEditorLayer.hpp surface doesn't grow for
-		// what is purely a popup-internal scratch area. `Application::
-		// Reload` already resets editor TU-static state on its restart
-		// path, so this won't outlive a reload.
-		static char s_SaveLayoutAsBuffer[64] = {};
-		static std::string s_PendingDeleteLayoutName;
-		// Deferred OpenPopup triggers. ImGui::OpenPopup hashes the
-		// popup id against the *current window's* id stack — which
-		// inside a BeginMenu/MenuItem is the menu's own pop-up window,
-		// not the dockspace. The matching BeginPopupModal runs at
-		// dockspace scope after EndMenuBar and never sees the popup
-		// because the ids don't match. Setting a flag here and calling
-		// OpenPopup at dockspace scope below (where BeginPopupModal
-		// also lives) keeps both ends in the same id namespace.
-		static bool s_OpenSaveLayoutAsRequest = false;
-		static bool s_OpenDeleteLayoutRequest = false;
-
 		if (!ImGui::BeginMenuBar()) {
 			return;
 		}
@@ -761,45 +808,6 @@ namespace Index {
 					project->LastOpenedScene = scene.GetName();
 					project->Save();
 				}
-			}	
-
-			if (ImGui::BeginMenu("Layout")) {
-				if (ImGui::MenuItem("Save Layout As...")) {
-					s_SaveLayoutAsBuffer[0] = '\0';
-					s_OpenSaveLayoutAsRequest = true;
-				}
-
-				const std::vector<std::string> presets =
-					ImGuiContextLayer::ListLayoutPresets();
-
-				// "Load Layout" / "Delete Layout" submenus are disabled
-				// when there are no presets so the dropdown still shows
-				// (with a greyed-out arrow) — clearer than hiding the
-				// item, which would silently change the menu shape.
-				if (ImGui::BeginMenu("Load Layout", !presets.empty())) {
-					for (const std::string& name : presets) {
-						if (ImGui::MenuItem(name.c_str())) {
-							ImGuiContextLayer::LoadLayoutPreset(name);
-						}
-					}
-					ImGui::EndMenu();
-				}
-
-				if (ImGui::BeginMenu("Delete Layout", !presets.empty())) {
-					for (const std::string& name : presets) {
-						if (ImGui::MenuItem(name.c_str())) {
-							s_PendingDeleteLayoutName = name;
-							s_OpenDeleteLayoutRequest = true;
-						}
-					}
-					ImGui::EndMenu();
-				}
-
-				ImGui::Separator();
-				if (ImGui::MenuItem("Reset Layout")) {
-					ImGuiContextLayer::ResetLayoutToBundledDefault();
-				}
-				ImGui::EndMenu();
 			}
 
 			if (ImGui::MenuItem("Quit")) {
@@ -826,6 +834,9 @@ namespace Index {
 					}
 				}
 			}
+			if (ImGui::MenuItem("Build Profiles…", nullptr, false, hasProject)) {
+				m_ShowBuildProfilesPanel = true;
+			}
 			// Project Settings ⇒ editor-side preferences (Asset Browser
 			// pane, Auto-Save cadence, etc.) that govern how the editor
 			// behaves in this project, NOT what gets shipped in the
@@ -843,19 +854,16 @@ namespace Index {
 				m_ShowPackageManager = true;
 			}
 
-			ExternalEditor::DetectEditors();
-			const auto& editors = ExternalEditor::GetAvailableEditors();
-			if (!editors.empty() && ImGui::BeginMenu("Script Editor")) {
-				for (int i = 0; i < static_cast<int>(editors.size()); i++) {
-					bool selected = (ExternalEditor::GetSelectedIndex() == i);
-					const std::string editorId = std::to_string(i);
-					if (ImGuiUtils::MenuItemEllipsis(editors[i].DisplayName, editorId.c_str(), nullptr, selected, true, 220.0f)) {
-						ExternalEditor::SetSelectedIndex(i);
-					}
-				}
-				ImGui::EndMenu();
-			}
+			ImGui::EndMenu();
+		}
 
+		// Edit — user-scoped editor preferences (theme, fonts, layout
+		// presets, external script editor, asset-browser / auto-save
+		// toggles). All routed through EditorPreferencesPanel.
+		if (ImGui::BeginMenu("Edit")) {
+			if (ImGui::MenuItem("Preferences...")) {
+				m_ShowEditorPreferences = true;
+			}
 			ImGui::EndMenu();
 		}
 
@@ -868,84 +876,6 @@ namespace Index {
 		}
 
 		ImGui::EndMenuBar();
-
-		// ── Layout preset modals ───────────────────────────────────
-		// Rendered inside the dockspace window (the Begin/End for
-		// the dockspace brackets this whole OnPreRender flow), after
-		// EndMenuBar so they're not nested inside the menubar context.
-		// ImGui's modal stack handles the rest — only one will be open
-		// at a time, both are dismissed on success / cancel.
-		//
-		// OpenPopup must run at the SAME id-stack scope as the matching
-		// BeginPopupModal (see deferred-trigger comment up top). Running
-		// it here, dockspace-scope, makes the popup actually appear.
-		if (s_OpenSaveLayoutAsRequest) {
-			ImGui::OpenPopup("Save Layout As");
-			s_OpenSaveLayoutAsRequest = false;
-		}
-		if (s_OpenDeleteLayoutRequest) {
-			ImGui::OpenPopup("Delete Layout");
-			s_OpenDeleteLayoutRequest = false;
-		}
-
-		if (ImGui::BeginPopupModal("Save Layout As", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-			ImGui::TextUnformatted("Save current editor layout as preset:");
-			ImGui::Spacing();
-			ImGui::SetNextItemWidth(320);
-			// Auto-focus on first frame so the user can type without
-			// reaching for the mouse.
-			if (ImGui::IsWindowAppearing()) {
-				ImGui::SetKeyboardFocusHere();
-			}
-			const bool enterPressed = ImGui::InputText("##LayoutName",
-				s_SaveLayoutAsBuffer, sizeof(s_SaveLayoutAsBuffer),
-				ImGuiInputTextFlags_EnterReturnsTrue);
-
-			const std::string nameStr(s_SaveLayoutAsBuffer);
-			const bool nameValid = ImGuiContextLayer::IsValidLayoutPresetName(nameStr);
-			if (!nameStr.empty() && !nameValid) {
-				ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f),
-					"Invalid name (no / \\ : * ? \" < > |, no trailing dot/space, max 64 chars).");
-			}
-			else {
-				ImGui::TextDisabled("Stored under %%LOCALAPPDATA%%\\Index\\Editor\\Layouts.");
-			}
-
-			ImGui::Spacing();
-			ImGui::BeginDisabled(!nameValid);
-			const bool saveClicked = ImGui::Button("Save", ImVec2(100, 0));
-			ImGui::EndDisabled();
-			if ((saveClicked || enterPressed) && nameValid) {
-				ImGuiContextLayer::SaveLayoutPreset(nameStr);
-				s_SaveLayoutAsBuffer[0] = '\0';
-				ImGui::CloseCurrentPopup();
-			}
-			ImGui::SameLine();
-			if (ImGui::Button("Cancel", ImVec2(100, 0)) ||
-				ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
-				s_SaveLayoutAsBuffer[0] = '\0';
-				ImGui::CloseCurrentPopup();
-			}
-			ImGui::EndPopup();
-		}
-
-		if (ImGui::BeginPopupModal("Delete Layout", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-			ImGui::Text("Delete layout preset '%s'?", s_PendingDeleteLayoutName.c_str());
-			ImGui::TextDisabled("This cannot be undone.");
-			ImGui::Spacing();
-			if (ImGui::Button("Delete", ImVec2(100, 0))) {
-				ImGuiContextLayer::DeleteLayoutPreset(s_PendingDeleteLayoutName);
-				s_PendingDeleteLayoutName.clear();
-				ImGui::CloseCurrentPopup();
-			}
-			ImGui::SameLine();
-			if (ImGui::Button("Cancel", ImVec2(100, 0)) ||
-				ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
-				s_PendingDeleteLayoutName.clear();
-				ImGui::CloseCurrentPopup();
-			}
-			ImGui::EndPopup();
-		}
 	}
 
 	static bool IconButton(const char* id, const char* iconName, float iconSize, const ImVec2& btnSize) {
@@ -1616,10 +1546,17 @@ namespace Index {
 			return;
 		}
 
+		// New cut supersedes the previous one: drop the prior cut marker so
+		// the previously-cut entities un-dim (they remain in the scene as
+		// before — only the visual marker goes away). Then snapshot the
+		// new selection into the clipboard and mark it as "pending move".
+		m_CutEntities.clear();
 		m_EntityClipboardJson.clear();
 		CopySelectedEntities(scene);
 		if (!m_EntityClipboardJson.empty()) {
-			DeleteSelectedEntity(scene);
+			for (EntityHandle h : selectedEntities) {
+				m_CutEntities.insert(static_cast<uint32_t>(h));
+			}
 		}
 	}
 
@@ -1682,6 +1619,22 @@ namespace Index {
 			}
 			scene.MarkDirty();
 			m_EntityOrder.clear(); m_EntityOrderDirty = true;
+
+			// Paste finalizes the move started by a Cut: destroy any
+			// originals that were marked as cut. Skips entities that
+			// already disappeared (stale handles) and entities that
+			// somehow belong to a different scene. Clears the marker
+			// either way so a follow-up Paste doesn't double-destroy.
+			if (!m_CutEntities.empty()) {
+				for (uint32_t raw : m_CutEntities) {
+					EntityHandle h = static_cast<EntityHandle>(raw);
+					if (scene.IsValid(h)) {
+						scene.DestroyEntity(h);
+					}
+				}
+				m_CutEntities.clear();
+				m_EntityOrderDirty = true;
+			}
 		}
 	}
 
@@ -2198,10 +2151,14 @@ namespace Index {
 			ClosePrefabEditing(false);
 		}
 
-		const std::string json = File::ReadAllText(path);
+		// Format-aware read: the project may be configured to serialize in
+		// binary, in which case File::ReadAllText + Json::TryParse fails at
+		// byte 0. SceneSerializerStorage::ReadRootFromFile picks the right
+		// reader for the file's actual format (same path PrefabInspector
+		// uses for asset-side editing).
 		Json::Value root;
 		std::string parseError;
-		if (!Json::TryParse(json, root, &parseError) || !root.IsObject()) {
+		if (!SceneSerializerStorage::ReadRootFromFile(path, root, &parseError) || !root.IsObject()) {
 			IDX_CORE_ERROR_TAG("PrefabEdit", "Failed to parse {}: {}", path, parseError);
 			return false;
 		}
@@ -2220,6 +2177,7 @@ namespace Index {
 		ClearEntitySelection();
 		m_EntityOrder.clear(); m_EntityOrderDirty = true;
 		m_CollapsedHierarchyEntities.clear();
+		m_CutEntities.clear();
 
 		// Snapshot the editor camera so the user returns to their previous
 		// framing on Close. We then point the camera at the prefab's root
@@ -2351,6 +2309,10 @@ namespace Index {
 		ClearEntitySelection();
 		m_EntityOrder.clear(); m_EntityOrderDirty = true;
 		m_CollapsedHierarchyEntities.clear();
+		// Drop any cut markers — they refer to entities in the detached
+		// prefab scene we're about to discard, and a leftover marker
+		// would otherwise dim a freshly-recycled handle in the next scene.
+		m_CutEntities.clear();
 		m_PrefabEditRootEntity = entt::null;
 		m_PrefabEditPath.clear();
 		m_PrefabEditDirty = false;
@@ -2373,6 +2335,16 @@ namespace Index {
 
 	Scene* ImGuiEditorLayer::GetContextScene() const {
 		if (m_PrefabEditScene) return m_PrefabEditScene.get();
+		// Last-interacted scene wins so "Create Entity" lands where the
+		// user expects with multiple scenes loaded. Fall back to the
+		// SceneManager's active scene if the cached name is empty or
+		// the scene has been unloaded since the last interaction.
+		if (!m_LastInteractedSceneName.empty()) {
+			if (auto weak = SceneManager::Get().GetLoadedScene(m_LastInteractedSceneName);
+				auto shared = weak.lock()) {
+				return shared.get();
+			}
+		}
 		return SceneManager::Get().GetActiveScene();
 	}
 
@@ -2481,9 +2453,18 @@ namespace Index {
 			const std::string fullSceneLabel = scene.IsDirty() ? scene.GetName() + " *" : scene.GetName();
 			bool sceneLabelTruncated = false;
 			const std::string sceneLabel = ImGuiUtils::Ellipsize(fullSceneLabel, ImGui::GetContentRegionAvail().x, &sceneLabelTruncated);
-			bool sceneOpen = ImGui::TreeNodeEx(sceneLabel.c_str(), sceneFlags);
+			// Use stable str_id (not the label) so the fold state survives the
+			// dirty-asterisk toggle that flips on save. Label is supplied via fmt.
+			bool sceneOpen = ImGui::TreeNodeEx("##scene_node", sceneFlags, "%s", sceneLabel.c_str());
 			if (sceneLabelTruncated && ImGui::IsItemHovered()) {
 				ImGui::SetTooltip("%s", fullSceneLabel.c_str());
+			}
+			// Any interaction with this scene's row marks it as the
+			// "create entity" target. Activation covers left-click,
+			// expand-toggle, and right-click — exactly the actions
+			// where the user is signalling "I'm working on this scene".
+			if (!IsInPrefabEditMode() && ImGui::IsItemActivated()) {
+				m_LastInteractedSceneName = scene.GetName();
 			}
 			if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
 				SelectSceneNode();
@@ -2730,13 +2711,21 @@ namespace Index {
 					// prefab-origin entities get the same color — no root vs child
 					// distinction is possible until parent/child components land.
 					bool entityIsPrefabTinted = false;
-					if (!entityIsDisabled && scene.GetEntityOrigin(entityHandle) == EntityOrigin::Prefab) {
+					if (!entityIsDisabled && !Application::GetIsPlaying() && scene.GetEntityOrigin(entityHandle) == EntityOrigin::Prefab) {
 						const uint64_t prefabGuid = static_cast<uint64_t>(scene.GetPrefabGUID(entityHandle));
 						const bool resolvable = prefabGuid != 0 && !AssetRegistry::ResolvePath(prefabGuid).empty();
 						ImGui::PushStyleColor(ImGuiCol_Text,
 							resolvable ? EditorTheme::Colors::PrefabInstance : EditorTheme::Colors::PrefabOrphan);
 						entityIsPrefabTinted = true;
 					}
+
+					// Cut clipboard marker: dim over any other tint to signal
+					// "pending move". Cleared by Paste (destroys originals)
+					// or Esc / new Cut (clears the marker only). Pushed last
+					// so it wins over disabled/prefab colors; popped first.
+					bool entityIsCutMarked = m_CutEntities.contains(static_cast<uint32_t>(entityHandle));
+					if (entityIsCutMarked)
+						ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.5f, 0.5f));
 
 					if (m_RenamingEntity == entityHandle) {
 						m_EntityRenameFrameCounter++;
@@ -2815,6 +2804,12 @@ namespace Index {
 								}
 								else {
 									SetSingleEntitySelection(entityHandle, visibleIndex);
+								}
+								// Record the owning scene so a follow-up
+								// "Create Entity" lands in the same scene the
+								// user is selecting from.
+								if (!IsInPrefabEditMode()) {
+									m_LastInteractedSceneName = scene.GetName();
 								}
 							}
 							if (m_PressedEntity == entityHandle) {
@@ -3008,6 +3003,8 @@ namespace Index {
 						ImGui::EndPopup();
 					}
 
+					if (entityIsCutMarked)
+						ImGui::PopStyleColor();
 					if (entityIsPrefabTinted)
 						ImGui::PopStyleColor();
 					if (entityIsDisabled)
@@ -3041,6 +3038,16 @@ namespace Index {
 		// Deferred scene removal (after iteration)
 		if (!sceneToRemove.empty()) {
 			ClearEntitySelection();
+			// Drop the last-interacted reference if it points at the
+			// scene about to disappear, so GetContextScene falls back
+			// to SceneManager's active scene next frame.
+			if (m_LastInteractedSceneName == sceneToRemove) {
+				m_LastInteractedSceneName.clear();
+			}
+			// Drop cut markers — without per-scene partitioning we can't
+			// tell which cut entities belonged to the removed scene, so
+			// clear the lot. Cheap and safe; the user can re-cut.
+			m_CutEntities.clear();
 			SceneManager::Get().UnloadScene(sceneToRemove);
 		}
 
@@ -3175,27 +3182,39 @@ namespace Index {
 			bool open = ImGui::CollapsingHeader((className + "##system_header").c_str(),
 				ImGuiTreeNodeFlags_AllowOverlap);
 
+			// Trailing control strip — right-aligned. All four widgets are
+			// FrameHeight-tall (Checkbox, two ArrowButtons, Button) so the
+			// row reads as a single uniform strip of square icons.
+			const ImGuiStyle& style = ImGui::GetStyle();
+			const float btnW = ImGui::GetFrameHeight();
+			const float spacing = style.ItemInnerSpacing.x;
+			const float stripW = btnW * 4.0f + spacing * 3.0f;
+			ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - stripW);
+
 			bool enabled = scene.IsGameSystemEnabled(className);
-			ImGui::SameLine();
-			if (ImGui::Checkbox("##Enabled", &enabled)) {
+			if (ImGui::Checkbox("##enabled", &enabled)) {
 				scene.SetGameSystemEnabled(className, enabled);
 			}
 			if (ImGui::IsItemHovered()) {
 				ImGui::SetTooltip("%s", enabled ? "Disable GameSystem" : "Enable GameSystem");
 			}
 
-			ImGui::SameLine();
-			if (ImGui::SmallButton("^") && i > 0) {
+			ImGui::SameLine(0, spacing);
+			if (ImGui::ArrowButton("##move_up", ImGuiDir_Up) && i > 0) {
 				scene.MoveGameSystem(i, i - 1);
 			}
 
-			ImGui::SameLine();
-			if (ImGui::SmallButton("v") && i + 1 < systems.size()) {
+			ImGui::SameLine(0, spacing);
+			if (ImGui::ArrowButton("##move_down", ImGuiDir_Down) && i + 1 < systems.size()) {
 				scene.MoveGameSystem(i, i + 1);
 			}
 
-			ImGui::SameLine();
-			if (ImGui::SmallButton("Remove")) {
+			ImGui::SameLine(0, spacing);
+			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.35f, 0.35f, 1.0f));
+			const bool remove = ImGui::Button("X", ImVec2(btnW, btnW));
+			ImGui::PopStyleColor();
+			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Remove GameSystem");
+			if (remove) {
 				scene.RemoveGameSystem(i);
 				ImGui::PopID();
 				break;
@@ -3227,6 +3246,13 @@ namespace Index {
 		if (ImGui::Button("+ Add System", ImVec2(buttonWidth, 0))) {
 			ImGui::OpenPopup("AddSystemPopup");
 			m_SystemSearchBuffer[0] = '\0';
+		}
+		// Scoped drag-drop target: only the "+ Add System" button accepts
+		// dropped scripts. Previously the whole inspector InnerRect was a
+		// drop zone which was confusing.
+		if (ImGui::BeginDragDropTarget()) {
+			acceptDroppedGameSystems();
+			ImGui::EndDragDropTarget();
 		}
 		if (!hasAvailableSystem) {
 			ImGui::EndDisabled();
@@ -3269,11 +3295,6 @@ namespace Index {
 			ImGui::EndPopup();
 		}
 
-		ImGuiWindow* window = ImGui::GetCurrentWindow();
-		if (window && ImGui::BeginDragDropTargetCustom(window->InnerRect, window->GetID("SceneSystemsDropTarget"))) {
-			acceptDroppedGameSystems();
-			ImGui::EndDragDropTarget();
-		}
 	}
 
 	void ImGuiEditorLayer::RenderInspectorPanel(Scene& scene) {
@@ -3318,6 +3339,13 @@ namespace Index {
 		}
 
 		// ── Entity Header: Name + Toggles ──────────────────
+
+		// Show selection count when multiple entities are selected, so the
+		// user immediately sees how many they're editing. Single-selection
+		// is the common case and doesn't need the label.
+		if (selectedEntities.size() > 1) {
+			ImGui::TextDisabled("(%zu)", selectedEntities.size());
+		}
 
 		// Editable Name. With multi-select, mixed names display "—" via the
 		// hint and edits propagate to all entities (creating NameComponent

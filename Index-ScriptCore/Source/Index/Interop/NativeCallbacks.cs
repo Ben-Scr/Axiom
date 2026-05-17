@@ -567,6 +567,21 @@ internal unsafe struct NativeBindingsStruct
     public delegate* unmanaged<int, void> Cursor_SetMode;
     public delegate* unmanaged<ulong> Cursor_GetTexture;
     public delegate* unmanaged<ulong, void> Cursor_SetTexture;
+
+    // ── EntityCommandBuffer (appended for binary compat) ────────────
+    // Resolve a component's serializedName / displayName to its stable
+    // u32 type ID. Called once per component type at AppDomain load and
+    // cached in ComponentTypes<T>.NativeId; subsequent ECB recording
+    // references components purely by this u32 — no per-call string
+    // marshaling on the hot path. Returns 0 for unknown names.
+    public delegate* unmanaged<byte*, uint> Component_GetTypeId;
+
+    // Single-call playback of a recorded ECB byte stream against the
+    // active scene. Returns the number of created entities (positive)
+    // or a negative error code. `outRuntimeIds` is filled with the
+    // ulong ID of each created entity in record order; caller sizes it
+    // to its own recorded entity count.
+    public delegate* unmanaged<byte*, int, ulong*, int, int> Ecb_Playback;
 }
 
 internal static unsafe class NativeCallbacks

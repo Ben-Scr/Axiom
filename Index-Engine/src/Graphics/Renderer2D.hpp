@@ -5,6 +5,7 @@
 #include "Instance44.hpp"
 #include "Collections/AABB.hpp"
 #include "Core/Export.hpp"
+#include "Graphics/IRenderer.hpp"
 
 #include <glm/glm.hpp>
 #include <memory>
@@ -18,25 +19,25 @@ namespace Index {
 	class GpuTimer;
 #endif
 
-	class INDEX_API Renderer2D {
+	class INDEX_API Renderer2D : public IRenderer {
 	public:
 		// unique_ptr<GpuTimer> with a forward-declared GpuTimer requires the
 		// destructor to be defined where GpuTimer is complete. Out-of-line
 		// in Renderer2D.cpp does that without forcing every Renderer2D.hpp
 		// consumer to also include GpuTimer.hpp.
 		Renderer2D();
-		~Renderer2D();
+		~Renderer2D() override;
 		Renderer2D(const Renderer2D&) = delete;
 		Renderer2D& operator=(const Renderer2D&) = delete;
 
-		void Initialize();
-		void BeginFrame();
-		void EndFrame();
-		void Shutdown();
+		void Initialize() override;
+		void BeginFrame() override;
+		void EndFrame() override;
+		void Shutdown() override;
 		static void ClearSceneCache(const Scene* scene);
 		void SetEnabled(bool enabled) { m_IsEnabled = enabled; }
 		bool IsEnabled() const { return m_IsEnabled; }
-		bool IsInitialized() const { return m_IsInitialized; }
+		bool IsInitialized() const override { return m_IsInitialized; }
 
 		void SetOutputTarget(unsigned int fboId, int width, int height) {
 			m_OutputFboId = fboId;

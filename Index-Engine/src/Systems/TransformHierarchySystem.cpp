@@ -110,13 +110,28 @@ namespace Index {
 				return;
 			}
 
-			auto view = registry.view<Transform2DComponent>();
-			for (auto entity : view) {
-				bool isRoot = true;
-				if (registry.all_of<HierarchyComponent>(entity)) {
-					isRoot = registry.get<HierarchyComponent>(entity).Parent == entt::null;
+			// Two-view split: previously we scanned every Transform2D and
+			// did a per-entity `all_of<HierarchyComponent>` probe just to
+			// learn whether the entity even had a parent slot. That probe
+			// was the per-frame O(N) cost flagged in the perf audit. With
+			// the split below entt's storage filtering does the partition
+			// for free — entities without HierarchyComponent are all roots
+			// by definition, and the remaining ones already have the
+			// component in scope so we read Parent directly.
+			//
+			// Children are still processed recursively from each root via
+			// ProcessSubtree, so non-root entities are visited the same way
+			// they were before.
+			auto orphanRoots = registry.view<Transform2DComponent>(entt::exclude<HierarchyComponent>);
+			for (auto entity : orphanRoots) {
+				ProcessSubtree(registry, entity, nullptr, 0);
+			}
+
+			auto parented = registry.view<Transform2DComponent, HierarchyComponent>();
+			for (auto entity : parented) {
+				if (parented.get<HierarchyComponent>(entity).Parent != entt::null) {
+					continue;
 				}
-				if (!isRoot) continue;
 				ProcessSubtree(registry, entity, nullptr, 0);
 			}
 		}

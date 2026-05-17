@@ -1,9 +1,11 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Loader;
+using System.Threading;
 using Index;
 using Index.Coroutines;
 
@@ -111,15 +113,23 @@ internal class ScriptAssemblyLoadContext : AssemblyLoadContext
 /// </summary>
 internal static class ScriptInstanceManager
 {
-    private static readonly Dictionary<int, ScriptInstanceData> s_Instances = new();
-    private static readonly Dictionary<int, GameSystem> s_GameSystems = new();
-    private static readonly Dictionary<int, GlobalSystem> s_GlobalSystems = new();
-    private static int s_NextHandle = 1;
+    // All four dictionaries are reached from [UnmanagedCallersOnly] reverse-pinvoke
+    // entry points that the C++ side may dispatch from worker threads (asset loader,
+    // hot-reload, build job). Plain Dictionary<,> is not thread-safe — concurrent
+    // reads with a single writer can corrupt internal bucket chains. Use
+    // ConcurrentDictionary so TryGetValue / indexer / TryRemove / Clear / Values
+    // snapshots are all safe under concurrent access.
+    private static readonly ConcurrentDictionary<int, ScriptInstanceData> s_Instances = new();
+    private static readonly ConcurrentDictionary<int, GameSystem> s_GameSystems = new();
+    private static readonly ConcurrentDictionary<int, GlobalSystem> s_GlobalSystems = new();
+    // Incremented from any thread that creates an instance; ++ on a plain int is
+    // a read-modify-write race that can hand the same handle to two threads.
+    private static int s_NextHandle = 0;
 
     private static Assembly? s_CoreAssembly;
     private static Assembly? s_UserAssembly;
     private static AssemblyLoadContext? s_UserLoadContext;
-    private static readonly Dictionary<string, ScriptClassInfo?> s_ClassCache = new();
+    private static readonly ConcurrentDictionary<string, ScriptClassInfo?> s_ClassCache = new();
 
     private struct ScriptInstanceData
     {
@@ -130,7 +140,10 @@ internal static class ScriptInstanceManager
         public bool HasAwoken;
     }
 
-    private static readonly HashSet<int> s_GameSystemAwoken = new();
+    // Concurrent set: HashSet<int> is not thread-safe; concurrent OnAwake calls
+    // would race the bucket array. ConcurrentDictionary<int, byte>.TryAdd is
+    // the standard "thread-safe set add" pattern in .NET.
+    private static readonly ConcurrentDictionary<int, byte> s_GameSystemAwoken = new();
 
     private class ScriptClassInfo
     {
@@ -379,7 +392,7 @@ internal static class ScriptInstanceManager
             var instance = (EntityScript)Activator.CreateInstance(classInfo.Type)!;
             instance._SetEntityID(entityID);
 
-            int handle = s_NextHandle++;
+            int handle = Interlocked.Increment(ref s_NextHandle);
             s_Instances[handle] = new ScriptInstanceData
             {
                 Instance = instance,
@@ -399,7 +412,7 @@ internal static class ScriptInstanceManager
     }
 
     [UnmanagedCallersOnly]
-    public static void DestroyScriptInstance(int handle) => s_Instances.Remove(handle);
+    public static void DestroyScriptInstance(int handle) => s_Instances.TryRemove(handle, out _);
 
     [UnmanagedCallersOnly]
     public static void InvokeStart(int handle)
@@ -552,7 +565,7 @@ internal static class ScriptInstanceManager
             var instance = (GameSystem)Activator.CreateInstance(classInfo.Type)!;
             instance._SetSceneName(sceneName);
 
-            int handle = s_NextHandle++;
+            int handle = Interlocked.Increment(ref s_NextHandle);
             s_GameSystems[handle] = instance;
             return handle;
         }
@@ -566,8 +579,8 @@ internal static class ScriptInstanceManager
     [UnmanagedCallersOnly]
     public static void DestroyGameSystemInstance(int handle)
     {
-        s_GameSystems.Remove(handle);
-        s_GameSystemAwoken.Remove(handle);
+        s_GameSystems.TryRemove(handle, out _);
+        s_GameSystemAwoken.TryRemove(handle, out _);
     }
 
     [UnmanagedCallersOnly]
@@ -582,7 +595,7 @@ internal static class ScriptInstanceManager
     public static void InvokeGameSystemAwake(int handle)
     {
         if (!s_GameSystems.TryGetValue(handle, out var system)) return;
-        if (!s_GameSystemAwoken.Add(handle)) return;
+        if (!s_GameSystemAwoken.TryAdd(handle, 0)) return;
         try { system.OnAwake(); }
         catch (TargetInvocationException ex) { Log.Error($"Exception in GameSystem.OnAwake(): {ex.InnerException}"); }
         catch (Exception ex) { Log.Error($"Exception in GameSystem.OnAwake(): {ex}"); }
@@ -646,7 +659,7 @@ internal static class ScriptInstanceManager
             if (classInfo == null || !classInfo.IsGlobalSystem) return 0;
 
             var instance = (GlobalSystem)Activator.CreateInstance(classInfo.Type)!;
-            int handle = s_NextHandle++;
+            int handle = Interlocked.Increment(ref s_NextHandle);
             s_GlobalSystems[handle] = instance;
             return handle;
         }
@@ -658,7 +671,7 @@ internal static class ScriptInstanceManager
     }
 
     [UnmanagedCallersOnly]
-    public static void DestroyGlobalSystemInstance(int handle) => s_GlobalSystems.Remove(handle);
+    public static void DestroyGlobalSystemInstance(int handle) => s_GlobalSystems.TryRemove(handle, out _);
 
     [UnmanagedCallersOnly]
     public static void InvokeGlobalSystemInitialize(int handle)

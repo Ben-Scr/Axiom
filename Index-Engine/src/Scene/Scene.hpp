@@ -5,7 +5,9 @@
 #include "Components/General/EntityMetaDataComponent.hpp"
 #include "Core/Export.hpp"
 #include "Core/UUID.hpp"
+#include <cstddef>
 #include <functional>
+#include <span>
 #include <string_view>
 #include <unordered_map>
 #include <unordered_set>
@@ -58,7 +60,14 @@ namespace Index {
 			AssetGUID sceneGuid = AssetGUID(0),
 			EntityID runtimeId = 0);
 
-		Entity GetEntity(EntityHandle nativeEntity) { return Entity(nativeEntity, *this); }
+		Entity GetEntity(EntityHandle nativeEntity) {
+			// Assert loud on stale/invalid handles instead of silently returning an
+			// Entity wrapper that will surprise the caller later (component lookups
+			// against an invalid handle become undefined inside EnTT).
+			IDX_CORE_ASSERT(IsValid(nativeEntity), IndexErrorCode::InvalidValue,
+				"Scene::GetEntity called with an invalid/destroyed EntityHandle");
+			return Entity(nativeEntity, *this);
+		}
 		// CAVEAT: returns an `Entity` that can mutate this Scene even though the
 		// caller holds a `const Scene&`. The const_cast is intentional to keep the
 		// API symmetrical, but it is a known footgun: a caller treating a const
@@ -67,11 +76,137 @@ namespace Index {
 		// the Scene directly when you actually need read-only access. New code
 		// should treat this overload as deprecated.
 		[[deprecated("Returns a writable Entity from a const Scene; prefer Scene::GetComponent<T>(handle) const for read-only access")]]
-		Entity GetEntity(EntityHandle nativeEntity) const { return Entity(nativeEntity, const_cast<Scene&>(*this)); }
+		Entity GetEntity(EntityHandle nativeEntity) const {
+			IDX_CORE_ASSERT(IsValid(nativeEntity), IndexErrorCode::InvalidValue,
+				"Scene::GetEntity called with an invalid/destroyed EntityHandle");
+			return Entity(nativeEntity, const_cast<Scene&>(*this));
+		}
 
 		void DestroyEntity(Entity entity);
 		void DestroyEntity(EntityHandle nativeEntity);
 		void ClearEntities();
+
+		// ─── Bulk load helpers ─────────────────────────────────────────
+		// Pre-size every EnTT storage that will be touched by a bulk-load
+		// (scene deserialize, prefab instantiation batch, ECB playback) so
+		// that the per-entity emplace path doesn't trigger N sparse-set
+		// page reallocations. Safe to call before the entities exist —
+		// reserve() just bumps the underlying vector's capacity.
+		//
+		// The template form reserves the entity pool plus a typed storage
+		// for each TComponent. A runtime-typed overload taking a span of
+		// type_index will land alongside the v2 binary loader (PR 3) which
+		// discovers types from the on-disk component table rather than
+		// knowing them statically.
+		template <typename... TComponent>
+		void ReserveForLoad(std::size_t entityCount) {
+			// Reserve the entity pool itself; this is what EnTT's range-create
+			// reads from when handing out fresh handles.
+			m_Registry.storage<EntityHandle>().reserve(entityCount);
+			// Reserve each requested component storage. The fold expression
+			// expands to one call per type; folding over a no-op '0' silences
+			// the unused-value warning on empty packs.
+			((m_Registry.storage<TComponent>().reserve(entityCount)), ..., (void)0);
+			// Identity tables grow alongside entities in the loader, so pre-
+			// reserve them too. Default load factor is 1.0; reserving the
+			// final count plus headroom keeps rehashes off the hot path
+			// for the entire load.
+			m_RuntimeIdToEntity.reserve(entityCount);
+			m_SceneGuidToEntity.reserve(entityCount);
+		}
+
+		// Allocate `n` fresh entity handles in one call. Writes the handles
+		// into `out` (which must have size() >= n). Uses EnTT's range-
+		// create overload so the entity pool grows once instead of N times,
+		// and skips the per-entity `m_Dirty`/`m_UIDirty` bookkeeping that
+		// the single-shot CreateEntityHandle path performs — the caller is
+		// expected to set those flags once at the end of the batch.
+		//
+		// IMPORTANT: this does NOT populate identity components
+		// (EntityMetaDataComponent, UUIDComponent, PrefabInstanceComponent).
+		// The caller must walk the returned handles and call
+		// SetEntityMetaData on each, or emplace the components directly in
+		// a tight loop. The bulk path exists precisely to let the loader
+		// emplace components in column form rather than going through the
+		// generic per-entity setup.
+		void CreateEntitiesBulk(std::size_t n, std::span<EntityHandle> out);
+
+		// Runtime-typed sibling of ReserveForLoad<TComponent...>. Accepts a
+		// list of (componentTypeIdU32, count) pairs so the bulk loader can
+		// pre-reserve every per-type EnTT storage it's about to touch
+		// without knowing the types at compile time — matters for
+		// EntityCommandBuffer playback, where the command stream is
+		// type-erased and the type set isn't known until playback time.
+		// Reserves the entity pool and identity maps for `entityCount` up
+		// front (same as the templated overload).
+		void ReserveForLoadRuntime(std::size_t entityCount,
+			std::span<const std::pair<uint32_t, std::size_t>> perTypeCounts);
+
+		// Identity-component variant of SetEntityMetaData that does NOT
+		// pulse m_Dirty / m_UIDirty. Used by EntityCommandBuffer playback,
+		// which pulses them exactly once at the end of the batch via
+		// MarkAllDirtyOnce(). Avoids N redundant flag-flips during a big
+		// runtime spawn.
+		void SetEntityMetaDataNoFlags(
+			EntityHandle entity,
+			EntityOrigin origin,
+			AssetGUID prefabGuid = AssetGUID(0),
+			AssetGUID sceneGuid = AssetGUID(0),
+			EntityID runtimeId = 0);
+
+		// Equivalent of two MarkDirty() calls without re-running any
+		// per-entity logic. Intended as the single flag-pulse at the tail
+		// of a bulk-load / ECB playback so the editor (m_Dirty) and UI
+		// rebuild (m_UIDirty) both schedule their refreshes once.
+		void MarkAllDirtyOnce();
+
+		// RAII guard that defers a SUBSET of on_construct hooks for the
+		// lifetime of the guard. Bulk loaders (scene deserialize, prefab
+		// instantiation, ECB playback) construct the guard, emplace
+		// components freely, and let the destructor re-invoke each
+		// deferred hook in emplace order once at the end — collapsing
+		// per-entity dirty-mark thrash and per-emplace render-data version
+		// bumps into a single sweep.
+		//
+		// What defers vs. what fires immediately:
+		//   Defers:    Transform2D, SpriteRenderer, StaticTag,
+		//              ParticleSystem2D. These are idempotent (only touch
+		//              own component fields and global dirty/version state)
+		//              and produce identical results whether fired in-line
+		//              with emplace or in a post-batch sweep.
+		//   Immediate: Rigidbody2D, BoxCollider2D, CircleCollider2D,
+		//              PolygonCollider2D, Camera2D, DisabledTag, all Fast*
+		//              variants. These read sibling components or cascade
+		//              into the hierarchy / camera cache, so deferring
+		//              them while preserving emplace order would change
+		//              observable behavior (e.g. a deferred Rigidbody2D
+		//              hook would see a Collider component that exists
+		//              but whose hook hasn't run yet, adopting a still-
+		//              zero body handle). A future PR can topologically
+		//              order the flush to safely defer the physics hooks.
+		//
+		// Nested guards collapse: only the outermost flips the flag and
+		// flushes on destruction. Inner guards are no-ops, which makes it
+		// safe to compose (e.g. ECB playback that internally calls a
+		// prefab instantiation).
+		//
+		// Guard ONLY affects on_construct. on_destroy hooks always run —
+		// nothing in the engine ever wants to bulk-destroy without proper
+		// teardown (physics body cleanup, rigidbody mirror clearing, etc).
+		class INDEX_API LoadGuard {
+		public:
+			explicit LoadGuard(Scene& scene);
+			~LoadGuard();
+			LoadGuard(const LoadGuard&) = delete;
+			LoadGuard& operator=(const LoadGuard&) = delete;
+			LoadGuard(LoadGuard&&) = delete;
+			LoadGuard& operator=(LoadGuard&&) = delete;
+		private:
+			Scene& m_Scene;
+			bool m_OwnsSuppression;
+		};
+
+		bool IsConstructHooksSuppressed() const { return m_SuppressConstructHooks; }
 
 		bool IsValid(EntityHandle nativeEntity) const {
 			return m_Registry.valid(nativeEntity);
@@ -224,6 +359,15 @@ namespace Index {
 
 		entt::registry& GetRegistry() { return m_Registry; }
 		const entt::registry& GetRegistry() const { return m_Registry; }
+
+		// Cached count of live entities. Maintained incrementally in the
+		// Create/Destroy paths so callers (the profiler, the editor's scene
+		// stats panel) don't have to walk entt's entity storage every frame
+		// to compute it. Single-frame freshness is preserved as long as
+		// every entity birth/death routes through CreateEntityHandle,
+		// CreateEntitiesBulk or DestroyEntityInternal — those are the only
+		// public spawn/destroy paths in the engine.
+		std::size_t GetEntityCount() const { return m_EntityCount; }
 
 		const std::string& GetName() const { return m_Name; }
 		void SetName(const std::string& name) { m_Name = name; }
@@ -437,6 +581,12 @@ namespace Index {
 		bool m_IsLoaded = false;
 		bool m_Persistent = false;
 		bool m_Dirty = false;
+
+		// Live-entity counter. Incremented in CreateEntityHandle and the
+		// bulk-create path; decremented in DestroyEntityInternal. Exposed
+		// via GetEntityCount() so the profiler reads a scalar instead of
+		// scanning entt's entity storage every frame.
+		std::size_t m_EntityCount = 0;
 		// Set true while ClearEntities() is destroying every entity at once.
 		// Each Camera2DComponent destruction would otherwise re-enter
 		// RefreshMainCameraSelection, which scans the still-mutating registry
@@ -463,5 +613,31 @@ namespace Index {
 		std::unordered_map<EntityID, EntityHandle> m_RuntimeIdToEntity;
 		std::unordered_map<uint64_t, EntityHandle> m_SceneGuidToEntity;
 		std::unordered_set<uint32_t> m_EntitiesBeingDestroyed;
+
+		// LoadGuard-controlled flag. When true, the per-component
+		// on_construct handlers in this Scene short-circuit and record
+		// the entity into m_DeferredConstructHooks. The outermost
+		// LoadGuard's destructor clears the flag and re-invokes each
+		// recorded hook in order — at which point the same member
+		// function runs its normal body, since the flag is now false.
+		bool m_SuppressConstructHooks = false;
+
+		// Recorded (memberFunction, entity) pairs for hooks that fired
+		// while m_SuppressConstructHooks was true. Flushed in registration
+		// order by ~LoadGuard. Cleared after the flush completes. The
+		// member-pointer sentinel pattern keeps each record at 16 bytes
+		// (member-fn ptr + EntityHandle) with no per-record heap
+		// allocations and no std::function overhead — matters because a
+		// 10 000-entity prefab spawn produces ~30 000 deferred records.
+		struct DeferredConstructHook {
+			void (Scene::*fn)(entt::registry&, EntityHandle);
+			EntityHandle entity;
+		};
+		std::vector<DeferredConstructHook> m_DeferredConstructHooks;
+		// Re-entrance latch: keep the deferral path off while the outermost
+		// LoadGuard is replaying records, so a hook can't recursively
+		// re-enqueue itself if a downstream construct fires synchronously
+		// from inside another hook's body.
+		bool m_FlushingDeferredHooks = false;
 	};
 }

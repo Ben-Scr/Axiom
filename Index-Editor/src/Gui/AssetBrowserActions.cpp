@@ -3,6 +3,7 @@
 
 #include "Assets/AssetRegistry.hpp"
 #include "Core/Log.hpp"
+#include "Editor/EditorPreferences.hpp"
 #include "Editor/ExternalEditor.hpp"
 #include "Project/IndexProject.hpp"
 #include "Project/ProjectManager.hpp"
@@ -245,8 +246,7 @@ namespace Index {
 		// have to delete a redundant ".scene" before typing. CommitRename
 		// re-appends the original extension on commit. Folders never
 		// have an extension to strip — fall back to currentName for them.
-		IndexProject* project = ProjectManager::GetCurrentProject();
-		const bool showExt = project ? project->ShowFileExtensions : false;
+		const bool showExt = EditorPreferences::GetShowFileExtensions();
 		std::string display = currentName;
 		if (!showExt) {
 			std::filesystem::path p(currentName);

@@ -29,13 +29,25 @@ namespace Index.Components;
 [StructLayout(LayoutKind.Sequential)]
 public struct NativeSpriteRenderer : IComponent
 {
+    // Parameterless constructor exists so `new NativeSpriteRenderer()` (and
+    // object-initializer syntax like `new NativeSpriteRenderer { SortingOrder = 1 }`)
+    // triggers the field initializers below. WARNING: C# language rule —
+    // `default(NativeSpriteRenderer)` and uninitialized struct declarations
+    // still produce a zero-init value where Color = (0,0,0,0). Callers using
+    // EntityCommandBuffer should prefer `new NativeSpriteRenderer { ... }`
+    // so the renderer doesn't paint sprites as fully transparent black.
+    public NativeSpriteRenderer() { }
+
     public short SortingOrder;
     public byte  SortingLayer;
     private byte _pad;
 
     public TextureHandle TextureHandle;
     public ulong         TextureAssetId;
-    public Color         Color;
+    // Mirror of SpriteRendererComponent.hpp:15 `Color{1.0f, 1.0f, 1.0f, 1.0f}` —
+    // matches the C++ default so freshly-created sprites are white-tinted
+    // rather than transparent black.
+    public Color         Color = new(1f, 1f, 1f, 1f);
 
     internal const string NativeName = "Sprite Renderer";
 }

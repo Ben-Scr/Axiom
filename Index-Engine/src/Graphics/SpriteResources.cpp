@@ -166,7 +166,12 @@ namespace Index::WebGPUSpriteResources {
 
 			wgpu::ColorTargetState colorTarget{};
 			colorTarget.format    = colorFormat;
-			colorTarget.blend     = &blend;
+			// Wireframe is the editor's debug-overlay pipeline; it writes
+			// opaque black edge pixels and must NOT be alpha-blended against
+			// the underlying filled pass (otherwise a forced (0,0,0,1) line
+			// write blends to dst*0, masking out previously-drawn sprites
+			// near the edge).
+			colorTarget.blend     = mode == SpritePipelineMode::Wireframe ? nullptr : &blend;
 			colorTarget.writeMask = wgpu::ColorWriteMask::All;
 
 			wgpu::FragmentState fragState{};
@@ -355,10 +360,14 @@ namespace Index::WebGPUSpriteResources {
 		dst.Color[1] = src.Color.g;
 		dst.Color[2] = src.Color.b;
 		dst.Color[3] = src.Color.a;
-		const float c = std::cos(src.Rotation);
-		const float s = std::sin(src.Rotation);
-		dst.Rot[0] = c;
-		dst.Rot[1] = s;
+		// Rotation is forwarded as raw radians; the sprite vertex shader
+		// (k_SpriteWGSL in Shader.cpp) computes sin/cos per vertex. Moving
+		// the trig to the GPU removes the per-instance std::sin + std::cos
+		// pair that dominated this hot loop at large sprite counts. The
+		// remaining Rot slots stay zero so the attribute keeps its vec4
+		// layout — the shader ignores them.
+		dst.Rot[0] = src.Rotation;
+		dst.Rot[1] = 0.0f;
 		dst.Rot[2] = 0.0f;
 		dst.Rot[3] = 0.0f;
 	}

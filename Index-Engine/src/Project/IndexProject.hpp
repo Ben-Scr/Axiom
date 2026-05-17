@@ -109,16 +109,10 @@ namespace Index {
 		// window stacks below the stats window so they don't overlap.
 		bool ShowRuntimeLogs = true;
 
-		// Editor-only: auto-save the active scene at a fixed cadence so
-		// an editor crash, BSOD, or accidental Alt+F4 doesn't lose
-		// work-in-progress. The autosave runs on the editor's main
-		// thread (no async writer; SceneSerializer is not thread-safe).
-		// Only fires when the scene is dirty AND not in Play mode — Play
-		// mode persists are deliberately discarded on Stop, and saving
-		// during Play would clobber the user's pre-Play snapshot. Disabled
-		// by default so it stays opt-in.
-		bool AutoSaveScenes = false;
-		float AutoSaveIntervalSeconds = 120.0f;
+		// AutoSaveScenes / AutoSaveIntervalSeconds moved to user-scoped
+		// EditorPreferences (2026-05). Legacy index-project.json values
+		// are migrated to EditorPreferences on Load and dropped on next
+		// Save — see IndexProject::Load.
 		bool AutoRecompileScripts = true;
 		bool RecompileScriptsOnPlay = false;
 
@@ -139,15 +133,27 @@ namespace Index {
 		EditorEntityNameSuffixStyle EditorEntityNameSuffix = EditorEntityNameSuffixStyle::ParenthesizedNumber;
 		EditorEntityNameSuffixStyle EditorAssetDuplicateSuffix = EditorEntityNameSuffixStyle::ParenthesizedNumber;
 
-		// Editor-only: show file extensions in the asset browser and the
-		// rename/create textbox. When false (default), an asset created
-		// from "Create > Scene" displays as "MyScene" rather than
-		// "MyScene.scene", and renaming an existing file pre-fills only
-		// the stem (the extension is preserved automatically on commit).
-		// Mirrors Windows Explorer's "Hide extensions for known file
-		// types" toggle. Power users who routinely retype extensions can
-		// flip this on.
-		bool ShowFileExtensions = false;
+		// ShowFileExtensions moved to user-scoped EditorPreferences
+		// (2026-05). Legacy index-project.json values migrate on Load
+		// and drop from the project file on next Save — see
+		// LegacyEditorPrefs below.
+
+		// Pre-2026-05 projects stored ShowFileExtensions / AutoSaveScenes
+		// / AutoSaveIntervalSeconds inline. Load() parses them into this
+		// transient struct (one `*Present` flag per value); the editor
+		// migrates them into EditorPreferences exactly once on first
+		// launch (gated by EditorPreferences::WasFreshlyCreated). Save()
+		// never re-emits these fields, so the next Save drops them from
+		// the project file entirely. Members default to "not present" so
+		// new projects skip the migration path automatically.
+		struct LegacyEditorPrefsMigration {
+			bool ShowFileExtensions = false;
+			bool ShowFileExtensionsPresent = false;
+			bool AutoSaveScenes = false;
+			bool AutoSaveScenesPresent = false;
+			float AutoSaveIntervalSeconds = 120.0f;
+			bool AutoSaveIntervalSecondsPresent = false;
+		} LegacyEditorPrefs;
 
 		// Custom cursor images. Both are project-relative paths (same
 		// convention as AppIconPath), loaded via TextureManager into a
@@ -193,6 +199,20 @@ namespace Index {
 			OpenGLES   = 6,
 		};
 		RenderBackend ActiveRenderBackend = RenderBackend::Auto;
+
+		// File-stem of the currently-selected `.indexbuild` profile under
+		// <RootDirectory>/BuildProfiles/. Empty when no profile is selected
+		// (legacy projects, or freshly-created ones before the user opens
+		// the Build Profiles panel). The Build panel reads this to drive
+		// the Build button's target platform + render backend, and falls
+		// back to ActiveRenderBackend / Windows when empty.
+		std::string ActiveBuildProfileName;
+
+		// `<RootDirectory>/BuildProfiles/` — directory the `.indexbuild`
+		// files live in. Created lazily on first profile save; safe to call
+		// before the directory exists. Empty string if RootDirectory itself
+		// is empty.
+		std::string GetBuildProfilesDirectory() const;
 
 		// Splash screen — shown briefly before the first scene loads in
 		// shipped builds. Disabled = no splash, scene loads immediately.

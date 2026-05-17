@@ -1,7 +1,7 @@
 namespace Index;
 public struct Color : System.IEquatable<Color>
 {
-    public float R, G, B, A;
+    public float R = 1.0f, G = 1.0f, B = 1.0f, A = 1.0f;
 
     public Color(float r, float g, float b)
     {

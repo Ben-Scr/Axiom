@@ -9,6 +9,7 @@
 #include "Scene/Scene.hpp"
 #include "Components/General/NameComponent.hpp"
 #include "Core/Log.hpp"
+#include "Editor/EditorPreferences.hpp"
 #include "Editor/ExternalEditor.hpp"
 #include "Gui/EditorTheme.hpp"
 #include "Gui/HierarchyDragData.hpp"
@@ -981,12 +982,11 @@ namespace Index {
 			const float maxWidth = m_TileSize;
 			// Hide the file extension by default — most users care about
 			// the asset's name, not its extension (the icon already
-			// communicates the type). The project's ShowFileExtensions
-			// flip restores the verbatim filename for users who want it.
+			// communicates the type). The user-scoped EditorPreferences
+			// "Show file extensions" toggle restores the verbatim filename.
 			// The full filename is always shown in the hover tooltip so
 			// power users can confirm what they're looking at.
-			IndexProject* project = ProjectManager::GetCurrentProject();
-			const bool showExt = project ? project->ShowFileExtensions : false;
+			const bool showExt = EditorPreferences::GetShowFileExtensions();
 			const std::string& fullName = entry.Name;
 			std::string label = fullName;
 			if (!showExt && !entry.IsDirectory) {
@@ -1012,16 +1012,6 @@ namespace Index {
 
 		if (isCut) {
 			ImGui::PopStyleVar();
-		}
-
-		if (isSelected) {
-			if (selectionMax.x > selectionMin.x && selectionMax.y > selectionMin.y) {
-				ImGui::GetWindowDrawList()->AddRect(
-					selectionMin,
-					selectionMax,
-					ImGui::GetColorU32(EditorTheme::Colors::AssetTileSelectionBorder),
-					ImGui::GetStyle().FrameRounding);
-			}
 		}
 
 		if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {

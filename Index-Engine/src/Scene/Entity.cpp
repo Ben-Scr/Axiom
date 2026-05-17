@@ -23,6 +23,14 @@ namespace Index {
 	Entity::Entity(EntityHandle e, Scene* scene)
 		: m_EntityHandle(e), m_Registry(scene ? &scene->GetRegistry() : nullptr), m_Scene(scene) {}
 
+	Entity Entity::MakeScenePlaceholder(Scene& scene) {
+		// entt::null + a real scene pointer — IsValid() returns false so
+		// any accidental component access fails fast, while GetScene()
+		// hands back the live scene so dispatchers like PropertyDrawer's
+		// MarkSceneDirty hook can do their work.
+		return Entity(EntityHandle{ entt::null }, scene);
+	}
+
 	void Entity::EnsureValid(const char* message) const {
 		if (!IsValid()) {
 			IDX_THROW(IndexErrorCode::InvalidHandle, message);

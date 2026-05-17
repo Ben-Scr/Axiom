@@ -1,45 +1,30 @@
 #pragma once
 
-#include "General/Transform2DComponent.hpp"
-#include "General/RectTransform2DComponent.hpp"
-#include "General/NameComponent.hpp"
-#include "General/UUIDComponent.hpp"
-#include "General/EntityMetaDataComponent.hpp"
-#include "General/PrefabInstanceComponent.hpp"
-#include "General/HierarchyComponent.hpp"
+// DEPRECATED: use the narrower headers below instead.
+//
+// This umbrella used to pull in every built-in component header, which forced
+// every TU that included it to also compile the full Graphics, Physics, Audio,
+// and Scripting headers. To break that coupling, this header now only re-exports:
+//
+//   - "Components/Forward.hpp"      forward declarations of every built-in
+//   - "Components/General/General.hpp" concrete General/* components
+//   - "Components/UI/UI.hpp"        concrete UI/* components
+//   - "Components/Tags.hpp"         empty tag types
+//
+// Translation units that need a Graphics, Physics, Audio, or Scripting
+// component must include the specific header(s) they touch. Registration sites
+// that legitimately need every built-in (e.g. BuiltInComponentRegistration.cpp)
+// should include the per-subsystem headers explicitly.
+//
+// This header will become a hard error in a future release; please migrate.
 
-#include "Graphics/SpriteRendererComponent.hpp"
-#include "Graphics/ImageComponent.hpp"
-#include "Graphics/Camera2DComponent.hpp"
-#include "Graphics/ParticleSystem2DComponent.hpp"
-#include "Graphics/TextRendererComponent.hpp"
+#if defined(_MSC_VER)
+#pragma message("warning: <Components/Components.hpp> is deprecated. Include Forward.hpp or specific component headers; see header for details.")
+#elif defined(__GNUC__) || defined(__clang__)
+#warning "<Components/Components.hpp> is deprecated. Include Forward.hpp or specific component headers; see header for details."
+#endif
 
-#include "Physics/BoxCollider2DComponent.hpp"
-#include "Physics/CircleCollider2DComponent.hpp"
-#include "Physics/PolygonCollider2DComponent.hpp"
-#include "Physics/Rigidbody2DComponent.hpp"
-
-#include "Physics/FastBody2DComponent.hpp"
-#include "Physics/FastBoxCollider2DComponent.hpp"
-#include "Physics/FastCircleCollider2DComponent.hpp"
-
-#include "Audio/AudioSourceComponent.hpp"
-#include "Scripting/ScriptComponent.hpp"
-
-#include "UI/InteractableComponent.hpp"
-#include "UI/ButtonComponent.hpp"
-#include "UI/SliderComponent.hpp"
-#include "UI/InputFieldComponent.hpp"
-#include "UI/DropdownComponent.hpp"
-#include "UI/ToggleComponent.hpp"
-#include "UI/ScrollbarComponent.hpp"
-#include "UI/ScrollRectComponent.hpp"
-#include "UI/MaskComponent.hpp"
-#include "UI/ContentSizeFitterComponent.hpp"
-#include "UI/WidthConstraintComponent.hpp"
-#include "UI/CircularSliderComponent.hpp"
-#include "UI/HorizontalLayoutGroupComponent.hpp"
-#include "UI/VerticalLayoutGroupComponent.hpp"
-#include "UI/GridLayoutGroupComponent.hpp"
-
-#include "Tags.hpp"
+#include "Components/Forward.hpp"
+#include "Components/General/General.hpp"
+#include "Components/UI/UI.hpp"
+#include "Components/Tags.hpp"

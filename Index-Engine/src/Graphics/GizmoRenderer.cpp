@@ -4,6 +4,7 @@
 #include "Core/Log.hpp"
 #include "Graphics/Backend/WebGPUBackend.hpp"
 #include "Graphics/Shader.hpp"
+#include "Memory/FrameArenas.hpp"
 
 #include <webgpu/webgpu_cpp.h>
 #include <glm/gtc/type_ptr.hpp>
@@ -12,6 +13,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <span>
 #include <unordered_map>
 
 // =============================================================================
@@ -31,7 +33,6 @@ namespace Index {
 	// Static class members (declared in GizmoRenderer.hpp) ────────────────────
 	bool                           GizmoRenderer2D::m_IsInitialized = false;
 	std::unique_ptr<Shader>        GizmoRenderer2D::m_GizmoShader;
-	std::vector<PosColorVertex>    GizmoRenderer2D::m_GizmoVertices;
 	std::vector<uint32_t>          GizmoRenderer2D::m_GizmoIndices;
 	std::vector<GizmoUploadVertex> GizmoRenderer2D::s_UploadBuffer;
 	uint16_t                       GizmoRenderer2D::m_GizmoViewId = 1;
@@ -72,11 +73,13 @@ namespace Index {
 				| (u8(c.a) << 24);
 		}
 
-		void EmitLine(std::vector<PosColorVertex>& out,
+		// No bounds check — caller pre-sized `out` to the upper-bound
+		// vertex count.
+		inline void EmitLine(PosColorVertex* out, std::size_t& cursor,
 			float x0, float y0, float x1, float y1, uint32_t rgba)
 		{
-			out.push_back(PosColorVertex{ x0, y0, 0.0f, rgba });
-			out.push_back(PosColorVertex{ x1, y1, 0.0f, rgba });
+			out[cursor++] = PosColorVertex{ x0, y0, 0.0f, rgba };
+			out[cursor++] = PosColorVertex{ x1, y1, 0.0f, rgba };
 		}
 
 		// ── GPU resource helpers ────────────────────────────────────────────
@@ -299,8 +302,6 @@ namespace Index {
 		g_Module                    = nullptr;
 		m_GizmoShader.reset();
 
-		m_GizmoVertices.clear();
-		m_GizmoVertices.shrink_to_fit();
 		m_GizmoIndices.clear();
 		m_GizmoIndices.shrink_to_fit();
 		s_UploadBuffer.clear();
@@ -321,15 +322,50 @@ namespace Index {
 
 	void GizmoRenderer2D::RenderWithVP(const glm::mat4& vp, GizmoLayerMask layerMask) {
 		if (!m_IsInitialized) return;
-		BuildGeometry(layerMask);
-		FlushGizmosImpl(vp);
+		std::span<const PosColorVertex> verts = BuildGeometry(layerMask);
+		FlushGizmosImpl(vp, verts);
 		Gizmo::Clear();
 	}
 
-	void GizmoRenderer2D::BuildGeometry(GizmoLayerMask layerMask) {
+	std::span<const PosColorVertex>
+	GizmoRenderer2D::BuildGeometry(GizmoLayerMask layerMask) {
 		// CPU geometry build — squares fan into 4 edges; circles into N
-		// segments; lines pass-through.
-		m_GizmoVertices.clear();
+		// segments; lines pass-through. Storage comes from the per-frame
+		// arena: one bump-alloc up front, no per-shape push_back, the whole
+		// buffer is reclaimed in O(1) by Application::EndFrame.
+		//
+		// Upper-bound vertex count, ignoring the layer-mask filter — the
+		// cursor below tracks the actual count and the arena slack is
+		// reclaimed at EndFrame regardless, so over-allocation is free.
+		std::size_t cap = Gizmo::s_Squares.size() * 8   // 4 edges × 2 verts
+		                + Gizmo::s_Lines.size()   * 2;
+		for (const Circle& ci : Gizmo::s_Circles) {
+			if (ci.Segments >= 3) {
+				cap += static_cast<std::size_t>(ci.Segments) * 2;
+			}
+		}
+		if (cap == 0) return {};
+
+		std::span<PosColorVertex> buf =
+			FrameArenas::Frame().CreateArray<PosColorVertex>(cap);
+		if (buf.empty()) {
+			// Arena exhausted this frame. Log once per session — repeated
+			// warnings would spam the console every frame the scene stays
+			// over budget. The gizmo pass is silently skipped this frame;
+			// the arena resets at EndFrame and the next frame retries.
+			static bool s_OverflowLogged = false;
+			if (!s_OverflowLogged) {
+				IDX_CORE_WARN_TAG("GizmoRenderer",
+					"Frame arena exhausted: {} verts requested ({} bytes). "
+					"Increase ApplicationConfig::FrameArenaCapacityBytes.",
+					cap, cap * sizeof(PosColorVertex));
+				s_OverflowLogged = true;
+			}
+			return {};
+		}
+
+		PosColorVertex* out = buf.data();
+		std::size_t cursor = 0;
 
 		for (const Square& sq : Gizmo::s_Squares) {
 			if (!HasAnyLayer(sq.Layer, layerMask)) continue;
@@ -350,15 +386,15 @@ namespace Index {
 			const auto [x1, y1] = corner(+hx, -hy);
 			const auto [x2, y2] = corner(+hx, +hy);
 			const auto [x3, y3] = corner(-hx, +hy);
-			EmitLine(m_GizmoVertices, x0, y0, x1, y1, rgba);
-			EmitLine(m_GizmoVertices, x1, y1, x2, y2, rgba);
-			EmitLine(m_GizmoVertices, x2, y2, x3, y3, rgba);
-			EmitLine(m_GizmoVertices, x3, y3, x0, y0, rgba);
+			EmitLine(out, cursor, x0, y0, x1, y1, rgba);
+			EmitLine(out, cursor, x1, y1, x2, y2, rgba);
+			EmitLine(out, cursor, x2, y2, x3, y3, rgba);
+			EmitLine(out, cursor, x3, y3, x0, y0, rgba);
 		}
 
 		for (const Line& ln : Gizmo::s_Lines) {
 			if (!HasAnyLayer(ln.Layer, layerMask)) continue;
-			EmitLine(m_GizmoVertices, ln.Start.x, ln.Start.y, ln.End.x, ln.End.y, PackRgba(ln.Color));
+			EmitLine(out, cursor, ln.Start.x, ln.Start.y, ln.End.x, ln.End.y, PackRgba(ln.Color));
 		}
 
 		for (const Circle& ci : Gizmo::s_Circles) {
@@ -372,15 +408,19 @@ namespace Index {
 				const float a = static_cast<float>(i) * step;
 				const float nx = ci.Center.x + std::cos(a) * ci.Radius;
 				const float ny = ci.Center.y + std::sin(a) * ci.Radius;
-				EmitLine(m_GizmoVertices, prevX, prevY, nx, ny, rgba);
+				EmitLine(out, cursor, prevX, prevY, nx, ny, rgba);
 				prevX = nx;
 				prevY = ny;
 			}
 		}
+
+		return buf.first(cursor);
 	}
 
-	void GizmoRenderer2D::FlushGizmosImpl(const glm::mat4& vp) {
-		if (m_GizmoVertices.empty()) return;
+	void GizmoRenderer2D::FlushGizmosImpl(const glm::mat4& vp,
+		std::span<const PosColorVertex> verts)
+	{
+		if (verts.empty()) return;
 
 		auto target = WebGPUBackend::BeginRenderToCurrentTarget();
 		if (!target.Valid) return;
@@ -401,10 +441,10 @@ namespace Index {
 		if (!EnsureBindGroup(device))    return;
 		queue.WriteBuffer(g_UniformBuffer, 0, glm::value_ptr(vp), 64);
 
-		const uint32_t numVerts = static_cast<uint32_t>(m_GizmoVertices.size());
+		const uint32_t numVerts = static_cast<uint32_t>(verts.size());
 		const uint32_t totalBytes = numVerts * static_cast<uint32_t>(sizeof(PosColorVertex));
 		if (!EnsureVertexBuffer(device, totalBytes)) return;
-		queue.WriteBuffer(g_VertexBuffer, 0, m_GizmoVertices.data(), totalBytes);
+		queue.WriteBuffer(g_VertexBuffer, 0, verts.data(), totalBytes);
 
 		wgpu::CommandEncoder encoder = WebGPUBackend::GetFrameEncoder();
 		if (!encoder) return;

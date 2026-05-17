@@ -10,6 +10,8 @@
 #include <typeindex>
 #include <vector>
 
+namespace Index::Serialization { class IArchive; }
+
 namespace Index {
 
 	struct ComponentInfo {
@@ -31,6 +33,15 @@ namespace Index {
 		// thread back into typed APIs like AddWithDependencies / TypesConflict
 		// without re-iterating the registry.
 		std::type_index typeId{ typeid(void) };
+
+		// FNV-1a 64-bit hash of `serializedName`, computed once during
+		// ComponentRegistry::Register and used by the hashed name → info
+		// lookup map. The hash is stable across builds and platforms so it
+		// can also be embedded directly in serialized assets (binary scene
+		// v2 component table) — version-tolerant identification without a
+		// per-asset string allocation. Zero indicates "not yet hashed"
+		// (e.g. registration with an empty serializedName).
+		uint64_t serializedNameHash = 0;
 
 		bool (*has)(Entity) = nullptr;
 		void (*add)(Entity) = nullptr;
@@ -58,6 +69,25 @@ namespace Index {
 		// the C++ component and its C# struct mirror — a mismatch hard-fails the user
 		// assembly load instead of silently corrupting memory.
 		size_t rawSize = 0;
+
+		// Stable u32 component ID assigned monotonically by ComponentRegistry::Register
+		// in registration order, valid for the duration of the process. Used by the
+		// scripting EntityCommandBuffer wire format so a recorded command can name its
+		// target component type in 4 bytes (vs. a UTF-8 string + hash lookup). The ID
+		// is NOT persisted to disk — serialized scenes still key on `serializedName`.
+		// Zero is the sentinel "unassigned" (e.g. ComponentInfo authored outside the
+		// registry, or registry slot 0 reserved as a null guard).
+		uint32_t typeIdU32 = 0;
+
+		// memcpy-from-bytes emplacer. ECB playback writes a raw component payload into
+		// the entity's storage in one call — no per-property P/Invoke, no JSON, no
+		// generic field walker. Auto-wired by ComponentRegistry::Register for any
+		// non-empty, trivially-copyable T as a simple `emplace_or_replace<T>(memcpy)`.
+		// Components with scene-bound runtime state (e.g. ParticleSystem2DComponent's
+		// emitter handle) must override this at registration time to rebind correctly,
+		// the same way they currently override `copyTo`.
+		void (*emplaceFromBytes)(entt::registry& registry, EntityHandle entity,
+			const void* bytes, size_t size) = nullptr;
 
 		// Optional post-add hook fired by ComponentRegistry::AddWithDependencies
 		// AFTER the default `add` runs. Used by UI widgets (Button, Slider,
@@ -130,7 +160,7 @@ namespace Index {
 		// system, which is intentionally separate.
 		std::vector<std::type_index> dependsOn;
 
-		// ── Serialization callbacks ─────────────────────────────────────
+		// ── Serialization callbacks (legacy JSON-tree path) ──────────────
 		// Optional. When set, SceneSerializer routes this component through
 		// the generic registry-driven path (SerializeEntity walks the
 		// registry after the hardcoded built-ins and calls `serialize` on
@@ -140,8 +170,39 @@ namespace Index {
 		// today — they're hardcoded in SceneSerializerDeserialize.cpp until
 		// the H1 reflection refactor migrates them to this path. Package
 		// components MUST set both to round-trip in .scene / .prefab files.
+		//
+		// These two are SCHEDULED FOR REMOVAL once every component that
+		// currently sets them has been migrated to `serializeArchive` below.
+		// New components should NOT set these — write a single
+		// `serializeArchive` body instead; SceneSerializer's JSON path will
+		// route the call through JsonArchive and produce the same on-disk
+		// shape automatically.
 		Json::Value (*serialize)(Entity) = nullptr;
 		void (*deserialize)(Entity, const Json::Value&) = nullptr;
+
+		// ── Serialization callbacks (true-binary / unified path) ──────────
+		// Optional. When set, SceneSerializer uses this single bidirectional
+		// method for BOTH the binary AND JSON file formats by passing the
+		// appropriate concrete archive (Index::Serialization::BinaryArchive
+		// or JsonArchive). The component's body only calls Field / Object /
+		// Array on the archive — it doesn't know or care which format is on
+		// disk.
+		//
+		// When BOTH `serializeArchive` and the legacy `serialize` /
+		// `deserialize` are set on the same component, the new path wins.
+		// During the migration window the registry preserves whichever set
+		// of callbacks is non-null across `AttachInspector` re-registration
+		// so half-migrated components remain functional.
+		//
+		// `serializationVersion` is the per-component schema version, written
+		// alongside each component frame in the binary format. Components
+		// that add or rename fields in a non-backward-compatible way must
+		// bump this and branch on `ar.ComponentVersion()` to support old
+		// saves. Additive changes (a new Field call appended to the end of
+		// Serialize) do NOT require a version bump — reading an older save
+		// simply leaves the new field at its default.
+		void (*serializeArchive)(Entity, Index::Serialization::IArchive&) = nullptr;
+		std::uint16_t serializationVersion = 1;
 	};
 
 } // namespace Index

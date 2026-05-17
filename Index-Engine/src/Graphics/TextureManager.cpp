@@ -8,7 +8,9 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <filesystem>
+#include <unordered_map>
 #include <utility>
 
 // =============================================================================
@@ -41,11 +43,47 @@ namespace Index {
 		std::vector<ProviderEntry> g_Providers;
 		uint32_t g_NextProviderToken = 1;
 
+		struct DestroyListenerEntry {
+			uint32_t Token = 0;
+			TextureManager::DestroyListener Listener;
+		};
+		std::vector<DestroyListenerEntry> g_DestroyListeners;
+		uint32_t g_NextDestroyListenerToken = 1;
+
+		void FireDestroyListeners(TextureHandle handle) {
+			// Iterate over a local copy — listeners are allowed to remove
+			// themselves from inside the callback. This is rare (registration
+			// is normally lifecycle-bound), but copy cost is tiny vs. the
+			// safety guarantee.
+			if (g_DestroyListeners.empty()) return;
+			std::vector<DestroyListenerEntry> snapshot = g_DestroyListeners;
+			for (const auto& e : snapshot) {
+				if (e.Listener) e.Listener(handle);
+			}
+		}
+
 		// Resolved handles for each DefaultTexture enum value. Indexed
 		// directly by the enum's underlying byte. Held alongside (not
 		// inside) s_DefaultTextures because s_DefaultTextures stores
 		// the on-disk paths for diagnostics — we want both.
 		std::array<TextureHandle, 9> g_DefaultHandles{};
+
+		// Reverse index from a (path, filter, wrap-u, wrap-v) tuple-hash to
+		// the slot in s_Textures. Built incrementally on insert / cleared
+		// on UnloadTexture so FindTextureByPath becomes O(1) average instead
+		// of an O(N) linear scan over s_Textures. The previous linear scan
+		// was hot during sprite load + every FileWatcher hot-reload event.
+		// 0 is a valid slot index, so we store (index+1) and use 0 as "miss".
+		std::unordered_map<std::uint64_t, std::uint32_t> g_PathIndex;
+
+		// Per-slot canonical key, computed once at insert time and reused on
+		// hot-reload comparisons. Previously ReloadTexturePath called
+		// std::filesystem::weakly_canonical for every loaded texture on every
+		// event — that's N stat() syscalls per FileWatcher tick. Storing the
+		// canonical form here cuts hot-reload to one canonicalization for
+		// the incoming event path plus pure string compares against the
+		// stored keys.
+		std::vector<std::string> g_CanonicalKeys;
 
 		std::string ToLower(std::string value) {
 			std::transform(value.begin(), value.end(), value.begin(),
@@ -70,6 +108,32 @@ namespace Index {
 			}
 			return canonical.lexically_normal().make_preferred().string();
 		}
+
+		// FNV-1a 64-bit over the path string then mixed with the sampler
+		// state. Keeps the lookup key stable across the lifetime of a slot
+		// (the path string doesn't move once stored).
+		std::uint64_t HashLookupKey(std::string_view path,
+			Filter filter,
+			Wrap u,
+			Wrap v)
+		{
+			std::uint64_t h = 0xcbf29ce484222325ULL;
+			for (char c : path) {
+				h ^= static_cast<std::uint8_t>(c);
+				h *= 0x100000001b3ULL;
+			}
+			h ^= static_cast<std::uint64_t>(filter) << 1;
+			h ^= static_cast<std::uint64_t>(u) << 16;
+			h ^= static_cast<std::uint64_t>(v) << 32;
+			h *= 0x100000001b3ULL;
+			return h;
+		}
+
+		void EnsureCanonicalKeyCapacity(std::size_t slotCount) {
+			if (g_CanonicalKeys.size() < slotCount) {
+				g_CanonicalKeys.resize(slotCount);
+			}
+		}
 	}
 
 	void TextureManager::Initialize() {
@@ -77,6 +141,10 @@ namespace Index {
 		s_Textures.clear();
 		while (!s_FreeIndices.empty()) s_FreeIndices.pop();
 		s_Textures.reserve(64);
+		g_PathIndex.clear();
+		g_PathIndex.reserve(64);
+		g_CanonicalKeys.clear();
+		g_CanonicalKeys.reserve(64);
 		g_DefaultHandles.fill(TextureHandle{});
 		s_IsInitialized = true;
 		LoadDefaultTextures();
@@ -87,6 +155,9 @@ namespace Index {
 		s_Textures.clear();
 		while (!s_FreeIndices.empty()) s_FreeIndices.pop();
 		g_Providers.clear();
+		g_DestroyListeners.clear();
+		g_PathIndex.clear();
+		g_CanonicalKeys.clear();
 		s_IsInitialized = false;
 	}
 
@@ -138,6 +209,13 @@ namespace Index {
 		slot.WrapU = u;
 		slot.WrapV = v;
 		slot.IsValid = true;
+		// Register in the reverse index so subsequent FindTextureByPath /
+		// LoadTexture calls hit O(1) instead of walking s_Textures. Stored
+		// as (idx + 1) so 0 keeps its "no entry" meaning.
+		g_PathIndex[HashLookupKey(pathStr, filter, u, v)] =
+			static_cast<std::uint32_t>(idx) + 1u;
+		EnsureCanonicalKeyCapacity(s_Textures.size());
+		g_CanonicalKeys[idx] = CanonicalPathKey(pathStr);
 		return TextureHandle{ idx, slot.Generation };
 	}
 
@@ -163,7 +241,19 @@ namespace Index {
 
 	void TextureManager::UnloadTexture(TextureHandle handle) {
 		if (!IsValid(handle)) return;
+		// Fire listeners BEFORE we tear the slot down so subscribers (e.g.
+		// Renderer2D's bind-group cache) can still resolve handle -> Texture2D
+		// to capture the soon-to-be-stale GPU pool ID.
+		FireDestroyListeners(handle);
 		TextureEntry& slot = s_Textures[handle.index];
+		// Drop the reverse-index entry BEFORE we clear the name — otherwise
+		// the hash key derived from slot.Name would no longer match what
+		// was inserted. Generation bump below ensures stale handles to this
+		// slot fail IsValid even if the slot gets recycled with a new path.
+		g_PathIndex.erase(HashLookupKey(slot.Name, slot.SamplerFilter, slot.WrapU, slot.WrapV));
+		if (handle.index < g_CanonicalKeys.size()) {
+			g_CanonicalKeys[handle.index].clear();
+		}
 		slot.Texture.Destroy();
 		slot.Name.clear();
 		slot.IsValid = false;
@@ -203,6 +293,10 @@ namespace Index {
 		}
 
 		reloaded.SetSampler(slot.SamplerFilter, slot.WrapU, slot.WrapV);
+		// Notify listeners BEFORE the move-assign destroys the previous
+		// GPU resource — the renderer's bind-group cache is keyed off the
+		// old Texture2D::GetHandle() pool ID and must evict it now.
+		FireDestroyListeners(handle);
 		slot.Texture = std::move(reloaded);
 		IDX_CORE_INFO_TAG("TextureManager", "Reloaded texture: {}", slot.Name);
 		return true;
@@ -212,10 +306,16 @@ namespace Index {
 		if (!s_IsInitialized || path.empty()) return 0;
 		const std::string targetKey = CanonicalPathKey(path);
 		size_t count = 0;
-		for (size_t i = 0; i < s_Textures.size(); ++i) {
+		// Compare against the pre-canonicalized keys stored at insert time
+		// instead of re-canonicalizing every slot's stored name. Each
+		// CanonicalPathKey call does a weakly_canonical() — i.e. a stat()
+		// syscall — so the previous N×canonicalize per FileWatcher event
+		// scaled poorly with project size.
+		const std::size_t end = std::min<std::size_t>(s_Textures.size(), g_CanonicalKeys.size());
+		for (size_t i = 0; i < end; ++i) {
 			const TextureEntry& slot = s_Textures[i];
 			if (!slot.IsValid || slot.Name.empty()) continue;
-			if (CanonicalPathKey(slot.Name) == targetKey) {
+			if (g_CanonicalKeys[i] == targetKey) {
 				if (ReloadTexture(TextureHandle{ static_cast<uint16_t>(i), slot.Generation })) {
 					++count;
 				}
@@ -254,12 +354,22 @@ namespace Index {
 		for (size_t i = 0; i < s_Textures.size(); ++i) {
 			TextureEntry& slot = s_Textures[i];
 			if (slot.IsValid) {
+				// Fire per-slot BEFORE the slot is invalidated so listeners
+				// can still resolve handle -> GPU pool ID.
+				FireDestroyListeners(TextureHandle{ static_cast<uint16_t>(i), slot.Generation });
 				slot.Texture.Destroy();
 				slot.Name.clear();
 				slot.IsValid = false;
 				++slot.Generation;
 				s_FreeIndices.push(static_cast<uint16_t>(i));
 			}
+		}
+		// Reverse index is keyed off names that no longer exist; clearing
+		// it wholesale matches the old behaviour but avoids leaving stale
+		// hash entries that would resolve to recycled-but-different slots.
+		g_PathIndex.clear();
+		for (std::string& key : g_CanonicalKeys) {
+			key.clear();
 		}
 	}
 
@@ -291,6 +401,19 @@ namespace Index {
 		g_Providers.erase(it, g_Providers.end());
 	}
 
+	uint32_t TextureManager::AddDestroyListener(DestroyListener listener) {
+		if (!listener) return 0;
+		const uint32_t token = g_NextDestroyListenerToken++;
+		g_DestroyListeners.push_back({ token, std::move(listener) });
+		return token;
+	}
+
+	void TextureManager::RemoveDestroyListener(uint32_t token) {
+		auto it = std::remove_if(g_DestroyListeners.begin(), g_DestroyListeners.end(),
+			[token](const DestroyListenerEntry& e) { return e.Token == token; });
+		g_DestroyListeners.erase(it, g_DestroyListeners.end());
+	}
+
 	std::size_t TextureManager::GetTotalTextureMemoryBytes() {
 		std::size_t total = 0;
 		for (const TextureEntry& e : s_Textures) {
@@ -305,20 +428,33 @@ namespace Index {
 	TextureHandle TextureManager::FindTextureByPath(const std::string& path,
 		Filter filter, Wrap u, Wrap v)
 	{
-		for (size_t i = 0; i < s_Textures.size(); ++i) {
-			const TextureEntry& e = s_Textures[i];
-			if (!e.IsValid) continue;
-			if (e.Name == path
-				&& e.SamplerFilter == filter
-				&& e.WrapU == u && e.WrapV == v)
-			{
-				return TextureHandle{ static_cast<uint16_t>(i), e.Generation };
-			}
+		// O(1) hash lookup against the reverse index. The previous linear
+		// scan over s_Textures fired on every LoadTexture call (for dedup)
+		// and dominated repeated sprite loads in scenes with many textures.
+		auto it = g_PathIndex.find(HashLookupKey(path, filter, u, v));
+		if (it == g_PathIndex.end() || it->second == 0u) {
+			return TextureHandle{};
 		}
-		return TextureHandle{};
+		const std::uint32_t slotIdx = it->second - 1u;
+		if (slotIdx >= s_Textures.size()) {
+			return TextureHandle{};
+		}
+		const TextureEntry& e = s_Textures[slotIdx];
+		// Defensive verify against hash collision — exceedingly rare with
+		// FNV-1a but cheap to confirm before handing back a handle.
+		if (!e.IsValid || e.Name != path
+			|| e.SamplerFilter != filter
+			|| e.WrapU != u || e.WrapV != v)
+		{
+			return TextureHandle{};
+		}
+		return TextureHandle{ static_cast<uint16_t>(slotIdx), e.Generation };
 	}
 
 	TextureHandle TextureManager::FindTextureByPath(const std::string& path) {
+		// Sampler-agnostic lookup falls back to a scan — callers that want
+		// O(1) should supply the sampler tuple. This overload is used by
+		// editor / introspection paths, not hot-path renderer code.
 		for (size_t i = 0; i < s_Textures.size(); ++i) {
 			const TextureEntry& e = s_Textures[i];
 			if (e.IsValid && e.Name == path) {

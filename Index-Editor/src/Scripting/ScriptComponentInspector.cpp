@@ -774,6 +774,28 @@ namespace Index {
 
 	void DrawGameSystemFields(Scene& scene, const std::string& className)
 	{
+		// Script-open button — mirrors the EntityScript inspector pattern
+		// above so users get the same double-click-to-open affordance on
+		// game systems. Rendered first and unconditionally so it stays
+		// visible even when the system has no public fields (or the
+		// script engine isn't initialised yet).
+		ImGuiUtils::DrawInspectorValue("Script", [&className](const char* id) {
+			ImGui::Button((className + id).c_str(), ImVec2(ImGui::GetContentRegionAvail().x, 0.0f));
+			if (ImGui::IsItemHovered()) {
+				ImGui::SetTooltip("Double-click to open script");
+				if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+					std::vector<EditorScriptDiscovery::ScriptEntry> entries;
+					EditorScriptDiscovery::CollectProjectScriptEntries(entries);
+					for (const auto& entry : entries) {
+						if (entry.ClassName == className && entry.IsGameSystem) {
+							ExternalEditor::OpenFile(entry.Path.string());
+							break;
+						}
+					}
+				}
+			}
+		});
+
 		if (!ScriptEngine::IsInitialized()) {
 			ImGui::TextDisabled("Script engine not initialized");
 			return;
@@ -814,9 +836,16 @@ namespace Index {
 		}
 
 		// Single-element span carrying the active scene so PropertyDrawer's
-		// MarkSceneDirty hook can dirty the scene on edit. The entity is
-		// otherwise unused — our Get/Set lambdas ignore it.
-		const Entity placeholder = scene.GetEntity(entt::null);
+		// MarkSceneDirty hook can dirty the scene on edit. The entity handle
+		// is otherwise unused — our Get/Set lambdas ignore it, and
+		// MarkSceneDirty only reads Scene* via Entity::GetScene().
+		//
+		// MakeScenePlaceholder builds a Scene-bound Entity with an
+		// entt::null handle so we don't go through Scene::GetEntity (which
+		// asserts on invalid handles). The private Entity(EntityHandle,
+		// Scene&) ctor is friends-only — this editor TU isn't a friend, so
+		// the factory is the only legal path in.
+		const Entity placeholder = Entity::MakeScenePlaceholder(scene);
 		const std::span<const Entity> entitySpan(&placeholder, 1);
 
 		for (auto& rec : records) {

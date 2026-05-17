@@ -6,11 +6,12 @@
 
 #include <algorithm>
 #include <atomic>
-#include <condition_variable>
-#include <deque>
-#include <mutex>
+#include <chrono>
+#include <functional>
 #include <thread>
 #include <vector>
+
+#include <blockingconcurrentqueue.h>
 
 #ifdef IDX_PLATFORM_WINDOWS
 #include <processthreadsapi.h>
@@ -23,12 +24,27 @@ namespace Index {
 		// All pool state is static — JobSystem is a process-wide singleton
 		// service. The state lives in this anonymous namespace so it's only
 		// visible inside this TU.
-		std::mutex                       s_QueueMutex;
-		std::deque<std::function<void()>> s_Queue;
-		std::condition_variable          s_QueueCv;
+		//
+		// The queue itself is moodycamel::BlockingConcurrentQueue — an MPMC
+		// lock-free queue with a built-in semaphore for blocking waits. This
+		// replaces the prior std::mutex + std::deque + std::condition_variable
+		// trio, which serialized every Enqueue/Dequeue on a single mutex and
+		// thundering-herded workers awake on Shutdown. Enqueue is wait-free
+		// in the common path; wait_dequeue_timed lets workers wake on a
+		// short timeout so the Running-state poll in WorkerMain still drives
+		// shutdown.
+		moodycamel::BlockingConcurrentQueue<std::function<void()>> s_Queue;
 
-		std::atomic<bool>                s_Running{false};
-		std::atomic<bool>                s_Initialized{false};
+		// Single source of truth for pool lifecycle. Previously we tracked
+		// Initialized + Running as two independent atomics and the Enqueue
+		// path loaded them outside the queue-mutex window — Shutdown could
+		// flip Running between the load and the actual deque insert, leaving
+		// a job stuck behind the drain. Without a queue mutex anymore, the
+		// state load is the only ordering primitive: Enqueue checks state,
+		// then enqueues; if Shutdown flips state in between, the post-drain
+		// loop in WorkerMain catches the late arrival.
+		enum class PoolState : uint8_t { Uninit = 0, Running = 1, ShuttingDown = 2 };
+		std::atomic<PoolState>           s_State{ PoolState::Uninit };
 		std::vector<std::thread>         s_Workers;
 
 		// thread_local so reads from inside Job bodies are a single TLS
@@ -86,27 +102,24 @@ namespace Index {
 			t_WorkerIndex = workerIndex;
 			SetWorkerThreadName(workerIndex);
 
-			for (;;) {
-				std::function<void()> job;
-				{
-					std::unique_lock<std::mutex> lock(s_QueueMutex);
-					s_QueueCv.wait(lock, [] {
-						return !s_Queue.empty() || !s_Running.load(std::memory_order_acquire);
-					});
-
-					// Drain ordering: when shutdown is signalled (s_Running
-					// = false) we still process whatever's in the queue.
-					// Only exit once the queue is fully empty AND running
-					// is false. This lets OnDestroy paths that schedule
-					// cleanup work still complete.
-					if (s_Queue.empty()) {
-						return;
-					}
-
-					job = std::move(s_Queue.front());
-					s_Queue.pop_front();
+			std::function<void()> job;
+			while (s_State.load(std::memory_order_acquire) == PoolState::Running) {
+				// 50 ms timeout balances responsiveness on shutdown against
+				// CPU spin: workers wake at most 20 times/sec on an idle pool
+				// to re-check the running flag, but a freshly enqueued job
+				// is dispatched immediately via the queue's semaphore.
+				if (s_Queue.wait_dequeue_timed(job, std::chrono::milliseconds(50))) {
+					ExecuteJob(std::move(job));
 				}
+			}
 
+			// Drain ordering: when shutdown is signalled we still process
+			// whatever remains in the queue so OnDestroy paths that
+			// scheduled cleanup work still complete. Race-free because the
+			// state flip in Shutdown happens-before this drain, and any
+			// concurrent Enqueue that observed Running is allowed to land
+			// — its work will be picked up here.
+			while (s_Queue.try_dequeue(job)) {
 				ExecuteJob(std::move(job));
 			}
 		}
@@ -114,33 +127,40 @@ namespace Index {
 	} // namespace
 
 	void JobSystem::Initialize(const JobSystemSpec& spec) {
-		if (s_Initialized.load(std::memory_order_acquire)) {
+		if (s_State.load(std::memory_order_acquire) != PoolState::Uninit) {
 			IDX_CORE_WARN_TAG("JobSystem", "Initialize called twice — ignoring second call");
 			return;
 		}
 
 		const int workerCount = ResolveAutoWorkerCount(spec.WorkerCount);
 
-		s_Running.store(true, std::memory_order_release);
 		s_Workers.reserve(static_cast<size_t>(workerCount));
+		// Flip state to Running BEFORE spawning workers so the first thing
+		// each WorkerMain sees is the live state, not Uninit.
+		s_State.store(PoolState::Running, std::memory_order_release);
 		for (int i = 0; i < workerCount; ++i) {
 			s_Workers.emplace_back(WorkerMain, i);
 		}
 
-		s_Initialized.store(true, std::memory_order_release);
 		IDX_CORE_INFO_TAG("JobSystem", "Started with {} worker thread(s)", workerCount);
 	}
 
 	void JobSystem::Shutdown() {
-		if (!s_Initialized.load(std::memory_order_acquire)) {
+		if (s_State.load(std::memory_order_acquire) != PoolState::Running) {
 			return;
 		}
 
-		{
-			std::scoped_lock lock(s_QueueMutex);
-			s_Running.store(false, std::memory_order_release);
+		s_State.store(PoolState::ShuttingDown, std::memory_order_release);
+
+		// Wake every blocked worker so the state check in WorkerMain runs
+		// promptly. Enqueueing N empty jobs is the simplest poison-pill —
+		// workers pop them, see empty std::function (ExecuteJob skips it),
+		// then loop back to the state check and exit. The post-drain in
+		// WorkerMain still empties any genuine work that slipped in.
+		const size_t workerCount = s_Workers.size();
+		for (size_t i = 0; i < workerCount; ++i) {
+			s_Queue.enqueue(std::function<void()>{});
 		}
-		s_QueueCv.notify_all();
 
 		for (auto& worker : s_Workers) {
 			if (worker.joinable()) {
@@ -152,17 +172,15 @@ namespace Index {
 		// Belt-and-braces: discard anything left in the queue. With the
 		// drain ordering above this should be empty, but a panicked
 		// shutdown (e.g. from a fatal assert) might leave residue.
-		{
-			std::scoped_lock lock(s_QueueMutex);
-			s_Queue.clear();
-		}
+		std::function<void()> sink;
+		while (s_Queue.try_dequeue(sink)) { /* discard */ }
 
-		s_Initialized.store(false, std::memory_order_release);
+		s_State.store(PoolState::Uninit, std::memory_order_release);
 		IDX_CORE_INFO_TAG("JobSystem", "Stopped");
 	}
 
 	bool JobSystem::IsInitialized() {
-		return s_Initialized.load(std::memory_order_acquire);
+		return s_State.load(std::memory_order_acquire) == PoolState::Running;
 	}
 
 	int JobSystem::GetWorkerCount() {
@@ -184,32 +202,25 @@ namespace Index {
 		// run inline on the calling thread. Keeps callers safe across
 		// init/shutdown boundaries — the worst case is a synchronous
 		// fan-in, not a crash.
-		bool runInline = false;
-		{
-			std::scoped_lock lock(s_QueueMutex);
-			runInline = !s_Initialized.load(std::memory_order_acquire)
-				|| !s_Running.load(std::memory_order_acquire);
-			if (!runInline) {
-				s_Queue.emplace_back(std::move(work));
-			}
-		}
-
-		if (runInline) {
+		//
+		// There is a benign race: Shutdown may flip state between this
+		// load and the enqueue below. That late arrival still lands in
+		// the queue and is drained by WorkerMain's post-loop try_dequeue
+		// pass, so no work is lost — just executed on a worker rather
+		// than inline. The opposite race (Initialize racing with
+		// Enqueue) is impossible: Initialize stores Running before any
+		// worker spawns, and pre-init Enqueue here runs inline.
+		if (s_State.load(std::memory_order_acquire) != PoolState::Running) {
 			ExecuteJob(std::move(work));
 			return;
 		}
-		s_QueueCv.notify_one();
+		s_Queue.enqueue(std::move(work));
 	}
 
 	bool JobSystem::TryPopAndRun() {
 		std::function<void()> job;
-		{
-			std::scoped_lock lock(s_QueueMutex);
-			if (s_Queue.empty()) {
-				return false;
-			}
-			job = std::move(s_Queue.front());
-			s_Queue.pop_front();
+		if (!s_Queue.try_dequeue(job)) {
+			return false;
 		}
 		ExecuteJob(std::move(job));
 		return true;

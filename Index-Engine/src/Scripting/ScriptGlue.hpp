@@ -629,6 +629,31 @@ namespace Index {
 		void     (*Cursor_SetMode)(int mode);
 		uint64_t (*Cursor_GetTexture)();
 		void     (*Cursor_SetTexture)(uint64_t assetId);
+
+		// ── EntityCommandBuffer (appended for binary compat) ────────────
+		// Resolve a component's serializedName / displayName to its stable
+		// u32 typeId assigned by ComponentRegistry::Register. Called once
+		// per component type at managed AppDomain load, the result is
+		// cached in ComponentTypes<T>.NativeId, and every ECB command on
+		// the hot path references components purely by this u32. Returns
+		// 0 when the name is unknown (matching the "unregistered"
+		// sentinel of ComponentRegistry::GetByTypeId).
+		uint32_t (*Component_GetTypeId)(const char* componentName);
+
+		// Replay an entire ECB payload against the active scene in one
+		// P/Invoke. `buffer` is the byte-packed command stream produced
+		// by the managed NativeEntityCommandBuffer recorder; `length`
+		// bounds its size. On success, the runtime ID of each created
+		// entity is written into `outRuntimeIds` (which must hold at
+		// least `entityCount` ulong slots; managed code derives that
+		// count from its own recorder state). Returns the number of
+		// entities actually created, or a negative error code:
+		//   -1 = invalid header / truncated buffer
+		//   -2 = no active scene
+		//   -3 = output buffer too small
+		// Wire format documented in EntityCommandBufferWire.hpp.
+		int (*Ecb_Playback)(const uint8_t* buffer, int length,
+			uint64_t* outRuntimeIds, int maxOut);
 	};
 
 	/// Layout must match C# ManagedCallbacksStruct exactly.

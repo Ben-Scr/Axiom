@@ -49,8 +49,18 @@ namespace Index {
 		// length ≤ 64). Used by the Save-As popup to gate the OK button.
 		static bool IsValidLayoutPresetName(const std::string& name);
 
-	private:
+		// Index brand palette + sizing/rounding. Public so the editor
+		// preferences theme switcher can re-apply it after picking a base
+		// (Dark) palette, instead of every theme path having to know the
+		// Index colour table. Idempotent.
 		static void ApplyIndexTheme();
+		// Just the Index colour palette (no sizing/rounding writes).
+		// EditorPreferences::ApplyTheme uses this for Dark so a runtime
+		// theme switch doesn't overwrite the DPI-scaled sizing values
+		// that ImGuiContextLayer::OnAttach finalised post-ScaleAllSizes.
+		static void ApplyIndexThemeColors();
+
+	private:
 		// Belt-and-suspenders save. ImGui auto-saves internally on its
 		// own dirty-timer schedule, but specific change types (mid-
 		// drag dock split ratios, certain window-close paths, late-

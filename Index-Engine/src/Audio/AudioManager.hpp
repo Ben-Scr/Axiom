@@ -16,6 +16,7 @@
 namespace Index {
 	class AudioSourceComponent;
 	class Audio;
+	class IAudioBackend;
 
 	/// AudioManager — global audio facade. THREAD CONTRACT: every public static on
 	/// this class is main-thread-only. The internal state (s_audioMap,
@@ -34,6 +35,13 @@ namespace Index {
 		static bool Initialize();
 		static void Shutdown();
 		static void Update();
+
+		// Install a backend BEFORE Initialize() is called. Packages can replace
+		// the default MiniaudioBackend (e.g. a NullAudioBackend for headless
+		// builds, or a custom platform backend). If unset by the time Initialize
+		// runs, AudioManager installs the default MiniaudioBackend automatically.
+		static void SetBackend(std::unique_ptr<IAudioBackend> backend);
+		static IAudioBackend* GetBackend() { return s_Backend.get(); }
 
 
 		static AudioHandle LoadAudio(const std::string_view& path);
@@ -90,7 +98,7 @@ namespace Index {
 		AudioManager& operator=(const AudioManager&) = delete;
 
 
-		static ma_engine s_Engine;
+		static std::unique_ptr<IAudioBackend> s_Backend;
 		static bool s_IsInitialized;
 
 		struct SoundRequest {
@@ -129,6 +137,12 @@ namespace Index {
 
 		static std::unordered_map<AudioHandle::HandleType, std::unique_ptr<Audio>> s_audioMap;
 		static std::unordered_map<std::string, AudioHandle::HandleType> s_audioPathToHandle;
+		// Secondary cache keyed on the as-passed raw path string (whatever the
+		// caller handed to LoadAudio). Probed before NormalizeAudioPath so a
+		// repeated LoadAudio for the same string skips 3–4 filesystem syscalls.
+		// Stale entries are tolerated and self-heal on next probe — UnloadAudio
+		// does not proactively scrub this map.
+		static std::unordered_map<std::string, AudioHandle::HandleType> s_audioRawPathToHandle;
 		static AudioHandle::HandleType s_nextHandle;
 
 		// Held via unique_ptr so the slot's address is stable while miniaudio's
@@ -145,6 +159,7 @@ namespace Index {
 
 		static AudioHandle::HandleType GenerateHandle();
 		static AudioHandle FindAudioByPath(const std::string& path);
+		static AudioHandle FindAudioByRawPath(const std::string& rawPath);
 		static bool RegisterAudioData(const Audio& audio);
 		static void UnregisterAudioData(const Audio& audio);
 		static uint32_t CreateSoundInstance(const AudioHandle& audioHandle);

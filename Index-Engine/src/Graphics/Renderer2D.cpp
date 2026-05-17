@@ -49,11 +49,13 @@
 //     (queue.WriteBuffer each frame, never frees once grown).
 //   * One persistent uniform VBO (64 bytes for the viewProj mat4), updated
 //     once per RenderSceneWithVP via queue.WriteBuffer.
-//   * Bind groups cached PER FRAME, keyed by texture pool ID. The cache
-//     clears in BeginFrame so a Texture2D::Destroy mid-session doesn't
-//     leave dangling TextureView refs in a stale bind group. Promoting to
-//     a permanent cache is a later optimisation — requires a
-//     TextureManager-side eviction notification.
+//   * Bind groups cached PERSISTENTLY, keyed by texture pool ID. Entries
+//     are evicted by a TextureManager::DestroyListener registered in
+//     Renderer2D::Initialize, fired BEFORE the underlying GPU resource
+//     is torn down by UnloadTexture / UnloadAll / ReloadTexture's
+//     move-assign. This avoids the per-frame device.CreateBindGroup
+//     storm that the earlier per-frame clear caused on texture-heavy
+//     scenes.
 //   * One render pass per RenderSceneWithVP call with LoadOp::Load — so a
 //     prior RenderApi::Clear's clear-only pass result is preserved. The
 //     swap-chain-rendered flag is poked so Present()'s touch-fallback
@@ -110,10 +112,19 @@ namespace Index {
 
 		wgpu::Buffer g_UniformBuffer;
 
-		// Per-frame bind-group cache. Keyed by Texture2D::GetHandle() (the
-		// raw WGPUTextureView pointer cast to uint64_t under WebGPU) so the
-		// same texture used twice in one frame builds the bind group once.
-		std::unordered_map<uint64_t, wgpu::BindGroup> g_BindGroupsThisFrame;
+		// Persistent bind-group cache. Keyed by Texture2D::GetHandle() (the
+		// raw WGPUTextureView pointer cast to uint64_t under WebGPU). Lives
+		// across frames — entries are evicted by a TextureManager
+		// DestroyListener (registered in Renderer2D::Initialize) when the
+		// underlying texture is unloaded, hot-reloaded, or wiped via
+		// UnloadAll. This eliminates the per-frame device.CreateBindGroup
+		// storm that the previous per-frame clear caused for scenes with
+		// many unique textures.
+		std::unordered_map<uint64_t, wgpu::BindGroup> g_BindGroupCache;
+
+		// Token returned from TextureManager::AddDestroyListener so
+		// Shutdown can unregister cleanly. 0 = no listener installed.
+		uint32_t g_TextureDestroyListenerToken = 0;
 
 		bool Vec2ExactEqual(const Vec2& a, const Vec2& b) {
 			return a.x == b.x && a.y == b.y;
@@ -266,7 +277,7 @@ namespace Index {
 			const AABB& viewportAABB,
 			std::vector<Instance44>& outInstances)
 		{
-			if (entryIndex >= grid.Entries.size()) return;
+			if (entryIndex >= grid.Entries.size() || entryIndex >= grid.QueryMarks.size()) return;
 			if (grid.QueryMarks[entryIndex] == grid.QueryStamp) return;
 			grid.QueryMarks[entryIndex] = grid.QueryStamp;
 
@@ -363,6 +374,13 @@ namespace Index {
 			}
 
 			auto view = registry.view<Transform2DComponent, SpriteRendererComponent>(entt::exclude<DisabledTag, StaticTag>);
+			// Reserve up-front so the per-frame collect loop doesn't trigger a
+			// std::vector grow-and-copy mid-iteration. The capacity stabilises at
+			// the high-water mark across frames because outInstances/outTextures
+			// are caller-owned scratch buffers.
+			const size_t dynamicHint = view.size_hint();
+			const size_t staticHint = staticGrid ? staticGrid->Entries.size() : 0;
+			outInstances.reserve(dynamicHint + staticHint);
 			uint32_t dynamicDrawIndex = 0;
 			for (auto entity : view) {
 				uint32_t currentDrawIndex = dynamicDrawIndex++;
@@ -441,14 +459,6 @@ namespace Index {
 			return outInstances.size();
 		}
 
-		// Persistent scratch for the rearranged output. We swap into the
-		// "live" g_*Scratch globals at the end so capacity moves between
-		// the live and scratch vectors — across calls capacity stabilises
-		// at the high-water mark, and the sort no longer allocates two
-		// fresh vectors per RenderSceneWithVP call.
-		std::vector<Instance44>    g_SortedInstScratch;
-		std::vector<TextureHandle> g_SortedTexScratch;
-
 		void SortInstancesInPlace(size_t n) {
 			if (n < 2) return;
 			auto sortLess = [](const Instance44& a, const Instance44& b) {
@@ -466,6 +476,13 @@ namespace Index {
 			}
 			if (alreadySorted) return;
 
+			// Indirect sort then in-place permutation following the cycle
+			// chains of the resulting index array. The previous implementation
+			// allocated two sorted scratch vectors and copied every element
+			// once into them, then swapped — that's 3× the memory traffic of
+			// what's actually required. This version uses one temporary per
+			// cycle (two registers, effectively) and visits each element of
+			// each parallel array exactly once during the rearrangement.
 			g_SortIndexScratch.resize(n);
 			for (size_t k = 0; k < n; ++k) g_SortIndexScratch[k] = k;
 			std::sort(g_SortIndexScratch.begin(), g_SortIndexScratch.end(),
@@ -477,14 +494,33 @@ namespace Index {
 					return ia.DrawIndex < ib.DrawIndex;
 				});
 
-			g_SortedInstScratch.resize(n);
-			g_SortedTexScratch.resize(n);
-			for (size_t k = 0; k < n; ++k) {
-				g_SortedInstScratch[k] = g_InstancesScratch[g_SortIndexScratch[k]];
-				g_SortedTexScratch[k]  = g_TexturesScratch[g_SortIndexScratch[k]];
+			// Apply the permutation g_SortIndexScratch to both parallel
+			// arrays in-place. std::sort produces READ-direction indices
+			// (sorted[k] = src[idx[k]]), so we walk each cycle once,
+			// pulling values backwards into position. The swap-as-you-go
+			// form is shorter but is the WRITE-direction permutation and
+			// would silently mis-sort here.
+			//
+			// Two moves per element across the whole array (one stash, one
+			// final write) plus one assignment per intra-cycle hop —
+			// strictly fewer copies than the previous double-scratch
+			// implementation, and no auxiliary vector allocation.
+			for (size_t i = 0; i < n; ++i) {
+				if (g_SortIndexScratch[i] == i) continue;
+				Instance44    holdInst = g_InstancesScratch[i];
+				TextureHandle holdTex  = g_TexturesScratch[i];
+				size_t j = i;
+				while (g_SortIndexScratch[j] != i) {
+					const size_t src = g_SortIndexScratch[j];
+					g_InstancesScratch[j] = g_InstancesScratch[src];
+					g_TexturesScratch[j]  = g_TexturesScratch[src];
+					g_SortIndexScratch[j] = j; // mark settled
+					j = src;
+				}
+				g_InstancesScratch[j] = holdInst;
+				g_TexturesScratch[j]  = holdTex;
+				g_SortIndexScratch[j] = j;
 			}
-			g_InstancesScratch.swap(g_SortedInstScratch);
-			g_TexturesScratch.swap(g_SortedTexScratch);
 		}
 
 		// ── GPU resource helpers ────────────────────────────────────────────
@@ -532,8 +568,8 @@ namespace Index {
 			if (!tex || !tex->IsValid()) return nullptr;
 			const uint64_t poolId = tex->GetHandle();
 
-			auto cacheIt = g_BindGroupsThisFrame.find(poolId);
-			if (cacheIt != g_BindGroupsThisFrame.end()) return cacheIt->second;
+			auto cacheIt = g_BindGroupCache.find(poolId);
+			if (cacheIt != g_BindGroupCache.end()) return cacheIt->second;
 
 			const auto lookup = WebGPUBackend::LookupTexture2D(poolId);
 			if (!lookup.Valid || !lookup.View || !lookup.Sampler) {
@@ -558,7 +594,7 @@ namespace Index {
 
 			wgpu::BindGroup bg = device.CreateBindGroup(&desc);
 			if (!bg) return nullptr;
-			g_BindGroupsThisFrame.emplace(poolId, bg);
+			g_BindGroupCache.emplace(poolId, bg);
 			return bg;
 		}
 	}
@@ -570,6 +606,18 @@ namespace Index {
 
 	void Renderer2D::Initialize() {
 		WebGPUSpriteResources::Acquire();
+		// Hook texture destruction so the persistent bind-group cache evicts
+		// entries whose underlying GPU texture is about to disappear. Without
+		// this, a stale bind group would hold a freed TextureView and trigger
+		// a use-after-free on the next draw using the same poolId.
+		if (g_TextureDestroyListenerToken == 0) {
+			g_TextureDestroyListenerToken = TextureManager::AddDestroyListener(
+				[](TextureHandle handle) {
+					Texture2D* tex = TextureManager::GetTexture(handle);
+					if (!tex) return;
+					g_BindGroupCache.erase(tex->GetHandle());
+				});
+		}
 		m_IsInitialized = true;
 	}
 
@@ -577,9 +625,14 @@ namespace Index {
 		if (!m_IsInitialized) return;
 		WebGPUSpriteResources::Release();
 
+		if (g_TextureDestroyListenerToken != 0) {
+			TextureManager::RemoveDestroyListener(g_TextureDestroyListenerToken);
+			g_TextureDestroyListenerToken = 0;
+		}
+
 		// Persistent GPU resources — drop now so the device is fully idle by
 		// the time WebGPUApi::Shutdown unconfigures the surface.
-		g_BindGroupsThisFrame.clear();
+		g_BindGroupCache.clear();
 		g_StaticSpriteGrids.clear();
 		g_InstanceBuffer         = nullptr;
 		g_InstanceBufferCapacity = 0;
@@ -599,11 +652,10 @@ namespace Index {
 	void Renderer2D::BeginFrame() {
 		m_DrawCallsCount = 0;
 		m_RenderLoopDuration = 0.0f;
-		// Reset per-frame bind groups — texture lookups they reference may
-		// be invalidated between frames by TextureManager::PurgeUnreferenced
-		// or explicit Texture2D::Destroy. A fresh per-frame build keeps the
-		// pool clean without needing a destroy-notification hook.
-		g_BindGroupsThisFrame.clear();
+		// Bind-group cache is persistent across frames now — entries are
+		// evicted by the TextureManager DestroyListener registered in
+		// Initialize() whenever the underlying texture is unloaded or
+		// hot-reloaded. No per-frame clear here.
 
 		// Runtime auto-render path. Editors set SkipBeginFrameRender=true
 		// and drive RenderSceneWithVP themselves into per-panel FBOs; the

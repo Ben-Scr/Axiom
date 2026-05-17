@@ -10,6 +10,8 @@
 #include "Collections/Viewport.hpp"
 #include "Core/Log.hpp"
 #include "Gui/AssetBrowser.hpp"
+#include "Gui/BuildProfilesPanel.hpp"
+#include "Gui/EditorPreferencesPanel.hpp"
 #include "Gui/PackageManagerPanel.hpp"
 #include "Gui/PrefabInspector.hpp"
 #include "Gui/ProfilerPanel.hpp"
@@ -90,6 +92,7 @@ namespace Index {
 		void RenderLogPanel();
 		void RenderProjectPanel();
 		void RenderBuildPanel();
+		void RenderBuildProfilesPanel();
 		void RenderPlayerSettingsPanel();
 		void RenderProjectSettingsPanel();
 		// Splash preview overlay. Drawn on top of the dockspace with an
@@ -283,6 +286,21 @@ namespace Index {
 		// risk a freshly-recycled id starting collapsed.
 		std::unordered_set<uint32_t> m_CollapsedHierarchyEntities;
 
+		// Entities currently sitting in the cut "clipboard". They remain
+		// alive in the scene (and functional at runtime) but render dimmed
+		// in the hierarchy until Paste destroys them or Esc/another Cut
+		// clears the marker. Stored as raw uint32 so destroyed entities
+		// don't dangle as entity handles — stale entries are harmless.
+		std::unordered_set<uint32_t> m_CutEntities;
+
+		// When multiple scenes are loaded, the user's last hierarchy
+		// interaction (clicking the scene node, expanding it, right-
+		// clicking it, or selecting one of its entities) wins as the
+		// "create entity" target. Falls back to SceneManager's active
+		// scene when empty or stale. Cleared when the named scene is
+		// unloaded so GetContextScene doesn't dangle.
+		std::string m_LastInteractedSceneName;
+
 		EntityHandle m_RenamingEntity = entt::null;
 		char m_EntityRenameBuffer[256]{};
 		int m_EntityRenameFrameCounter = 0;
@@ -292,6 +310,12 @@ namespace Index {
 		bool m_IsEditorViewHovered = false;
 		bool m_IsEditorViewFocused = false;
 		EditorViewDrawMode m_EditorViewDrawMode = EditorViewDrawMode::Default;
+		// Per-Editor-View gizmo visibility toggle (toolbar button next to
+		// the draw-mode selector). Affects only the Editor View FBO; the
+		// Game View's gizmo state is unaffected. When off, selection
+		// outlines, collider/camera/particle indicators, and any
+		// package-registered viewport gizmos are skipped for this panel.
+		bool m_ShowGizmos = true;
 		bool m_EditorCameraFocusActive = false;
 		Vec2 m_EditorCameraFocusTarget{ 0.0f, 0.0f };
 		float m_EditorCameraFocusOrthoSize = 5.0f;
@@ -375,6 +399,9 @@ namespace Index {
 
 		bool m_ShowQuitSaveDialog = false;
 		bool m_ShowBuildPanel = false;
+		bool m_ShowBuildProfilesPanel = false;
+		BuildProfilesPanel m_BuildProfilesPanel;
+		bool m_BuildProfilesPanelInitialized = false;
 		bool m_ShowPlayerSettings = false;
 		bool m_ShowPackageManager = false;
 		bool m_ShowProfiler = false;
@@ -386,6 +413,8 @@ namespace Index {
 		std::vector<std::string> m_BuildSceneList;
 		int m_DraggedSceneIndex = -1;
 		bool m_ShowProjectSettings = false;
+		bool m_ShowEditorPreferences = false;
+		EditorPreferencesPanel m_EditorPreferencesPanel;
 		bool m_PackageManagerInitialized = false;
 		// Splash preview state. Set by the Show Preview button in the
 		// Player Settings panel; consumed by the editor's chrome update
@@ -412,16 +441,18 @@ namespace Index {
 		int m_BuildState = 0;
 		bool m_BuildAndPlay = false;
 		// Cross-thread build progress. ExecuteBuildAsync runs on
-		// m_BuildThread / m_BuildFuture and writes to these atomics +
-		// the message string under m_BuildProgressMutex; the UI thread
-		// reads them every frame to drive the progress bar / status
-		// label, then polls m_BuildFuture::wait_for(0) to detect
-		// completion. Atomics keep the per-frame UI read lock-free.
+		// m_BuildThread / m_BuildFuture and writes progress + stage
+		// together under m_BuildProgressMutex; the UI thread reads them
+		// under the same lock so it never observes a stage that doesn't
+		// match the displayed progress. (The previous design split
+		// progress into a relaxed atomic and stage under the mutex,
+		// which could surface mismatched pairs.) m_BuildSucceeded stays
+		// atomic — it's a single value the UI polls for completion.
 		std::future<void> m_BuildFuture;
-		std::atomic<float> m_BuildProgress{ 0.0f };
 		std::atomic<bool>  m_BuildSucceeded{ true };
 		std::mutex m_BuildProgressMutex;
-		std::string m_BuildStage;     // protected by m_BuildProgressMutex
+		float m_BuildProgress{ 0.0f };  // protected by m_BuildProgressMutex
+		std::string m_BuildStage;       // protected by m_BuildProgressMutex
 		std::vector<entt::entity> m_EditorPausedAudioEntities; // AudioSources paused by editor, not by gameplay
 		std::chrono::steady_clock::time_point m_BuildStartTime;
 	};

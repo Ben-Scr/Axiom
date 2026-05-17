@@ -36,7 +36,7 @@ jobs:
           if (-not $msbuild) {
             throw 'MSBuild.exe not found via vswhere.'
           }
-          & $msbuild "Axiom.sln" /m /t:Axiom-Engine /p:Configuration=Release /p:Platform=x64
+          & $msbuild "Index.sln" /m /t:Index-Engine /p:Configuration=Release /p:Platform=x64
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
           }
@@ -47,13 +47,13 @@ jobs:
 
       - name: Restore .NET dependencies
         shell: pwsh
-        run: dotnet restore Axiom.sln
+        run: dotnet restore Index.sln
 
       - name: Build Package Tool
         shell: pwsh
         run: |
-          dotnet restore Axiom-PackageTool/Axiom-PackageTool.csproj
-          dotnet build Axiom-PackageTool/Axiom-PackageTool.csproj --configuration Release --no-restore
+          dotnet restore Index-PackageTool/Index-PackageTool.csproj
+          dotnet build Index-PackageTool/Index-PackageTool.csproj --configuration Release --no-restore
 
       - name: Build Solution
         shell: pwsh
@@ -67,7 +67,7 @@ jobs:
 
           @"
           set "PATH=$pathValue"
-          "$msbuild" "Axiom.sln" /m /p:Configuration=Release /p:Platform=x64
+          "$msbuild" "Index.sln" /m /p:Configuration=Release /p:Platform=x64
           if errorlevel 1 exit /b %errorlevel%
           "@ | cmd /Q
 
@@ -77,7 +77,7 @@ jobs:
 
       - name: Windows Runtime Smoke Test
         shell: pwsh
-        run: python scripts/ci/runtime_smoke_test.py --binary bin/Release-windows-x86_64/Axiom-Runtime/Axiom-Runtime.exe
+        run: python scripts/ci/runtime_smoke_test.py --binary bin/Release-windows-x86_64/Index-Runtime/Index-Runtime.exe
 
   linux-build:
     runs-on: ubuntu-latest
@@ -105,7 +105,7 @@ jobs:
           ./scripts/Setup.sh --module-profile core --skip-lfs
 
       - name: Build Core Profile
-        run: make config=release -j"$(nproc)" Axiom-Engine
+        run: make config=release -j"$(nproc)" Index-Engine
 
       - name: Generate Makefiles
         run: |
@@ -114,18 +114,18 @@ jobs:
           ./scripts/Setup.sh
 
       - name: Build Linux Targets
-        run: make config=release -j"$(nproc)" Axiom-Engine Axiom-Runtime Axiom-Editor
+        run: make config=release -j"$(nproc)" Index-Engine Index-Runtime Index-Editor
 
       - name: Linux Engine Tests
         run: |
-          make config=release -j"$(nproc)" Axiom-Engine-Tests
-          ./bin/Release-linux-x86_64/Axiom-Engine-Tests/Axiom-Engine-Tests
+          make config=release -j"$(nproc)" Index-Engine-Tests
+          ./bin/Release-linux-x86_64/Index-Engine-Tests/Index-Engine-Tests
 
       - name: Build Linux Debug Targets
-        run: make config=debug -j"$(nproc)" Axiom-Engine Axiom-Runtime Axiom-Editor
+        run: make config=debug -j"$(nproc)" Index-Engine Index-Runtime Index-Editor
 
       - name: Linux Runtime Smoke Test
-        run: python3 scripts/ci/runtime_smoke_test.py --binary bin/Release-linux-x86_64/Axiom-Runtime/Axiom-Runtime
+        run: python3 scripts/ci/runtime_smoke_test.py --binary bin/Release-linux-x86_64/Index-Runtime/Index-Runtime
 
       - name: Linux Debug Runtime Smoke Test
-        run: python3 scripts/ci/runtime_smoke_test.py --binary bin/Debug-linux-x86_64/Axiom-Runtime/Axiom-Runtime
+        run: python3 scripts/ci/runtime_smoke_test.py --binary bin/Debug-linux-x86_64/Index-Runtime/Index-Runtime

@@ -3,8 +3,23 @@
 
 #include "Assets/AssetRegistry.hpp"
 #include "Audio/AudioManager.hpp"
-#include "Components/Components.hpp"
+#include "Components/Forward.hpp"
+#include "Components/General/General.hpp"
+#include "Components/UI/UI.hpp"
+#include "Components/Tags.hpp"
+#include "Components/Audio/AudioSourceComponent.hpp"
+#include "Components/Graphics/SpriteRendererComponent.hpp"
+#include "Components/Graphics/ImageComponent.hpp"
+#include "Components/Graphics/Camera2DComponent.hpp"
+#include "Components/Graphics/ParticleSystem2DComponent.hpp"
 #include "Components/Graphics/TextRendererComponent.hpp"
+#include "Components/Physics/BoxCollider2DComponent.hpp"
+#include "Components/Physics/CircleCollider2DComponent.hpp"
+#include "Components/Physics/PolygonCollider2DComponent.hpp"
+#include "Components/Physics/Rigidbody2DComponent.hpp"
+#include "Components/Physics/FastBody2DComponent.hpp"
+#include "Components/Physics/FastBoxCollider2DComponent.hpp"
+#include "Components/Physics/FastCircleCollider2DComponent.hpp"
 #include "Graphics/Text/FontManager.hpp"
 #include "Graphics/TextureManager.hpp"
 #include "Inspector/PropertyRegistration.hpp"
@@ -346,6 +361,12 @@ namespace Index {
 		RegisterComponent<UUIDComponent>(sceneManager, "UUID", ComponentCategory::Tag);
 		RegisterComponent<EntityMetaDataComponent>(sceneManager, "Entity Metadata", ComponentCategory::Tag);
 		RegisterComponent<PrefabInstanceComponent>(sceneManager, "Prefab Instance", ComponentCategory::Tag);
+
+		RegisterComponent<NewNativeComponent>(sceneManager, "New Native",
+			ComponentCategory::Component, "General", "NewNative",
+			{
+				Properties::Make("Value", "Value", &NewNativeComponent::Value),
+			});
 
 		// ── Rendering ───────────────────────────────────────────────
 

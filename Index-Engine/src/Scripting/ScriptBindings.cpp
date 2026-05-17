@@ -227,6 +227,7 @@ namespace Index {
 	}
 
 	void PopulateNonComponentBindings(NativeBindings& b);
+	void PopulateEcbBindings(NativeBindings& b);
 
 	// IsValid re-check: ResolveEntityReference can succeed at lookup time, but a
 	// script callback firing between resolution and the registry access may have
@@ -241,26 +242,61 @@ namespace Index {
 
 
 	// Tries displayName, serializedName, and the +"Component" C# fallbacks for package types.
-	static const ComponentInfo* FindComponentByName(const std::string& name) {
+	//
+	// Fast path: every component whose serializedName matches `name` exactly
+	// (the overwhelmingly common case — C# script names are generated from
+	// the same source as serializedName) resolves via a single hash lookup.
+	// Only the legacy displayName / displayName+"Component" / normalized
+	// variants fall through to the linear scan, which we keep for backwards
+	// compatibility with hand-written script that still uses display names.
+	//
+	// Takes std::string_view so the C# bridge's UTF-8 char* lands here without
+	// the heap allocation a const std::string& parameter forced — the previous
+	// `FindComponentByName(const char*)` overload built a temporary std::string
+	// on every entity/component crossing.
+	static const ComponentInfo* FindComponentByName(std::string_view name) {
+		if (name.empty()) return nullptr;
 		const auto& registry = SceneManager::Get().GetComponentRegistry();
+
+		// Hash fast path 1: name matches a registered serializedName directly.
+		if (const ComponentInfo* hit = registry.FindBySerializedName(name)) {
+			return hit;
+		}
+		// Hash fast path 2: name is "<SerializedName>Component" (C# convention).
+		// Trim the suffix without an allocation.
+		constexpr std::string_view kComponentSuffix = "Component";
+		if (name.size() > kComponentSuffix.size()) {
+			const std::string_view tail = name.substr(name.size() - kComponentSuffix.size());
+			if (tail == kComponentSuffix) {
+				const std::string_view stem = name.substr(0, name.size() - kComponentSuffix.size());
+				if (const ComponentInfo* hit = registry.FindBySerializedName(stem)) {
+					return hit;
+				}
+			}
+		}
+
+		// Slow path: displayName / normalized-displayName variants. Kept for
+		// the rare component whose C# wrapper uses a hand-written name that
+		// doesn't match serializedName (legacy / package types).
 		const ComponentInfo* found = nullptr;
 		registry.ForEachComponentInfo([&](const std::type_index&, const ComponentInfo& info) {
 			if (found) return;
 			if (info.displayName == name) { found = &info; return; }
-			if (!info.serializedName.empty() && info.serializedName == name) { found = &info; return; }
-			if (!info.serializedName.empty() && (info.serializedName + "Component") == name) {
-				found = &info;
-				return;
-			}
 			if (!info.displayName.empty()) {
-				std::string normalized;
-				normalized.reserve(info.displayName.size());
+				// Compare against the de-spaced displayName + "Component" without
+				// materialising a temporary string: walk both sides character by
+				// character, skipping spaces on the displayName side.
+				std::size_t i = 0;
+				bool match = true;
 				for (char c : info.displayName) {
-					if (c != ' ') normalized.push_back(c);
+					if (c == ' ') continue;
+					if (i >= name.size() || name[i] != c) { match = false; break; }
+					++i;
 				}
-				if ((normalized + "Component") == name) {
+				if (match && (name.size() - i) == kComponentSuffix.size()
+					&& name.substr(i) == kComponentSuffix)
+				{
 					found = &info;
-					return;
 				}
 			}
 		});
@@ -268,7 +304,7 @@ namespace Index {
 	}
 
 	static const ComponentInfo* FindComponentByName(const char* name) {
-		return FindComponentByName(std::string(name ? name : ""));
+		return FindComponentByName(std::string_view(name ? name : ""));
 	}
 
 	static bool HasManagedComponent(Scene& scene, EntityHandle handle, const std::string& className) {
@@ -416,7 +452,7 @@ namespace Index {
 		}
 	};
 
-	static bool BuildComponentRequirement(const std::string& name, QueryComponentRequirement& out) {
+	static bool BuildComponentRequirement(std::string_view name, QueryComponentRequirement& out) {
 		if (name.empty()) {
 			return false;
 		}
@@ -427,7 +463,11 @@ namespace Index {
 			return true;
 		}
 
-		out.ManagedClassName = name;
+		// Native lookup failed — fall back to managed-component dispatch.
+		// Only here do we materialise an owning std::string, because the
+		// QueryComponentRequirement outlives the (potentially transient)
+		// view-of-source-buffer passed in by the caller.
+		out.ManagedClassName.assign(name);
 		return true;
 	}
 
@@ -726,17 +766,25 @@ namespace Index {
 		if (!scene || !componentNames || !outEntityIDs || maxOut <= 0) return 0;
 		if (!scene->IsLoaded()) return 0;
 
-		// Parse pipe-delimited component names.
+		// Walk the pipe-delimited component-name buffer with string_views
+		// instead of copying. Previously we built a `std::string` over the
+		// entire buffer and then `substr`'d each token into a fresh string —
+		// two allocations per token, per query call, in C#'s hot per-frame
+		// path. Now the only allocation is the final ManagedClassName when
+		// we have to fall back to managed dispatch.
 		std::vector<QueryComponentRequirement> requirements;
-		std::string names(componentNames);
+		const std::string_view names(componentNames);
 		size_t start = 0;
-		while (start < names.size()) {
+		while (start <= names.size()) {
 			size_t end = names.find('|', start);
-			if (end == std::string::npos) end = names.size();
-			std::string name = names.substr(start, end - start);
-			QueryComponentRequirement requirement;
-			if (!BuildComponentRequirement(name, requirement)) return 0;
-			requirements.push_back(std::move(requirement));
+			if (end == std::string_view::npos) end = names.size();
+			const std::string_view token = names.substr(start, end - start);
+			if (!token.empty()) {
+				QueryComponentRequirement requirement;
+				if (!BuildComponentRequirement(token, requirement)) return 0;
+				requirements.push_back(std::move(requirement));
+			}
+			if (end == names.size()) break;
 			start = end + 1;
 		}
 		if (requirements.empty()) return 0;
@@ -888,20 +936,26 @@ namespace Index {
 		}
 	}
 
-	// Helper: parse pipe-delimited names into native or managed component requirements.
+	// Helper: parse pipe-delimited names into native or managed component
+	// requirements. Walks the input buffer as string_views — the only owning
+	// allocation is BuildComponentRequirement's fallback ManagedClassName
+	// when native lookup misses. Previously this built a std::string over
+	// the entire buffer and substr'd each token, allocating twice per token
+	// in the per-frame filtered-query path.
 	static bool ParseComponentNames(const char* names, std::vector<QueryComponentRequirement>& out) {
 		if (!names || names[0] == '\0') return true; // empty is valid (no filter)
-		std::string str(names);
+		const std::string_view str(names);
 		size_t start = 0;
-		while (start < str.size()) {
+		while (start <= str.size()) {
 			size_t end = str.find('|', start);
-			if (end == std::string::npos) end = str.size();
-			std::string name = str.substr(start, end - start);
-			if (!name.empty()) {
+			if (end == std::string_view::npos) end = str.size();
+			const std::string_view token = str.substr(start, end - start);
+			if (!token.empty()) {
 				QueryComponentRequirement requirement;
-				if (!BuildComponentRequirement(name, requirement)) return false;
+				if (!BuildComponentRequirement(token, requirement)) return false;
 				out.push_back(std::move(requirement));
 			}
+			if (end == str.size()) break;
 			start = end + 1;
 		}
 		return true;
@@ -2639,6 +2693,10 @@ namespace Index {
 	void ScriptBindings::PopulateNativeBindings(NativeBindings& b)
 	{
 		PopulateNonComponentBindings(b);
+		// ECB slots — appended at the end of NativeBindings for binary
+		// compat. Wired here so the managed bindings copy picks them up
+		// in the same initialization step as the rest of the surface.
+		PopulateEcbBindings(b);
 
 		b.Entity_Clone = &Index_Entity_Clone;
 		b.Entity_InstantiatePrefab = &Index_Entity_InstantiatePrefab;

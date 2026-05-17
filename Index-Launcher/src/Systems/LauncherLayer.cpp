@@ -620,6 +620,7 @@ namespace Index {
 		RenderCreateProjectPopup();
 		RenderDeleteProjectPopups();
 		RenderSettingsPopup();
+		RenderProjectInfoPopup();
 
 		ImGui::End();
 	}
@@ -655,6 +656,13 @@ namespace Index {
 
 			// Right-click context menu per item
 			if (ImGui::BeginPopupContextItem("##RowCtx")) {
+				if (ImGui::MenuItem("Info")) {
+					m_PendingInfoProject = entry;
+					m_OpenInfoPopup = true;
+				}
+
+				ImGui::Separator();
+
 				if (ImGui::MenuItem("Open in Explorer")) {
 					OpenProjectInExplorer(entry);
 				}
@@ -725,6 +733,7 @@ namespace Index {
 			m_Registry.Save();
 			m_ProjectSizeTasks.erase(removePath);
 			m_CreatedAtCache.erase(removePath);
+			m_EngineVersionCache.erase(removePath);
 		}
 	}
 
@@ -1380,6 +1389,7 @@ namespace Index {
 		}
 		m_ProjectSizeTasks.clear();
 		m_CreatedAtCache.clear();
+		m_EngineVersionCache.clear();
 
 		m_Registry.Load();
 		m_Registry.ValidateAll();
@@ -1439,6 +1449,10 @@ namespace Index {
 			m_OpenSettingsPopup = false;
 		}
 
+		{
+			const ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+			ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+		}
 		ImGui::SetNextWindowSize(ImVec2(560, 0), ImGuiCond_Appearing);
 		if (!ImGui::BeginPopupModal("Launcher Settings", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
 			return;
@@ -1505,6 +1519,160 @@ namespace Index {
 		}
 		ImGui::SameLine();
 		if (ImGui::Button("Cancel", ImVec2(100, 0))) {
+			ImGui::CloseCurrentPopup();
+		}
+
+		ImGui::EndPopup();
+	}
+
+	// Formats a filesystem timestamp (seconds since epoch in system_clock terms)
+	// as "YYYY-MM-DD HH:MM" in local time. Returns "unknown" for zero/invalid
+	// timestamps. Local time matches the user's expectation when the dialog
+	// reads "Created on …".
+	static std::string FormatLocalDateTime(std::int64_t secondsSinceEpoch) {
+		if (secondsSinceEpoch <= 0) return "unknown";
+		std::time_t t = static_cast<std::time_t>(secondsSinceEpoch);
+		std::tm tm{};
+#ifdef IDX_PLATFORM_WINDOWS
+		if (localtime_s(&tm, &t) != 0) return "unknown";
+#else
+		if (!localtime_r(&t, &tm)) return "unknown";
+#endif
+		std::ostringstream ss;
+		ss << std::put_time(&tm, "%Y-%m-%d %H:%M");
+		return ss.str();
+	}
+
+	void LauncherLayer::RenderProjectInfoPopup() {
+		if (m_OpenInfoPopup) {
+			ImGui::OpenPopup("Project Info");
+			m_OpenInfoPopup = false;
+		}
+
+		{
+			const ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+			ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+		}
+		ImGui::SetNextWindowSize(ImVec2(560, 0), ImGuiCond_Appearing);
+		if (!ImGui::BeginPopupModal("Project Info", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+			return;
+		}
+
+		if (!m_PendingInfoProject.has_value()) {
+			// Nothing to show — close defensively so the modal can't get stuck.
+			ImGui::CloseCurrentPopup();
+			ImGui::EndPopup();
+			return;
+		}
+
+		const LauncherProjectEntry& entry = *m_PendingInfoProject;
+
+		// Lazily look up the engine version from index-project.json. Cached per
+		// path so re-renders don't re-parse the file every frame. IndexProject::Load
+		// is only called on paths that pass Validate(), guarding against partially-
+		// deleted projects whose entry still lingers in the registry.
+		auto versionIt = m_EngineVersionCache.find(entry.Path);
+		if (versionIt == m_EngineVersionCache.end()) {
+			std::string version;
+			if (IndexProject::Validate(entry.Path)) {
+				auto project = IndexProject::Load(entry.Path);
+				version = project.EngineVersion;
+			}
+			if (version.empty()) version = "unknown";
+			versionIt = m_EngineVersionCache.emplace(entry.Path, std::move(version)).first;
+		}
+		const std::string& engineVersion = versionIt->second;
+
+		// Lazily look up the creation/modification timestamp of the project
+		// directory. Reuses m_CreatedAtCache so this shares state with the
+		// "Created" sort axis and stays consistent across the UI. Note that on
+		// Windows std::filesystem::last_write_time is mtime, not true ctime —
+		// matching what the existing "Created" sort axis surfaces.
+		auto createdIt = m_CreatedAtCache.find(entry.Path);
+		if (createdIt == m_CreatedAtCache.end()) {
+			std::error_code ec;
+			std::int64_t ts = 0;
+			std::filesystem::path p(entry.Path);
+			auto ftime = std::filesystem::last_write_time(p, ec);
+			if (!ec) {
+				ts = std::chrono::duration_cast<std::chrono::seconds>(
+					ftime.time_since_epoch()).count();
+			}
+			createdIt = m_CreatedAtCache.emplace(entry.Path, ts).first;
+		}
+		const std::string createdStr = FormatLocalDateTime(createdIt->second);
+
+		const std::string sizeStr = GetProjectSizeDisplayText(entry);
+		const std::string relativeLastOpened = FormatRelativeTime(entry.LastOpened);
+
+		// Header line: project name as the modal's title-ish content.
+		ImGui::TextUnformatted(entry.Name.c_str());
+		ImGui::Separator();
+		ImGui::Spacing();
+
+		// Two-column table: left column auto-sized to the longest label, right
+		// column stretches to fill. Horizontal inner borders give visual
+		// separation between rows without making it look like a heavy form.
+		if (ImGui::BeginTable("##ProjectInfoTable", 2,
+			ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_BordersInnerH)) {
+			ImGui::TableSetupColumn("##label", ImGuiTableColumnFlags_WidthFixed);
+			ImGui::TableSetupColumn("##value", ImGuiTableColumnFlags_WidthStretch);
+
+			auto labelValueRow = [](const char* label, const char* value) {
+				ImGui::TableNextRow();
+				ImGui::TableSetColumnIndex(0);
+				ImGui::TextUnformatted(label);
+				ImGui::TableSetColumnIndex(1);
+				ImGui::TextWrapped("%s", value && *value ? value : "—");
+			};
+
+			// Path row gets a special right side: read-only input for selecting
+			// + copying, plus an Open button that hands off to the existing
+			// "Open in Explorer" path. Sized so the button always fits.
+			ImGui::TableNextRow();
+			ImGui::TableSetColumnIndex(0);
+			ImGui::TextUnformatted("Path");
+			ImGui::TableSetColumnIndex(1);
+			{
+				static char s_PathBuffer[1024];
+				std::snprintf(s_PathBuffer, sizeof(s_PathBuffer), "%s", entry.Path.c_str());
+				const float buttonWidth = 70.0f;
+				ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - buttonWidth - 6.0f);
+				ImGui::InputText("##InfoPath", s_PathBuffer, sizeof(s_PathBuffer),
+					ImGuiInputTextFlags_ReadOnly);
+				ImGui::SameLine();
+				if (ImGui::Button("Open", ImVec2(buttonWidth, 0))) {
+					OpenProjectInExplorer(entry);
+				}
+			}
+
+			labelValueRow("Created", createdStr.c_str());
+
+			// Last opened: show the relative form ("3h ago") plus the raw ISO
+			// timestamp in parens so power users can see the exact moment.
+			std::string lastOpenedCombined;
+			if (!entry.LastOpened.empty()) {
+				if (!relativeLastOpened.empty()) {
+					lastOpenedCombined = relativeLastOpened + "  (" + entry.LastOpened + ")";
+				} else {
+					lastOpenedCombined = entry.LastOpened;
+				}
+			}
+			labelValueRow("Last Opened",
+				lastOpenedCombined.empty() ? "never" : lastOpenedCombined.c_str());
+
+			labelValueRow("Size", sizeStr.c_str());
+			labelValueRow("Engine Version", engineVersion.c_str());
+
+			ImGui::EndTable();
+		}
+
+		ImGui::Spacing();
+		ImGui::Separator();
+		ImGui::Spacing();
+
+		if (ImGui::Button("Close", ImVec2(100, 0))) {
+			m_PendingInfoProject.reset();
 			ImGui::CloseCurrentPopup();
 		}
 

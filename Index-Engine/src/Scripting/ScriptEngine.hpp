@@ -34,6 +34,13 @@ namespace Index {
 		static void ReloadAssemblies();
 
 		static void SetScene(Scene* scene);
+		/// Returns the scene currently bound to the scripting layer.
+		/// @return Pointer to the active scene, or nullptr if SetScene has
+		///         not been called this run (e.g. before the first scene
+		///         load, or after SetScene(nullptr) during teardown).
+		///         Callers MUST null-check before dereferencing. The pointer
+		///         is non-owning and is invalidated whenever SetScene is
+		///         called again — do not cache it across frames.
 		static Scene* GetScene();
 
 		// ── Instance management ────────────────────────────────────────

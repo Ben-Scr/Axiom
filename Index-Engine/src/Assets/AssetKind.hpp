@@ -10,6 +10,7 @@ namespace Index {
 		Prefab,
 		Script,
 		Font,
+		Shader,
 		Other
 	};
 

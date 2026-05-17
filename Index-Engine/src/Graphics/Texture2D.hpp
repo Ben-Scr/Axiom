@@ -74,6 +74,12 @@ namespace Index {
 
 		float AspectRatio() const { return m_Height != 0 ? float(m_Width) / float(m_Height) : 0.0f; }
 
+		// True when the texture rows were uploaded bottom-up (the stb_image
+		// "flipVertical=true" load path). Editor preview helpers consult
+		// this so a single canonical UV-mapping rule covers every preview
+		// path — the bug was previously fixed per-call-site.
+		bool IsFlippedY() const { return m_FlippedY; }
+
 	private:
 		// Under WebGPU this holds the raw WGPUTextureView pointer (cast to
 		// uint64_t). 0 stays the "unset" sentinel; IsValid() compares
@@ -86,6 +92,7 @@ namespace Index {
 		Wrap   m_WrapU = Wrap::Clamp;
 		Wrap   m_WrapV = Wrap::Clamp;
 		bool   m_HasMips = true;
+		bool   m_FlippedY = false;
 		void ApplySamplerParams() const;
 	};
 

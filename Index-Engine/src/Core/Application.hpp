@@ -25,6 +25,8 @@
 namespace Index {
 	class GuiRenderer;
 	class GizmoRenderer2D;
+	class IPhysicsEngine;
+	class IRenderer;
 	class PhysicsSystem2D;
 	class Renderer2D;
 	class SceneManager;
@@ -90,7 +92,13 @@ namespace Index {
 		static void SetCommandLineArgs(int argc, char** argv) { s_CommandLineArgs = { argc, argv }; }
 
 
-		Renderer2D* GetRenderer2D() { return m_Renderer2D.get(); }
+		// Application owns the renderer as an IRenderer* for swappability.
+		// GetRenderer2D() downcasts to the concrete default impl — safe today
+		// because Renderer2D is the only registered implementation, and asserted
+		// in debug. When alternate IRenderer backends ship, callers that still
+		// need Renderer2D-specific operations must check this returns non-null.
+		IRenderer* GetRenderer() { return m_Renderer2D.get(); }
+		Renderer2D* GetRenderer2D();
 		GuiRenderer* GetGuiRenderer() { return m_GuiRenderer.get(); }
 		Input& GetInput() { return m_Input; }
 		Time& GetTime() { return m_Time; }
@@ -248,10 +256,10 @@ namespace Index {
 
 	private:
 		std::unique_ptr<Window> m_Window;
-		std::unique_ptr<Renderer2D> m_Renderer2D;
+		std::unique_ptr<IRenderer> m_Renderer2D;
 		std::unique_ptr<GuiRenderer> m_GuiRenderer;
 		std::unique_ptr<GizmoRenderer2D> m_GizmoRenderer2D;
-		std::unique_ptr<PhysicsSystem2D> m_PhysicsSystem2D;
+		std::unique_ptr<IPhysicsEngine> m_PhysicsSystem2D;
 		std::unique_ptr<SceneManager> m_SceneManager;
 		Input m_Input;
 		Time m_Time;

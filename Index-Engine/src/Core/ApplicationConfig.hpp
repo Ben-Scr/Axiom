@@ -3,6 +3,8 @@
 #include "Core/Export.hpp"
 #include "Core/WindowSpecification.hpp"
 
+#include <cstddef>
+
 #ifndef INDEX_DEFAULT_ENABLE_GUI_RENDERER
 #define INDEX_DEFAULT_ENABLE_GUI_RENDERER 1
 #endif
@@ -31,6 +33,10 @@
 #define INDEX_DEFAULT_ENABLE_TEXTURE_MANAGER 1
 #endif
 
+#ifndef INDEX_DEFAULT_ENABLE_SHADER_MANAGER
+#define INDEX_DEFAULT_ENABLE_SHADER_MANAGER 1
+#endif
+
 #ifndef INDEX_DEFAULT_ENABLE_PACKAGE_HOST
 #define INDEX_DEFAULT_ENABLE_PACKAGE_HOST 1
 #endif
@@ -41,6 +47,14 @@
 
 #ifndef INDEX_DEFAULT_ENABLE_VSYNC
 #define INDEX_DEFAULT_ENABLE_VSYNC 1
+#endif
+
+#ifndef INDEX_DEFAULT_FRAME_ARENA_CAPACITY_BYTES
+#define INDEX_DEFAULT_FRAME_ARENA_CAPACITY_BYTES (1024 * 1024) // 1 MiB
+#endif
+
+#ifndef INDEX_DEFAULT_PERSISTENT_ARENA_CAPACITY_BYTES
+#define INDEX_DEFAULT_PERSISTENT_ARENA_CAPACITY_BYTES (64 * 1024) // 64 KiB
 #endif
 
 namespace Index {
@@ -70,6 +84,10 @@ namespace Index {
 		// path falls back to SetWindowIconFromResource (Win32 resource icon)
 		// and only uses TextureManager when a project sets AppIconPath.
 		bool EnableTextureManager = INDEX_DEFAULT_ENABLE_TEXTURE_MANAGER != 0;
+		// Off skips ShaderManager::Initialize / Shutdown. Safe for any
+		// process that doesn't load .wgsl shaders through the cache; the
+		// renderers ship embedded WGSL via the WebGPU backend directly.
+		bool EnableShaderManager = INDEX_DEFAULT_ENABLE_SHADER_MANAGER != 0;
 		// Off skips PackageHost::LoadAll / UnloadAll. Native packages
 		// (Pkg.<Name>.Native.dll next to the executable) are not discovered
 		// or loaded. Use this for processes that don't run game packages —
@@ -79,6 +97,13 @@ namespace Index {
 		bool SetWindowIcon = INDEX_DEFAULT_SET_WINDOW_ICON != 0;
 		bool Vsync = INDEX_DEFAULT_ENABLE_VSYNC != 0;
 		bool UseTargetFrameRateForMainLoop = true;
+
+		// FrameArenas backing-buffer sizes. Frame() is reset every
+		// EndFrame; Persistent() is never auto-reset. Set to 0 to opt
+		// out — Allocate on a zero-capacity arena returns nullptr, so
+		// callers that gracefully handle exhaustion still work.
+		std::size_t FrameArenaCapacityBytes      = INDEX_DEFAULT_FRAME_ARENA_CAPACITY_BYTES;
+		std::size_t PersistentArenaCapacityBytes = INDEX_DEFAULT_PERSISTENT_ARENA_CAPACITY_BYTES;
 
 		// Headless / minimal: window only, no rendering, no audio, no physics, no
 		// scripting, no packages. For console tools, asset processors, headless

@@ -14,6 +14,8 @@
 #include "Inspector/ReferencePicker.hpp"
 #include "Packages/GitHubSource.hpp"
 #include "Packages/NuGetSource.hpp"
+#include "Project/BuildPlatformSupport.hpp"
+#include "Project/IndexBuildProfile.hpp"
 #include "Project/IndexProject.hpp"
 #include "Project/ProjectManager.hpp"
 #include "Project/SplashAssetResolve.hpp"
@@ -942,19 +944,18 @@ namespace Index {
 	}
 
 	void ImGuiEditorLayer::ReportBuildProgress(float progress, std::string_view stage) {
-		// Atomics for the bar (read every frame), mutex for the
-		// human-readable string (read once per frame). Splitting the
-		// state lets the per-frame UI poll be lock-free for the bar
-		// and only acquire the lock to copy the latest stage label.
-		m_BuildProgress.store(std::clamp(progress, 0.0f, 1.0f), std::memory_order_relaxed);
-		{
-			std::lock_guard<std::mutex> lk(m_BuildProgressMutex);
-			m_BuildStage.assign(stage);
-		}
+		// Update progress and stage as a pair under the same lock so the UI
+		// thread can never observe a stage that doesn't match the bar fraction.
+		std::lock_guard<std::mutex> lk(m_BuildProgressMutex);
+		m_BuildProgress = std::clamp(progress, 0.0f, 1.0f);
+		m_BuildStage.assign(stage);
 	}
 
 	void ImGuiEditorLayer::ExecuteBuildAsync() {
-		m_BuildProgress.store(0.0f, std::memory_order_relaxed);
+		{
+			std::lock_guard<std::mutex> lk(m_BuildProgressMutex);
+			m_BuildProgress = 0.0f;
+		}
 		m_BuildSucceeded.store(true, std::memory_order_relaxed);
 		ReportBuildProgress(0.0f, "Starting build");
 
@@ -1394,6 +1395,105 @@ namespace Index {
 				}
 			}
 
+			// Active build profile — drives target platform + render backend
+			// for the upcoming Build. Rescanned from disk every frame so
+			// edits in the Build Profiles panel propagate without a manual
+			// refresh button. Cheap: profiles are 3-field JSON files and a
+			// typical project has a handful.
+			if (ImGui::CollapsingHeader("Target Platform", ImGuiTreeNodeFlags_DefaultOpen)) {
+				ImGui::Indent(8);
+
+				std::vector<IndexBuildProfile> diskProfiles;
+				if (!project->GetBuildProfilesDirectory().empty()) {
+					std::error_code ec;
+					const std::string dir = project->GetBuildProfilesDirectory();
+					if (std::filesystem::exists(dir)) {
+						const std::string ext(IndexBuildProfile::FileExtension);
+						for (const auto& entry : std::filesystem::directory_iterator(
+								 dir, std::filesystem::directory_options::skip_permission_denied, ec)) {
+							if (ec) { ec.clear(); continue; }
+							if (!entry.is_regular_file(ec) || ec) { ec.clear(); continue; }
+							if (entry.path().extension().string() != ext) continue;
+							diskProfiles.push_back(IndexBuildProfile::Load(entry.path().string()));
+						}
+						std::sort(diskProfiles.begin(), diskProfiles.end(),
+							[](const IndexBuildProfile& a, const IndexBuildProfile& b) {
+								return a.Name < b.Name;
+							});
+					}
+				}
+
+				// Clear stale ActiveBuildProfileName if the file was deleted
+				// externally — keeps the UI honest after a manual delete.
+				if (!project->ActiveBuildProfileName.empty()) {
+					bool stillExists = false;
+					for (const auto& p : diskProfiles) {
+						if (p.Name == project->ActiveBuildProfileName) { stillExists = true; break; }
+					}
+					if (!stillExists) {
+						project->ActiveBuildProfileName.clear();
+						project->Save();
+					}
+				}
+
+				ImGui::TextUnformatted("Active Profile:");
+				ImGui::SetNextItemWidth(-1);
+				const char* previewLabel = project->ActiveBuildProfileName.empty()
+					? "<none>" : project->ActiveBuildProfileName.c_str();
+				if (ImGui::BeginCombo("##ActiveBuildProfile", previewLabel)) {
+					if (ImGui::Selectable("<none>", project->ActiveBuildProfileName.empty())) {
+						if (!project->ActiveBuildProfileName.empty()) {
+							project->ActiveBuildProfileName.clear();
+							project->Save();
+						}
+					}
+					for (const auto& p : diskProfiles) {
+						const bool selected = (project->ActiveBuildProfileName == p.Name);
+						if (ImGui::Selectable(p.Name.c_str(), selected)) {
+							if (project->ActiveBuildProfileName != p.Name) {
+								project->ActiveBuildProfileName = p.Name;
+								project->Save();
+							}
+						}
+					}
+					ImGui::EndCombo();
+				}
+
+				ImGui::SameLine();
+				if (ImGui::SmallButton("Manage Profiles…")) {
+					m_ShowBuildProfilesPanel = true;
+				}
+
+				// Echo the active profile's platform + render backend below
+				// the combo so the user sees what Build will actually target
+				// without flipping over to the Build Profiles window.
+				if (!project->ActiveBuildProfileName.empty()) {
+					const IndexBuildProfile* active = nullptr;
+					for (const auto& p : diskProfiles) {
+						if (p.Name == project->ActiveBuildProfileName) { active = &p; break; }
+					}
+					if (active) {
+						ImGui::Text("Platform: %s",
+							IndexBuildProfile::PlatformToString(active->Platform));
+						ImGui::Text("Rendering API: %s",
+							IndexProject::RenderBackendToString(active->RenderBackend));
+						if (!BuildPlatformSupport::IsAvailable(active->Platform)) {
+							ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.2f, 1.0f));
+							ImGui::TextWrapped("[!] %s",
+								BuildPlatformSupport::UnavailableReason(active->Platform).c_str());
+							ImGui::PopStyleColor();
+						}
+					}
+				}
+				else {
+					ImGui::TextDisabled("No active profile — pick one above or click 'Manage Profiles…'.");
+				}
+
+				ImGui::Unindent(8);
+			}
+
+			ImGui::Spacing();
+
 			if (ImGui::CollapsingHeader("Scene List", ImGuiTreeNodeFlags_DefaultOpen)) {
 				ImGui::Indent(8);
 				if (m_BuildSceneList.empty()) {
@@ -1557,24 +1657,81 @@ namespace Index {
 
 		ImGui::Spacing();
 
-		bool canBuild = project && !Application::GetIsPlaying() && m_BuildState == 0;
+		// Resolve the active profile (if any) — used both for the Build
+		// gating below AND to apply the selected RenderBackend to the
+		// project before the build kicks off. Re-loaded from disk on each
+		// frame so manual edits to .indexbuild files propagate without a
+		// restart.
+		IndexBuildProfile activeProfile;
+		bool activeProfileResolved = false;
+		if (project && !project->ActiveBuildProfileName.empty()) {
+			const std::string profilePath =
+				(std::filesystem::path(project->GetBuildProfilesDirectory()) /
+				 (project->ActiveBuildProfileName + std::string(IndexBuildProfile::FileExtension))).string();
+			if (std::filesystem::exists(profilePath)) {
+				activeProfile = IndexBuildProfile::Load(profilePath);
+				activeProfileResolved = true;
+			}
+		}
+
+		const bool platformAvailable = activeProfileResolved
+			&& BuildPlatformSupport::IsAvailable(activeProfile.Platform);
+
+		bool canBuild = project && !Application::GetIsPlaying() && m_BuildState == 0
+			&& activeProfileResolved && platformAvailable;
 		if (!canBuild) ImGui::BeginDisabled();
 
 		float halfWidth = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
 		if (ImGui::Button("Build", ImVec2(halfWidth, 0))) {
+			// Bake the active profile's render backend into the project
+			// before the build runs — the existing build pipeline reads
+			// IndexProject::ActiveRenderBackend, so this routes the
+			// per-profile choice through without changing pipeline signatures.
+			if (activeProfileResolved && project) {
+				project->ActiveRenderBackend = activeProfile.RenderBackend;
+				project->Save();
+			}
 			m_BuildState = 1;
 			m_BuildAndPlay = false;
 			m_BuildStartTime = std::chrono::steady_clock::now();
 		}
 		ImGui::SameLine();
 		if (ImGui::Button("Build and Play", ImVec2(-1, 0))) {
+			if (activeProfileResolved && project) {
+				project->ActiveRenderBackend = activeProfile.RenderBackend;
+				project->Save();
+			}
 			m_BuildState = 1;
 			m_BuildAndPlay = true;
 			m_BuildStartTime = std::chrono::steady_clock::now();
 		}
 
 		if (!canBuild) ImGui::EndDisabled();
+
+		// Explain why the button is disabled — the editor's existing
+		// disabled-button convention has no tooltip, so a one-liner below
+		// keeps users from guessing.
+		if (project && !Application::GetIsPlaying() && m_BuildState == 0) {
+			if (!activeProfileResolved) {
+				ImGui::TextDisabled("Select an active build profile to enable Build.");
+			}
+			else if (!platformAvailable) {
+				ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.2f, 1.0f));
+				ImGui::TextWrapped("[!] Cannot build: %s",
+					BuildPlatformSupport::UnavailableReason(activeProfile.Platform).c_str());
+				ImGui::PopStyleColor();
+			}
+		}
 		ImGui::End();
+	}
+
+	void ImGuiEditorLayer::RenderBuildProfilesPanel() {
+		if (!m_ShowBuildProfilesPanel) return;
+		if (!m_BuildProfilesPanelInitialized) {
+			m_BuildProfilesPanel.Initialize();
+			m_BuildProfilesPanelInitialized = true;
+		}
+		m_BuildProfilesPanel.Render(&m_ShowBuildProfilesPanel);
 	}
 
 	void ImGuiEditorLayer::RenderPlayerSettingsPanel() {
@@ -2109,17 +2266,12 @@ namespace Index {
 		static bool s_RenderBackendChangePopup = false;
 		static IndexProject::RenderBackend s_PendingRenderBackend = IndexProject::RenderBackend::Auto;
 
+		// "Show file extensions" and the Auto-Save section moved to
+		// Edit -> Preferences (user-scoped now). Asset duplicate-suffix
+		// stays here — it's about the asset files we author into this
+		// project, not editor chrome.
 		if (ImGui::CollapsingHeader("Asset Browser", ImGuiTreeNodeFlags_DefaultOpen)) {
 			ImGui::Indent(8);
-			changed |= ImGui::Checkbox("Show file extensions", &project->ShowFileExtensions);
-			if (ImGui::IsItemHovered()) {
-				ImGui::SetTooltip(
-					"When off (default), asset names render without their\n"
-					"extension (\"MyScene\" instead of \"MyScene.scene\").\n"
-					"Renaming pre-fills only the stem and re-appends the\n"
-					"original extension on commit. When on, extensions are\n"
-					"shown and editable verbatim.");
-			}
 			constexpr const char* k_AssetSuffixLabels[] = {
 				"Asset 1",
 				"Asset (1)",
@@ -2135,25 +2287,6 @@ namespace Index {
 				project->EditorAssetDuplicateSuffix =
 					static_cast<IndexProject::EditorEntityNameSuffixStyle>(assetSuffixIndex);
 				changed = true;
-			}
-			ImGui::Unindent(8);
-		}
-
-		if (ImGui::CollapsingHeader("Auto-Save", ImGuiTreeNodeFlags_DefaultOpen)) {
-			ImGui::Indent(8);
-			changed |= ImGui::Checkbox("Auto-save scenes", &project->AutoSaveScenes);
-			if (ImGui::IsItemHovered()) {
-				ImGui::SetTooltip(
-					"Periodically save the active scene while editing.\n"
-					"Skipped during Play mode (Play-mode edits are discarded\n"
-					"on Stop, so saving them would clobber the pre-Play snapshot).");
-			}
-			if (project->AutoSaveScenes) {
-				ImGui::SetNextItemWidth(160.0f);
-				changed |= ImGui::InputFloat("Interval (seconds)", &project->AutoSaveIntervalSeconds, 5.0f, 30.0f, "%.0f");
-				if (project->AutoSaveIntervalSeconds < 5.0f) {
-					project->AutoSaveIntervalSeconds = 5.0f;
-				}
 			}
 			ImGui::Unindent(8);
 		}
@@ -2343,6 +2476,7 @@ namespace Index {
 			ImGui::OpenPopup("Restart Renderer?");
 			s_RenderBackendChangePopup = false;
 		}
+		ImGuiUtils::CenterNextModal();
 		if (ImGui::BeginPopupModal("Restart Renderer?", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
 			ImGui::TextWrapped(
 				"Changing the rendering API from %s to %s requires the renderer to be reinitialized.",
@@ -2697,7 +2831,10 @@ namespace Index {
 			ImGui::Spacing();
 			const Texture2D* tex = GetPreviewTexture(path);
 			if (tex && tex->IsValid()) {
-				ImGuiUtils::DrawTexturePreview(tex->GetHandle(), tex->GetWidth(), tex->GetHeight(), 128.0f);
+				// Use the Texture2D overload so the canonical flip rule
+				// applies — preview matches the asset-browser thumbnail
+				// regardless of the texture's load-time flipVertical flag.
+				ImGuiUtils::DrawTexturePreview(*tex, 128.0f);
 				ImGui::Text("%.0f x %.0f", tex->GetWidth(), tex->GetHeight());
 			}
 		}

@@ -14,6 +14,8 @@ namespace Index {
 		// EnableTextureManager stays on so the window-icon path can still load
 		// a project icon (a one-shot upload, not a per-frame cost).
 		config.EnableTextureManager = true;
+		// No rendering in Minimal -> no shaders to cache.
+		config.EnableShaderManager = false;
 		config.EnablePackageHost = false;
 		// Window-icon and vsync are not subsystem toggles — leave them alone.
 		return config;
