@@ -26,11 +26,18 @@ namespace Index {
 	// Conflict checks run against the union of components on the selection,
 	// so an entry is disabled when adding it to ANY selected entity would
 	// violate a `conflictsWith` declaration.
+	//
+	// `outChanged` (optional): set to true when the popup actually adds a
+	// component (or game system) this frame. Callers that cache derived
+	// per-selection state — currently the entity inspector's component-
+	// intersection cache — use this to invalidate exactly when needed
+	// rather than every frame the popup is open.
 	void RenderAddComponentPopup(
 		const char* popupId,
 		Scene& scene,
 		std::span<const Entity> entities,
 		char* searchBuffer,
-		std::size_t searchBufferSize);
+		std::size_t searchBufferSize,
+		bool* outChanged = nullptr);
 
 }

@@ -3585,6 +3585,9 @@ namespace Index {
 				}
 			}
 			scene.MarkDirty();
+			// NameComponent can be added/removed and FirstName changes; the
+			// next inspector frame must rebuild its cached header strings.
+			++m_SelectionVersion;
 		}
 
 		// Toggles row: Enabled + Static. Tri-state when the underlying tag
@@ -3592,51 +3595,41 @@ namespace Index {
 		{
 			constexpr int kMixedValueFlag = 1 << 12;
 
-			auto sampleHas = [&](auto checkFn) -> std::pair<bool, bool> {
-				bool first = checkFn(selectedEntities[0]);
-				bool uniform = true;
-				for (std::size_t i = 1; i < selectedEntities.size(); ++i) {
-					if (checkFn(selectedEntities[i]) != first) {
-						uniform = false;
-						break;
-					}
-				}
-				return { first, uniform };
-			};
-
 			// Inspector toggle reflects the AUTHORED enabled state, not
 			// the effective in-hierarchy state. A child whose parent is
 			// disabled has both DisabledTag and InheritedDisabledTag —
 			// inherited-disabled doesn't flip the user's intent, so we
 			// keep the checkbox on. The parent re-enable cascade then
 			// restores the child's runtime DisabledTag accordingly.
-			auto enabledSample = sampleHas([](Entity& e) {
-				return !e.HasComponent<DisabledTag>() || e.HasComponent<InheritedDisabledTag>();
-			});
-			bool isEnabled = enabledSample.first;
-			if (!enabledSample.second) ImGui::PushItemFlag(static_cast<ImGuiItemFlags>(kMixedValueFlag), true);
+			bool isEnabled = m_InspectorCache.EnabledFirst;
+			if (!m_InspectorCache.EnabledUniform) ImGui::PushItemFlag(static_cast<ImGuiItemFlags>(kMixedValueFlag), true);
 			const bool enabledChanged = ImGui::Checkbox("Enabled", &isEnabled);
-			if (!enabledSample.second) ImGui::PopItemFlag();
+			if (!m_InspectorCache.EnabledUniform) ImGui::PopItemFlag();
 			if (enabledChanged) {
 				for (Entity& e : selectedEntities) {
 					e.SetEnabled(isEnabled);
 				}
 				scene.MarkDirty();
+				// DisabledTag/InheritedDisabledTag presence changes — cached
+				// EnabledFirst/EnabledUniform are now stale.
+				++m_SelectionVersion;
 			}
 
 			ImGui::SameLine();
 
-			auto staticSample = sampleHas([](Entity& e) { return e.HasComponent<StaticTag>(); });
-			bool isStatic = staticSample.first;
-			if (!staticSample.second) ImGui::PushItemFlag(static_cast<ImGuiItemFlags>(kMixedValueFlag), true);
+			bool isStatic = m_InspectorCache.StaticFirst;
+			if (!m_InspectorCache.StaticUniform) ImGui::PushItemFlag(static_cast<ImGuiItemFlags>(kMixedValueFlag), true);
 			const bool staticChanged = ImGui::Checkbox("Static", &isStatic);
-			if (!staticSample.second) ImGui::PopItemFlag();
+			if (!m_InspectorCache.StaticUniform) ImGui::PopItemFlag();
 			if (staticChanged) {
 				for (Entity& e : selectedEntities) {
 					if (isStatic && !e.HasComponent<StaticTag>()) e.AddComponent<StaticTag>();
 					else if (!isStatic && e.HasComponent<StaticTag>()) e.RemoveComponent<StaticTag>();
 				}
 				scene.MarkDirty();
+				// StaticTag presence changes — cached StaticFirst/StaticUniform
+				// are now stale.
+				++m_SelectionVersion;
 			}
 		}
 
@@ -3789,24 +3782,25 @@ namespace Index {
 			return it != overridesByComponent.end() && !it->second.empty();
 		};
 
-		// Collect components per their presence across the selection. Only
-		// components present on EVERY selected entity are shown; components
-		// present on some-but-not-all are listed in a muted footer line.
-		std::vector<std::string> hiddenPartialComponents;
+		// Common-component intersection + partial list both come from the
+		// inspector cache (recomputed once per selection mutation). The old
+		// path ran an O(N) info.has() sweep per component per frame; with
+		// 25k entities × ~50 component types that was 1.25M+ checks per
+		// frame just to decide what to draw. ForEach below still iterates
+		// the registry in its native (stable) order so the section order
+		// the user sees doesn't depend on hash bucket layout.
+		const std::vector<std::string>& hiddenPartialComponents = m_InspectorCache.PartialComponents;
 
 		registry.ForEachComponentInfo([&](const std::type_index& typeId, const ComponentInfo& info) {
 			if (info.category != ComponentCategory::Component) return;
 			if (info.displayName == "Name") return; // Shown in entity header
 
-			// Set-intersection check: skip when not all entities have it. If
-			// some have it and others don't, remember it for the footer.
-			std::size_t haveCount = 0;
-			for (const Entity& e : selectedEntities) {
-				if (info.has(e)) ++haveCount;
-			}
-			if (haveCount == 0) return;
-			if (haveCount < selectedEntities.size()) {
-				hiddenPartialComponents.push_back(info.displayName);
+			// Cache gate: this set holds exactly the types present on every
+			// selected entity. O(1) lookup replaces the per-frame O(N)
+			// info.has() sweep. PartialComponents was populated alongside
+			// CommonComponentTypes during the cache pass.
+			if (m_InspectorCache.CommonComponentTypes.find(typeId)
+				== m_InspectorCache.CommonComponentTypes.end()) {
 				return;
 			}
 
@@ -3929,9 +3923,11 @@ namespace Index {
 			}
 			if (pasteRequested && canPasteComponent) {
 				bool anyApplied = false;
+				bool anyAdded = false;
 				for (const Entity& e : selectedEntities) {
 					if (!pastedComponentInfo->has(e)) {
 						registry.AddWithDependencies(e, pastedComponentInfo->typeId);
+						anyAdded = true;
 					}
 					if (SceneSerializer::DeserializeComponent(scene, e.GetHandle(),
 						clipboardPayload.SerializedName, clipboardPayload.Data)) {
@@ -3939,6 +3935,10 @@ namespace Index {
 					}
 				}
 				if (anyApplied) scene.MarkDirty();
+				// AddWithDependencies may have inserted a new component type
+				// on one or more selected entities — the cached intersection
+				// has to refresh so the new section appears.
+				if (anyAdded) ++m_SelectionVersion;
 			}
 			if (resetRequested && canSerializeComponent) {
 				bool anyReset = false;
@@ -4035,6 +4035,9 @@ namespace Index {
 				}
 			});
 			scene.MarkDirty();
+			// Component-presence map changed — the cached
+			// CommonComponentTypes / PartialComponents must rebuild.
+			++m_SelectionVersion;
 		}
 
 		if (!hiddenPartialComponents.empty()) {
@@ -4070,8 +4073,16 @@ namespace Index {
 		// to every entity missing the component, and runs conflict checks
 		// against the selection so invariant-violating combinations are
 		// disabled with a tooltip explaining why.
+		bool addComponentChanged = false;
 		RenderAddComponentPopup("AddComponentPopup", scene, entitySpan,
-			m_ComponentSearchBuffer, sizeof(m_ComponentSearchBuffer));
+			m_ComponentSearchBuffer, sizeof(m_ComponentSearchBuffer),
+			&addComponentChanged);
+		if (addComponentChanged) {
+			// New component(s) were just added to one or more selected entities
+			// — invalidate the inspector cache so the next frame rebuilds the
+			// common-component intersection and surfaces the new section.
+			++m_SelectionVersion;
+		}
 
 		// Drag-drop target: accept script files dropped onto the Inspector panel
 		if (ImGui::BeginDragDropTarget()) {
@@ -4079,19 +4090,21 @@ namespace Index {
 				std::string droppedPath(static_cast<const char*>(payload->Data));
 				std::vector<EditorScriptDiscovery::ScriptEntry> droppedScripts;
 				EditorScriptDiscovery::CollectScriptFile(std::filesystem::path(droppedPath), droppedScripts);
+				bool scriptDroppedSomething = false;
 				for (const auto& scriptEntry : droppedScripts) {
 					if (scriptEntry.IsGameSystem || scriptEntry.IsGlobalSystem) {
 						continue;
 					}
 					for (const Entity& e : selectedEntities) {
 						if (scriptEntry.IsManagedComponent) {
-							AttachManagedComponentToEntity(const_cast<Entity&>(e), scene, scriptEntry);
+							scriptDroppedSomething |= AttachManagedComponentToEntity(const_cast<Entity&>(e), scene, scriptEntry);
 						}
 						else {
-							AttachScriptToEntity(const_cast<Entity&>(e), scene, scriptEntry);
+							scriptDroppedSomething |= AttachScriptToEntity(const_cast<Entity&>(e), scene, scriptEntry);
 						}
 					}
 				}
+				if (scriptDroppedSomething) ++m_SelectionVersion;
 			}
 			ImGui::EndDragDropTarget();
 		}

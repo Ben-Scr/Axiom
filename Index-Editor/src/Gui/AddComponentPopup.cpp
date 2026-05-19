@@ -76,8 +76,14 @@ namespace Index {
 		Scene& scene,
 		std::span<const Entity> entities,
 		char* searchBuffer,
-		std::size_t searchBufferSize)
+		std::size_t searchBufferSize,
+		bool* outChanged)
 	{
+		// Local helper: set the caller's "did we change anything" flag.
+		// Cheaper than threading the pointer through every add site.
+		auto markChanged = [&]() {
+			if (outChanged) *outChanged = true;
+		};
 		// Constrain the popup so a long component list can't extend past the
 		// main viewport. Without this, the popup grows unbounded vertically
 		// and the bottom entries scroll off the screen — there's no built-in
@@ -134,10 +140,17 @@ namespace Index {
 		};
 
 		auto addComponentToAll = [&](const ComponentInfo& info) {
+			bool added = false;
 			for (const Entity& e : entities) {
-				if (!info.has(e)) registry.AddWithDependencies(e, info.typeId);
+				if (!info.has(e)) {
+					registry.AddWithDependencies(e, info.typeId);
+					added = true;
+				}
 			}
-			scene.MarkDirty();
+			if (added) {
+				scene.MarkDirty();
+				markChanged();
+			}
 		};
 
 		// Conflict check: any selected entity already holding a component that
@@ -267,14 +280,16 @@ namespace Index {
 				const std::string label = BuildScriptMenuLabel(scriptEntry);
 				const std::string path = scriptEntry.Path.string();
 				if (ImGuiUtils::MenuItemEllipsis(label, path.c_str(), nullptr, false, true, 260.0f)) {
+					bool added = false;
 					for (const Entity& e : entities) {
 						if (scriptEntry.IsManagedComponent) {
-							AttachManagedComponentToEntity(const_cast<Entity&>(e), scene, scriptEntry);
+							added |= AttachManagedComponentToEntity(const_cast<Entity&>(e), scene, scriptEntry);
 						}
 						else {
-							AttachScriptToEntity(const_cast<Entity&>(e), scene, scriptEntry);
+							added |= AttachScriptToEntity(const_cast<Entity&>(e), scene, scriptEntry);
 						}
 					}
+					if (added) markChanged();
 					ImGui::CloseCurrentPopup();
 				}
 			}
@@ -401,9 +416,11 @@ namespace Index {
 						const std::string label = BuildScriptMenuLabel(scriptEntry);
 						const std::string path = scriptEntry.Path.string();
 						if (ImGuiUtils::MenuItemEllipsis(label, path.c_str(), nullptr, false, true, 260.0f)) {
+							bool added = false;
 							for (const Entity& e : entities) {
-								AttachManagedComponentToEntity(const_cast<Entity&>(e), scene, scriptEntry);
+								added |= AttachManagedComponentToEntity(const_cast<Entity&>(e), scene, scriptEntry);
 							}
+							if (added) markChanged();
 							ImGui::CloseCurrentPopup();
 						}
 					}
@@ -421,9 +438,11 @@ namespace Index {
 						const std::string label = BuildScriptMenuLabel(scriptEntry);
 						const std::string path = scriptEntry.Path.string();
 						if (ImGuiUtils::MenuItemEllipsis(label, path.c_str(), nullptr, false, true, 260.0f)) {
+							bool added = false;
 							for (const Entity& e : entities) {
-								AttachScriptToEntity(const_cast<Entity&>(e), scene, scriptEntry);
+								added |= AttachScriptToEntity(const_cast<Entity&>(e), scene, scriptEntry);
 							}
+							if (added) markChanged();
 							ImGui::CloseCurrentPopup();
 						}
 					}
