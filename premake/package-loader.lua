@@ -192,10 +192,14 @@ local function TopoSort(manifests, byName)
     local visited = {}
 
     local function Visit(name, dependentName)
-        if visited[name] then return end
+        -- Cycle check MUST come before the visited short-circuit. A self-
+        -- dependency (deps = {Self}) recurses with visiting[name] already
+        -- set; checking visited first would return early on the second
+        -- entry and silently accept the cycle.
         if visiting[name] then
             PackageError("Cyclic package dependency involving '" .. name .. "'.")
         end
+        if visited[name] then return end
 
         local m = byName[name]
         if not m then
@@ -207,6 +211,9 @@ local function TopoSort(manifests, byName)
 
         if m.dependencies then
             for _, depName in ipairs(m.dependencies) do
+                if depName == name then
+                    PackageError("Package '" .. name .. "' declares itself as a dependency.")
+                end
                 Visit(depName, name)
             end
         end

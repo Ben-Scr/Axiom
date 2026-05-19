@@ -1,7 +1,6 @@
 #include "pch.hpp"
 #include "Scene/BuiltInComponentRegistration.hpp"
 
-#include "Scene/CodegenSidecarLoader.hpp"
 #include "Scene/ComponentRegistrationHelpers.hpp"
 #include "Assets/AssetRegistry.hpp"
 #include "Audio/AudioManager.hpp"
@@ -326,12 +325,6 @@ namespace Index {
 		RegisterComponent<UUIDComponent>(sceneManager, "UUID", ComponentCategory::Tag);
 		RegisterComponent<EntityMetaDataComponent>(sceneManager, "Entity Metadata", ComponentCategory::Tag);
 		RegisterComponent<PrefabInstanceComponent>(sceneManager, "Prefab Instance", ComponentCategory::Tag);
-
-		RegisterComponent<NewNativeComponent>(sceneManager, "New Native",
-			ComponentCategory::Component, "General", "NewNative",
-			{
-				Properties::Make("Value", "Value", &NewNativeComponent::Value),
-			});
 
 		// ── Rendering ───────────────────────────────────────────────
 
@@ -2474,14 +2467,12 @@ namespace Index {
 		RegisterComponent<InheritedDisabledTag>(sceneManager, "Inherited Disabled", ComponentCategory::Tag);
 		RegisterComponent<DeadlyTag>(sceneManager, "Deadly", ComponentCategory::Tag);
 
-		// User-defined C# components mirrored into C++ by IndexComponentCodegen.
-		// The generated TU lives in the Index-GameComponents sidecar project
-		// (src/CodegenComponents.cpp) and compiles into Index-GameComponents.dll.
-		// The engine has no static link dependency on user components —
-		// LoadCodegenComponents finds the sidecar next to the consumer exe and
-		// calls its exported registration function. Missing sidecar is fine and
-		// behaves like the old no-op stub. See CodegenSidecarLoader.cpp.
-		LoadCodegenComponents(sceneManager);
+		// User-defined C# components are registered at runtime via
+		// DynamicComponentRegistrar (Index-ScriptCore) — see
+		// ComponentRegistry::RegisterDynamic. The engine no longer touches
+		// any per-project codegen output; each user .cs file annotated
+		// [NativeComponent(..., Generate = true)] is reflected and
+		// registered when the user assembly loads.
 
 		// Debug-only sanity check: every conflictsWith edge must be symmetric.
 		// DeclareConflict<A, B> already adds both directions, but a manual

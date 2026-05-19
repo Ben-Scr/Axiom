@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using Index;
 using Index.Components;
+using Index.Native;
 
 // Single-shot benchmark + smoke test for EntityCommandBuffer. Add this
 // GameSystem to a scene via the editor's GameSystem inspector; press Play
@@ -45,7 +46,7 @@ public class EcbBenchmarkSystem : GameSystem
         // public.
         using (var warmup = new EntityCommandBuffer(initialCapacity: 256))
         {
-            var w = warmup.CreateEntity();
+            var w = warmup.Create();
             warmup.AddComponent(w, new NativeTransform2D());
             warmup.AddComponent(w, new NativeSpriteRenderer());
             warmup.Playback();
@@ -68,7 +69,7 @@ public class EcbBenchmarkSystem : GameSystem
         sw.Restart();
         for (int i = 0; i < n; i++)
         {
-            var e = ecb.CreateEntity();
+            var e = ecb.Create();
             ecb.AddComponent(e, new NativeTransform2D());
             ecb.AddComponent(e, new NativeSpriteRenderer());
         }

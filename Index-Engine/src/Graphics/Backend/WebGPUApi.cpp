@@ -562,6 +562,14 @@ namespace Index {
 				g_Surface.Present();
 			}
 
+			// Drain the Framebuffer deferred-destroy queue. Any Destroy()
+			// call during the frame moved its Dawn resources into a pending
+			// bucket so an ImGui pass holding the raw color-view pointer
+			// could finish without dereferencing freed memory. Two-frame
+			// bucket-roll happens here, after Surface::Present() has
+			// committed the frame and ImGui is no longer in flight.
+			Framebuffer::ProcessFrameEndDeferredDestroy();
+
 			// Reset frame transient state — releases the encoder, the
 			// surface view, and the surface texture handle. Next frame
 			// re-acquires them lazily on first use.

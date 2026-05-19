@@ -8,6 +8,7 @@
 #include "Components/Tags.hpp"
 #include "Core/Exceptions.hpp"
 #include "Core/Log.hpp"
+#include "Serialization/SceneSerializer.hpp"
 
 
 namespace Index {
@@ -47,8 +48,51 @@ namespace Index {
 		return activeScene->CreateRuntimeEntity();
 	}
 
+	Entity Entity::Create(const std::string& name) {
+		Scene* activeScene = SceneManager::Get().GetActiveScene();
+		if (!activeScene || !activeScene->IsLoaded()) {
+			IDX_ERROR_TAG("Entity", "Cannot create entity: no active scene loaded");
+			return Entity::Null;
+		}
+
+		return name.empty()
+			? activeScene->CreateRuntimeEntity()
+			: activeScene->CreateRuntimeEntity(name);
+	}
+
+	Entity Entity::Instantiate(Entity source) {
+		if (!source.IsValid()) return Entity::Null;
+		Scene* targetScene = SceneManager::Get().GetActiveScene();
+		if (!targetScene || !targetScene->IsLoaded()) {
+			IDX_ERROR_TAG("Entity", "Cannot instantiate entity: no active scene loaded");
+			return Entity::Null;
+		}
+
+		// Prefab-instance entities track their source asset via PrefabGUID
+		// — route through the serializer so the full prefab tree is rebuilt
+		// (children, overrides) rather than copying just the root's
+		// components. Runtime/scene entities go through the component
+		// copy path on the same scene.
+		if (source.IsPrefabInstance()) {
+			const AssetGUID prefabGuid = source.GetPrefabGUID();
+			if (static_cast<uint64_t>(prefabGuid) != 0) {
+				const EntityHandle instance = SceneSerializer::InstantiatePrefab(
+					*targetScene, static_cast<uint64_t>(prefabGuid));
+				return instance != entt::null
+					? Entity(instance, targetScene)
+					: Entity::Null;
+			}
+		}
+		return targetScene->CloneEntity(source);
+	}
+
 	void Entity::Destroy(Entity entity) {
 		entity.Destroy();
+	}
+
+	void Entity::Destroy(Entity entity, float delay) {
+		if (!entity.m_Scene || entity.m_EntityHandle == entt::null) return;
+		entity.m_Scene->DestroyEntity(entity.m_EntityHandle, delay);
 	}
 
 	void Entity::Destroy() {

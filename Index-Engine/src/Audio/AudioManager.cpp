@@ -22,16 +22,22 @@
 
 namespace Index {
 	namespace {
-		// Instance-id encoding: low 16 bits hold (index + 1) so 0 stays "invalid";
-		// high 16 bits hold the slot's generation so a recycled slot does not silently
-		// alias a stale handle. ~65k generations per slot before wrap; at miniaudio's
-		// MAX_CONCURRENT_SOUNDS = 64 and a worst-case recycle of one per frame, that's
-		// ~1000s per slot before a collision is even theoretically possible.
-		constexpr uint32_t k_AudioInstanceIndexBits = 16u;
+		// Instance-id encoding: low 8 bits hold (index + 1) so 0 stays "invalid";
+		// high 24 bits hold the slot's generation so a recycled slot does not silently
+		// alias a stale handle. ~16M generations per slot before wrap (~277x the
+		// previous 65k headroom): at MAX_CONCURRENT_SOUNDS = 64 with a worst-case
+		// recycle every frame at 60 FPS, that's ~77 hours of continuous churn per
+		// slot before a collision is theoretically possible. Index width = 8 bits
+		// gives a hard ceiling of 255 concurrent sounds, well above the configurable
+		// cap of 128.
+		constexpr uint32_t k_AudioInstanceIndexBits = 8u;
 		constexpr uint32_t k_AudioInstanceIndexMask = (1u << k_AudioInstanceIndexBits) - 1u;
+		constexpr uint32_t k_AudioInstanceGenerationMask = (1u << (32u - k_AudioInstanceIndexBits)) - 1u;
+		static_assert(128u <= k_AudioInstanceIndexMask,
+			"index field width must hold the maximum configurable MAX_CONCURRENT_SOUNDS cap");
 
-		uint32_t EncodeAudioInstanceId(uint32_t index, uint16_t generation) {
-			return (static_cast<uint32_t>(generation) << k_AudioInstanceIndexBits)
+		uint32_t EncodeAudioInstanceId(uint32_t index, uint32_t generation) {
+			return ((generation & k_AudioInstanceGenerationMask) << k_AudioInstanceIndexBits)
 				| ((index + 1u) & k_AudioInstanceIndexMask);
 		}
 
@@ -39,8 +45,8 @@ namespace Index {
 			return (instanceId & k_AudioInstanceIndexMask) - 1u;
 		}
 
-		uint16_t DecodeAudioInstanceGeneration(uint32_t instanceId) {
-			return static_cast<uint16_t>(instanceId >> k_AudioInstanceIndexBits);
+		uint32_t DecodeAudioInstanceGeneration(uint32_t instanceId) {
+			return (instanceId >> k_AudioInstanceIndexBits) & k_AudioInstanceGenerationMask;
 		}
 
 		bool DecodedAudioInstanceIsValid(uint32_t instanceId) {
@@ -712,7 +718,7 @@ namespace Index {
 		}
 
 		uint32_t index;
-		uint16_t reuseGeneration = 0;
+		uint32_t reuseGeneration = 0;
 
 		if (!s_freeInstanceIndices.empty()) {
 			index = s_freeInstanceIndices.back();
@@ -751,7 +757,7 @@ namespace Index {
 				// order wrote Generation into the about-to-be-destroyed instance, then
 				// reset() to nullptr, then re-queued an index whose slot lookup yielded
 				// reuseGeneration=0 — silently aliasing stale handles.
-				const uint16_t nextGeneration = static_cast<uint16_t>(reuseGeneration + 1u);
+				const uint32_t nextGeneration = reuseGeneration + 1u;
 				s_soundInstances[index].reset();
 				s_soundInstances[index] = std::make_unique<SoundInstance>();
 				s_soundInstances[index]->Generation = nextGeneration;
@@ -773,7 +779,7 @@ namespace Index {
 			else {
 				// Same capture-then-rebuild pattern as the data-source-init failure
 				// branch above — see comment there.
-				const uint16_t nextGeneration = static_cast<uint16_t>(reuseGeneration + 1u);
+				const uint32_t nextGeneration = reuseGeneration + 1u;
 				s_soundInstances[index].reset();
 				s_soundInstances[index] = std::make_unique<SoundInstance>();
 				s_soundInstances[index]->Generation = nextGeneration;
@@ -801,8 +807,12 @@ namespace Index {
 
 		// Only recycle when the generation matches; a stale handle pointing at a
 		// recycled slot must be a no-op rather than freeing the live sound.
+		// Compare the masked low 24 bits of slot->Generation — encoded IDs
+		// only carry that many bits, so the runtime counter is the source
+		// of truth but matching uses the truncated form.
 		auto& slot = s_soundInstances[index];
-		if (!slot || slot->Generation != DecodeAudioInstanceGeneration(instanceId)) {
+		if (!slot || (slot->Generation & k_AudioInstanceGenerationMask)
+				!= DecodeAudioInstanceGeneration(instanceId)) {
 			return;
 		}
 
@@ -824,8 +834,10 @@ namespace Index {
 			return nullptr;
 		}
 		// Generation mismatch = the caller's id was minted before this slot was recycled.
-		// Returning nullptr is the whole point of the generation field.
-		if (slot->Generation != DecodeAudioInstanceGeneration(instanceId)) {
+		// Returning nullptr is the whole point of the generation field. Mask the
+		// stored counter to the encoded width so a slot whose runtime counter
+		// has grown past 2^24 still matches the encoded id's low 24 bits.
+		if ((slot->Generation & k_AudioInstanceGenerationMask) != DecodeAudioInstanceGeneration(instanceId)) {
 			return nullptr;
 		}
 
@@ -853,7 +865,7 @@ namespace Index {
 		// Bump generation BEFORE tearing down the unique_ptr, so any handle we just
 		// invalidated is recorded against the stale generation rather than the (zero)
 		// default that a freshly-allocated SoundInstance would have.
-		const uint16_t nextGeneration = static_cast<uint16_t>(instance.Generation + 1u);
+		const uint32_t nextGeneration = instance.Generation + 1u;
 
 		// Reset the unique_ptr so the SoundInstance (and its embedded ma_sound, which
 		// the audio thread was reading) is fully torn down before the slot is reused.

@@ -8,6 +8,7 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Index.Components;
+using Index.Interop;
 using Index.Jobs.Internal;
 
 namespace Index.Jobs;
@@ -422,24 +423,44 @@ public static class JobQueryExtensions
             EnableFilter  = plan.EnableFilter,
         };
 
-        // Open the native view on the calling thread. This fills the
-        // ThreadStatic buffer in QueryRefBuffers; we must snapshot it
-        // before handing rows to workers because the next QueryRef call
-        // on this thread will reuse the same buffer.
-        (IntPtr[] sharedBuffer, int rowCount) = QueryRefBuffers.Open(ref filters, plan.PoolCount);
+        int poolCount = plan.PoolCount;
+
+        // Pin first, then have native fill the pinned buffer DIRECTLY — saves a
+        // full Array.Copy pass (~ 10K × poolCount × 8 bytes on the example shape)
+        // and removes the intermediate thread-static array entirely from this
+        // code path. The legacy thread-static buffer in QueryRefBuffers.Open is
+        // still used by the non-job foreach `QueryRef<T>()` builder, which
+        // consumes its result on the same thread and doesn't need pinning.
+        //
+        // Capacity heuristic: start at 64 rows. The pool buckets are power-of-2,
+        // so this rounds up to a stable bucket (Length = 128 for 64×1 request,
+        // 1024 for 64×8, etc.) — steady-state schedules of the same shape hit
+        // the same hot bucket every frame and recycle the same pinned array.
+        const int kInitialRowGuess = 64;
+        JobQueryPinPool.PinnedBuffer pinBuf =
+            JobQueryPinPool.Rent(kInitialRowGuess * poolCount);
+        int rowCount;
+        while (true)
+        {
+            int rowCap = pinBuf.Array.Length / poolCount;
+            rowCount = InternalCalls.Scene_OpenQueryView(
+                filters.SceneName, filters.WriteNames, filters.ReadonlyNames,
+                filters.MustHaveNames, filters.WithoutNames, filters.EnableFilter,
+                (void**)pinBuf.PinnedBase, rowCap);
+            if (rowCount <= rowCap) break;
+            // Undersize: return current buffer, rent fitted, retry. Rare path —
+            // only happens when the matched-entity count grew past the previous
+            // high-water mark since the last schedule of this shape.
+            JobQueryPinPool.Return(pinBuf);
+            pinBuf = JobQueryPinPool.Rent(rowCount * poolCount);
+        }
+
         if (rowCount == 0)
+        {
+            JobQueryPinPool.Return(pinBuf);
             return default;
+        }
 
-        int poolCount  = plan.PoolCount;
-        int totalCells = rowCount * poolCount;
-
-        // Rent a pre-pinned IntPtr[] from the pool instead of
-        // allocating + pinning fresh each Schedule. The pool buckets
-        // by power-of-2 size so steady-state schedules of the same
-        // shape (same row count × pool count) hit a hot bucket and
-        // re-use the same pinned array across frames.
-        JobQueryPinPool.PinnedBuffer pinBuf = JobQueryPinPool.Rent(totalCells);
-        Array.Copy(sharedBuffer, pinBuf.Array, totalCells);
         IntPtr pinnedBase = pinBuf.PinnedBase;
 
         // From this point on, ANY exception before the AsTask().ContinueWith

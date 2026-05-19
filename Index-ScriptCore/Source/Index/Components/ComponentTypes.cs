@@ -25,8 +25,8 @@ internal static class ComponentTypes
     // reachable through GetRef<T>.
     private static readonly Dictionary<Type, string> s_NativeNames = new()
     {
-        { typeof(NativeTransform2D),    NativeTransform2D.NativeName },
-        { typeof(NativeSpriteRenderer), NativeSpriteRenderer.NativeName },
+        { typeof(Native.NativeTransform2D),    Native.NativeTransform2D.NativeName },
+        { typeof(Native.NativeSpriteRenderer), Native.NativeSpriteRenderer.NativeName },
     };
 
     internal static string? TryGetNativeName(Type t)
@@ -42,10 +42,6 @@ internal static class ComponentTypes
         var candidates = new List<string>(6);
         if (s_NativeNames.TryGetValue(t, out string? registered))
             candidates.Add(registered);
-
-        NativeComponentAttribute? attr = t.GetCustomAttribute<NativeComponentAttribute>();
-        if (!string.IsNullOrWhiteSpace(attr?.Name))
-            candidates.Add(attr.Name);
 
         const BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static;
         FieldInfo? nativeNameField = t.GetField("NativeName", flags);
@@ -138,26 +134,16 @@ internal static class ComponentTypes<T> where T : unmanaged, IComponent
         string? name = ComponentTypes.ResolveNativeName(typeof(T), managedSize, out int nativeSize);
         if (name == null)
         {
-            // Distinguish "user marked Generate=true but engine wasn't rebuilt"
-            // (the common case after adding a fresh C# component) from "I forgot
-            // [NativeComponent]" — the fix is wildly different and the
-            // generic message at the bottom is misleading for codegen users.
-            object[] attrs = typeof(T).GetCustomAttributes(typeof(NativeComponentAttribute), inherit: false);
-            NativeComponentAttribute? attr = attrs.Length > 0 ? (NativeComponentAttribute)attrs[0] : null;
-            if (attr is { Generate: true })
-            {
-                throw new InvalidOperationException(
-                    $"Component '{typeof(T).Name}' is marked [NativeComponent(\"{attr.Name}\", Generate = true)] " +
-                    "but the matching C++ side hasn't been generated yet. " +
-                    "Click 'Rebuild Engine' in the editor (or run `dotnet build " +
-                    "Index-Sandbox.csproj -p:IndexCodegenEnabled=true` and rebuild Index.sln) " +
-                    "so Index-ComponentCodegen emits the C++ struct + registration into " +
-                    "Index-Engine/src/Generated/CodegenComponents.cpp.");
-            }
+            // Most likely cause: user authored `struct T : IComponent` but the
+            // user assembly hasn't loaded yet (engine is still initialising), or
+            // the type lives in a different assembly than DynamicComponentRegistrar
+            // scans. Hand-mirrors of built-in C++ components should declare an
+            // `internal const string NativeName = "Foo";` matching the C++ side.
             throw new InvalidOperationException(
                 $"Component '{typeof(T).Name}' is not registered for the ECS ref-API. " +
-                "Register the native component with the engine, or add [NativeComponent(\"Native Name\")] " +
-                "when the managed struct name cannot be inferred.");
+                "If this is a user-authored component, ensure the user assembly is loaded " +
+                "and the type implements IComponent. If this is a hand-mirror of a built-in, " +
+                "declare `internal const string NativeName = \"Display Name\";` on the struct.");
         }
 
         // Layout drift guard: the C++ component is the source of truth. Any

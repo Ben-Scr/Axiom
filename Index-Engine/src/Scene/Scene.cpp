@@ -28,6 +28,9 @@
 #include "Core/Application.hpp"
 #include "Graphics/Renderer2D.hpp"
 #include "Profiling/Profiler.hpp"
+#include "Scene/SceneManager.hpp"
+#include "Scene/ComponentRegistry.hpp"
+#include "Scene/ComponentInfo.hpp"
 #include "Scripting/ScriptComponent.hpp"
 #include "Scripting/ScriptEngine.hpp"
 #include "Scripting/ScriptSystem.hpp"
@@ -620,6 +623,43 @@ namespace Index {
 	void Scene::DestroyEntity(Entity entity) { DestroyEntity(entity.GetHandle()); }
 	void Scene::DestroyEntity(EntityHandle nativeEntity) { DestroyEntityInternal(nativeEntity, true); }
 
+	void Scene::DestroyEntity(EntityHandle nativeEntity, float delay) {
+		// Non-positive delay collapses to immediate destruction — keeps
+		// Entity::Destroy(e, 0.0f) semantically identical to
+		// Entity::Destroy(e), no surprise one-frame skew when callers
+		// pass a computed delay that happens to be zero.
+		if (delay <= 0.0f) {
+			DestroyEntityInternal(nativeEntity, true);
+			return;
+		}
+		if (!m_Registry.valid(nativeEntity)) return;
+		// Already queued? Keep the SHORTER remaining time so the first
+		// scheduled destruction wins (caller wants the entity gone by
+		// then; later schedules are best treated as redundant).
+		for (auto& [h, remaining] : m_PendingDestroys) {
+			if (h == nativeEntity) {
+				if (delay < remaining) remaining = delay;
+				return;
+			}
+		}
+		m_PendingDestroys.emplace_back(nativeEntity, delay);
+	}
+
+	Entity Scene::CloneEntity(Entity source) {
+		if (!source.IsValid()) return Entity::Null;
+		const std::string name = source.GetName();
+		Entity clone = CreateRuntimeEntity(name + " (Clone)");
+		const auto& registry = SceneManager::Get().GetComponentRegistry();
+		registry.ForEachComponentInfo([&](const std::type_index&, const ComponentInfo& info) {
+			if (info.category != ComponentCategory::Component) return;
+			if (!info.has || !info.has(source)) return;
+			if (info.copyTo) {
+				info.copyTo(source, clone);
+			}
+		});
+		return clone;
+	}
+
 	void Scene::ClearEntities() {
 		// Invalidate the main-camera cache up front and gate the destroy hooks
 		// so each Camera2DComponent destruction doesn't re-enter
@@ -1027,6 +1067,10 @@ namespace Index {
 		}
 
 		UnregisterEntityIdentity(nativeEntity);
+		// Dynamic components live outside EnTT and don't get on_destroy
+		// hooks, so without this they leak bytes until scene unload /
+		// assembly reload. Cheap no-op when no dynamics are attached.
+		SceneManager::Get().GetComponentRegistry().ScrubEntity(nativeEntity);
 		TrackEntityDestruction(nativeEntity);
 		m_Registry.destroy(nativeEntity);
 		UntrackEntityDestruction(nativeEntity);
@@ -1083,6 +1127,34 @@ namespace Index {
 	}
 
 	void Scene::UpdateSystems() {
+		// Drain delayed-destroy queue first so any entity whose timer
+		// elapsed this frame disappears BEFORE systems iterate views over
+		// it. Decrement-then-test runs the destruction on the same tick
+		// the timer hits zero (i.e. delay 0.5s at 60fps fires at tick 30).
+		// Swap-pop preserves O(1) removal; entries the user added during
+		// system Update will be processed next frame, not this one.
+		if (!m_PendingDestroys.empty()) {
+			const float dt = Application::GetInstance()
+				? static_cast<float>(Application::GetInstance()->GetTime().GetDeltaTime())
+				: 0.0f;
+			for (size_t i = 0; i < m_PendingDestroys.size();) {
+				auto& [h, remaining] = m_PendingDestroys[i];
+				remaining -= dt;
+				if (remaining <= 0.0f) {
+					if (m_Registry.valid(h)) {
+						DestroyEntityInternal(h, true);
+					}
+					// swap-pop; do NOT increment i — re-test slot i which
+					// now holds the previously-last element.
+					m_PendingDestroys[i] = m_PendingDestroys.back();
+					m_PendingDestroys.pop_back();
+				}
+				else {
+					++i;
+				}
+			}
+		}
+
 		ForeachEnabledSystem("Update", [this](ISystem& s) { s.Update(*this); });
 	}
 
@@ -1238,8 +1310,7 @@ namespace Index {
 			return;
 		}
 
-		const uint32_t id = static_cast<uint32_t>(entity);
-		if (m_DirtyTransformEntitySet.insert(id).second) {
+		if (m_DirtyTransformEntitySet.insert(entity).second) {
 			m_DirtyTransformEntities.push_back(entity);
 		}
 

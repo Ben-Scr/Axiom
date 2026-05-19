@@ -10,7 +10,7 @@ namespace Index.Jobs;
 ///
 /// <list type="bullet">
 ///   <item><see cref="Ecb"/> — thread-safe structural-changes channel.
-///   InstantiatePrefab, CreateEntity, AddComponent all live here.</item>
+///   Instantiate, Create, AddComponent all live here.</item>
 ///   <item><see cref="DeltaTime"/> — current scaled frame delta,
 ///   snapshot at <see cref="ForFrame"/> call time. Snapshotting avoids
 ///   a P/Invoke per job worker per index.</item>
@@ -41,7 +41,7 @@ namespace Index.Jobs;
 ///
 ///     public void Execute(int i)
 ///     {
-///         EntityRef root = Ctx.Ecb.InstantiatePrefab(BulletPrefab);
+///         EntityRef root = Ctx.Ecb.Instantiate(BulletPrefab);
 ///         Ctx.Ecb.AddComponent(root, new NativeTransform2D
 ///         {
 ///             LocalPosition = new Vector2(i, Ctx.GetRng().NextFloat01() * 10f),

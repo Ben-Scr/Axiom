@@ -156,8 +156,20 @@ namespace Index::Serialization {
 			}
 		} else {
 			if (const Json::Value* scope = CurrentRead()) {
-				if (const Json::Value* m = scope->FindMember(name))
-					v = static_cast<float>(m->AsDoubleOr(static_cast<double>(v)));
+				if (const Json::Value* m = scope->FindMember(name)) {
+					if (m->IsNumber()) {
+						v = static_cast<float>(m->AsDoubleOr(static_cast<double>(v)));
+					}
+					else {
+						// Type mismatch — keep the default and warn so a
+						// hand-edited or stale-format scene doesn't load
+						// with silent data loss. Missing fields stay quiet
+						// (the FindMember above gates this branch).
+						IDX_CORE_WARN_TAG("JsonArchive",
+							"Field '{}': expected number for float, got non-number — keeping default",
+							name);
+					}
+				}
 			}
 		}
 	}
@@ -222,11 +234,29 @@ namespace Index::Serialization {
 			}
 		} else {
 			if (const Json::Value* scope = CurrentRead()) {
-				if (const Json::Value* m = scope->FindMember(name); m != nullptr && m->IsObject()) {
-					if (const Json::Value* r = m->FindMember("r")) v.r = static_cast<float>(r->AsDoubleOr(v.r));
-					if (const Json::Value* g = m->FindMember("g")) v.g = static_cast<float>(g->AsDoubleOr(v.g));
-					if (const Json::Value* b = m->FindMember("b")) v.b = static_cast<float>(b->AsDoubleOr(v.b));
-					if (const Json::Value* a = m->FindMember("a")) v.a = static_cast<float>(a->AsDoubleOr(v.a));
+				if (const Json::Value* m = scope->FindMember(name)) {
+					if (m->IsObject()) {
+						if (const Json::Value* r = m->FindMember("r")) v.r = static_cast<float>(r->AsDoubleOr(v.r));
+						if (const Json::Value* g = m->FindMember("g")) v.g = static_cast<float>(g->AsDoubleOr(v.g));
+						if (const Json::Value* b = m->FindMember("b")) v.b = static_cast<float>(b->AsDoubleOr(v.b));
+						if (const Json::Value* a = m->FindMember("a")) v.a = static_cast<float>(a->AsDoubleOr(v.a));
+					}
+					else if (m->IsNumber()) {
+						// Legacy fallback: a single number is treated as
+						// grayscale with alpha=1. Prevents an old scene
+						// from silently propagating wrong colors when its
+						// Color was authored before the {r,g,b,a} schema.
+						IDX_CORE_WARN_TAG("JsonArchive",
+							"Field '{}': legacy single-number color form; treating as grayscale",
+							name);
+						const float gray = static_cast<float>(m->AsDoubleOr(0.0));
+						v.r = gray; v.g = gray; v.b = gray; v.a = 1.0f;
+					}
+					else {
+						IDX_CORE_WARN_TAG("JsonArchive",
+							"Field '{}': expected {{r,g,b,a}} object or number, got unsupported JSON kind — keeping default",
+							name);
+					}
 				}
 			}
 		}

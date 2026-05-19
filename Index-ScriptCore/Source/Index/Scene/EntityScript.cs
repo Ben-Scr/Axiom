@@ -7,10 +7,24 @@ namespace Index;
 
 /// <summary>
 /// Base class for user C# scripts. Subclass and override lifecycle callbacks.
+///
+/// Inherits <see cref="Component"/> so the unified Entity API treats scripts
+/// like components: <c>entity.GetComponent&lt;MyScript&gt;()</c>,
+/// <c>entity.AddComponent&lt;MyScript&gt;()</c>,
+/// <c>entity.HasComponent&lt;MyScript&gt;()</c>,
+/// <c>entity.TryGetComponent&lt;MyScript&gt;(out var s)</c> all dispatch to
+/// the script storage (ScriptInstanceManager) when <c>T : EntityScript</c>,
+/// and to the ECS storage otherwise. C# overload resolution does NOT
+/// pick between generic constraints (CS0111), so unifying the hierarchy
+/// is the only path to a single <c>AddComponent&lt;T&gt;</c> that handles
+/// both — runtime dispatch on <c>typeof(T)</c> picks the right backend.
+///
+/// The inherited <c>Entity</c> property (defined on Component) is reused
+/// directly — _SetEntityID still works because Component's setter is
+/// internal.
 /// </summary>
-public abstract class EntityScript
+public abstract class EntityScript : Component
 {
-    public Entity Entity { get; internal set; } = Entity.Invalid;
     public Transform2D Transform => Entity.Transform;
 
     // ── Coroutine destroy lifetime ───────────────────────────────

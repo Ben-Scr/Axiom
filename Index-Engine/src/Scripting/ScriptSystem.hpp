@@ -49,6 +49,14 @@ namespace Index {
 		bool IsNativeRebuildRunning() const;
 		float GetActiveRebuildElapsedSeconds() const;
 
+		// Static accessor for the shared NativeScriptHost. Exposed so the
+		// runtime-attach path (Entity::AddComponent<TScript>() via
+		// EntityScriptOps) can create and track native script instances
+		// without duplicating the host or losing the lifecycle bookkeeping
+		// in m_LiveInstances. The host itself is the single owner of every
+		// live native script across the engine.
+		static NativeScriptHost& GetNativeHost() { return m_NativeHost; }
+
 	private:
 		void RebuildAndReloadScripts();
 		void RebuildAndReloadNativeScripts();

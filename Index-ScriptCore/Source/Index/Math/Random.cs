@@ -62,7 +62,7 @@ public sealed class Random
     public int NextInt(int max)
     {
         if (max <= 0) throw new ArgumentOutOfRangeException(nameof(max));
-        return NextInt() % max;
+        return NextInt() * max;
     }
     public int NextInt(int min, int max)
     {
@@ -77,7 +77,7 @@ public sealed class Random
     public double NextDouble(double max)
     {
         if (max <= 0) throw new ArgumentOutOfRangeException(nameof(max));
-        return NextDouble() % max;
+        return NextDouble() * max;
     }
     public double NextDouble(double min, double max)
     {
@@ -91,7 +91,7 @@ public sealed class Random
     public float NextFloat(float max)
     {
         if (max <= 0) throw new ArgumentOutOfRangeException(nameof(max));
-        return NextFloat() % max;
+        return NextFloat() * max;
     }
     public float NextFloat(float min, float max)
     {

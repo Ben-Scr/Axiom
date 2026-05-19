@@ -59,6 +59,32 @@ namespace Index {
 		static constexpr int SCENE_FORMAT_VERSION = 1;
 		static constexpr float k_MinScaleAxis = 0.0001f;
 
+		// RAII guard for the in-progress entity in DeserializeFullEntity /
+		// DeserializePrefabInstance. If construction throws before Commit()
+		// runs, the entity is destroyed so the scene doesn't accumulate a
+		// half-baked orphan. Exceptions can bubble up from script bridges,
+		// asset lookups, and custom component deser hooks even though the
+		// Get*Member helpers themselves don't throw on malformed JSON.
+		class EntityRollbackGuard {
+		public:
+			EntityRollbackGuard(Scene& scene, EntityHandle entity)
+				: m_Scene(&scene), m_Entity(entity) {}
+			~EntityRollbackGuard() {
+				if (m_Committed) return;
+				if (m_Entity == entt::null) return;
+				if (m_Scene && m_Scene->GetRegistry().valid(m_Entity)) {
+					m_Scene->DestroyEntity(m_Entity);
+				}
+			}
+			EntityRollbackGuard(const EntityRollbackGuard&) = delete;
+			EntityRollbackGuard& operator=(const EntityRollbackGuard&) = delete;
+			void Commit() { m_Committed = true; }
+		private:
+			Scene*       m_Scene = nullptr;
+			EntityHandle m_Entity = entt::null;
+			bool         m_Committed = false;
+		};
+
 		Value SerializeScriptFields(const ScriptComponent& scriptComponent) {
 			Value fieldsByClass = Value::MakeObject();
 			auto& callbacks = ScriptEngine::GetCallbacks();
@@ -949,11 +975,29 @@ namespace Index {
 		if (origin == EntityOrigin::Runtime) {
 			return entt::null;
 		}
-		if (origin == EntityOrigin::Prefab) {
-			return DeserializePrefabInstance(scene, entityValue);
-		}
 
-		return DeserializeFullEntity(scene, entityValue, EntityOrigin::Scene);
+		// DeserializeFullEntity owns an EntityRollbackGuard that handles the
+		// per-entity rollback (destroying the partial entity if construction
+		// throws). The outer try/catch here just converts the propagated
+		// exception into a logged null return so the surrounding scene-load
+		// loop can continue with the remaining entities. Without it, one
+		// bad entity would abort the whole DeserializeScene call.
+		try {
+			if (origin == EntityOrigin::Prefab) {
+				return DeserializePrefabInstance(scene, entityValue);
+			}
+			return DeserializeFullEntity(scene, entityValue, EntityOrigin::Scene);
+		}
+		catch (const std::exception& e) {
+			IDX_CORE_ERROR_TAG("SceneSerializer",
+				"DeserializeEntity threw, partial entity rolled back by inner guard: {}", e.what());
+			return entt::null;
+		}
+		catch (...) {
+			IDX_CORE_ERROR_TAG("SceneSerializer",
+				"DeserializeEntity threw unknown exception, partial entity rolled back by inner guard");
+			return entt::null;
+		}
 	}
 
 	EntityHandle SceneSerializer::DeserializeFullEntity(
@@ -971,6 +1015,9 @@ namespace Index {
 		// "unnamed" through the round-trip.
 		const std::string name = GetStringMember(entityValue, "name", "");
 		const EntityHandle entity = scene.CreateEntity(name).GetHandle();
+		// If any component constructor or deser hook throws below, the guard
+		// destroys this entity so the scene isn't left with a half-baked one.
+		EntityRollbackGuard rollback(scene, entity);
 
 		// Scene::CreateEntity unconditionally seeds Transform2D for the
 		// usual world-space case, but UI entities (RectTransform2D-only)
@@ -1480,6 +1527,7 @@ namespace Index {
 				});
 		}
 
+		rollback.Commit();
 		return entity;
 	}
 

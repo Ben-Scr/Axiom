@@ -12,4 +12,3 @@
 #include "Components/General/EntityMetaDataComponent.hpp"
 #include "Components/General/PrefabInstanceComponent.hpp"
 #include "Components/General/HierarchyComponent.hpp"
-#include "Components/General/NewNativeComponent.hpp"

@@ -1556,7 +1556,7 @@ namespace Index {
 
 				if (ImGui::BeginDragDropTarget()) {
 					if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ASSET_BROWSER_ITEM")) {
-						std::string droppedPath(static_cast<const char*>(payload->Data));
+						std::string droppedPath(static_cast<const char*>(payload->Data), static_cast<std::size_t>(payload->DataSize));
 						if (std::filesystem::path(droppedPath).extension() == ".scene") {
 							std::string sceneName = std::filesystem::path(droppedPath).stem().string();
 							auto it = std::find(m_BuildSceneList.begin(), m_BuildSceneList.end(), sceneName);
@@ -2596,22 +2596,12 @@ namespace Index {
 					const std::string config = IndexProject::GetActiveBuildConfiguration();
 					const std::string projectRootDir = project.RootDirectory;
 					const std::string userCsprojPath = project.CsprojPath;
-					// User-DLL must be scanned regardless of which project type is loaded
-					// (default Sandbox vs. user-created project). Codegen is decoupled from
-					// any csproj-side <Target> so it works the same for every project layout.
-					const std::string userAssemblyDllPath = project.GetUserAssemblyOutputPath();
-					const std::filesystem::path codegenCsprojPath =
-						engineRoot / "Index-ComponentCodegen" / "Index-ComponentCodegen.csproj";
-					const std::filesystem::path codegenToolDllPath =
-						engineRoot / "Index-ComponentCodegen" / "bin" / config / "net9.0"
-						/ "Index-ComponentCodegen.dll";
-					// Generated TU now lives in the per-project sidecar
-					// (Index-GameComponents.dll), not inside the engine
-					// DLL. The engine's CodegenSidecarLoader picks it up
-					// at runtime via LoadLibrary — see
-					// Index-Engine/src/Scene/CodegenSidecarLoader.cpp.
-					const std::filesystem::path generatedCppPath =
-						engineRoot / "Index-GameComponents" / "src" / "CodegenComponents.cpp";
+					// User-defined C# components no longer go through a build-
+					// time codegen pipeline — they're reflected and registered
+					// at runtime by DynamicComponentRegistrar when the user
+					// assembly loads. Rebuild Engine is now only required for
+					// engine-config edits (entityBits, etc.), not for component
+					// changes.
 					const int newEntityBits = project.EntityBits;
 
 					// Editor PID for the spawned script's wait loop. The
@@ -2701,7 +2691,7 @@ namespace Index {
 							"goto wait_loop\r\n"
 							":wait_done\r\n"
 							"echo.\r\n"
-							"echo [1/4] Building user scripts (dotnet build)...\r\n"
+							"echo [1/2] Building user scripts (dotnet build)...\r\n"
 							"echo.\r\n"
 							"dotnet build \"" << userCsprojPath << "\""
 							" -c " << config <<
@@ -2714,34 +2704,7 @@ namespace Index {
 							"  exit /b 1\r\n"
 							")\r\n"
 							"echo.\r\n"
-							"echo [2/4] Building component codegen tool...\r\n"
-							"echo.\r\n"
-							"dotnet build \"" << codegenCsprojPath.string() << "\""
-							" -c " << config <<
-							" --nologo -v q\r\n"
-							"if errorlevel 1 (\r\n"
-							"  echo.\r\n"
-							"  echo *** Component codegen tool build FAILED. ***\r\n"
-							"  echo.\r\n"
-							"  pause\r\n"
-							"  exit /b 1\r\n"
-							")\r\n"
-							"echo.\r\n"
-							"echo [3/4] Regenerating C++ components from user assembly...\r\n"
-							"echo.\r\n"
-							"dotnet \"" << codegenToolDllPath.string() << "\""
-							" --input \"" << userAssemblyDllPath << "\""
-							" --output \"" << generatedCppPath.string() << "\""
-							" --verbose\r\n"
-							"if errorlevel 1 (\r\n"
-							"  echo.\r\n"
-							"  echo *** Codegen FAILED. Component shape errors above. ***\r\n"
-							"  echo.\r\n"
-							"  pause\r\n"
-							"  exit /b 1\r\n"
-							")\r\n"
-							"echo.\r\n"
-							"echo [4/4] Building solution (this is the long step)...\r\n"
+							"echo [2/2] Building solution (this is the long step)...\r\n"
 							"echo.\r\n"
 							"pushd \"" << engineRoot.string() << "\"\r\n"
 							"\"" << msbuildPath << "\" \"" << slnPath.string() << "\""

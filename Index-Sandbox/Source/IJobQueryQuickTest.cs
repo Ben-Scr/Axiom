@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using Index;
 using Index.Components;
 using Index.Jobs;
+using Index.Native;
 
 // Quicktest for the IJobQuery dispatch path. Drop this system onto any
 // scene that contains at least one entity with NativeTransform2D. It runs

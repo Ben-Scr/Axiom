@@ -3,6 +3,8 @@
 #include "Scripting/ScriptBindings.hpp"
 #include "Scripting/ScriptEngine.hpp"
 #include "Scripting/ScriptComponent.hpp"
+#include "Scripting/ScriptSystem.hpp"
+#include "Scripting/NativeScriptHost.hpp"
 #include "Core/Application.hpp"
 #include "Core/Input.hpp"
 #include "Core/Time.hpp"
@@ -503,6 +505,33 @@ namespace Index {
 
 		Entity entity = scene->GetEntity(handle);
 		if (info->has && info->has(entity)) return 1;
+
+		// Dynamic (runtime-registered) components share typeid(void) and
+		// live in ComponentRegistry::m_dynamicMap, not m_map — so
+		// AddWithDependencies (keyed on std::type_index → m_map) can't find
+		// them and silently no-ops. Route directly through info->add, which
+		// the RegisterDynamic path wires to the backing DynamicComponentStorage.
+		// Without this branch, Entity.AddNativeComponent<T>() from C# returns
+		// true but the component never lands in the pool, so a follow-up
+		// HasNativeComponent<T>() returns false.
+		if (info->isDynamic) {
+			info->add(entity);
+			// Mirror AttachScriptToEntity (AddComponentPopup.cpp): a `:IComponent`
+			// add must also seed a ScriptComponent.Scripts entry of type Managed
+			// so the inspector's script-field renderer (the only path that
+			// reflects over [ShowInEditor]) picks the component up. Without
+			// this, the registry iteration draws an empty wrapper and the
+			// fields never surface.
+			if (!entity.HasComponent<ScriptComponent>()) {
+				entity.AddComponent<ScriptComponent>();
+			}
+			auto& sc = entity.GetComponent<ScriptComponent>();
+			if (!sc.HasScript(componentName, ScriptType::Managed)) {
+				sc.AddScript(componentName, ScriptType::Managed);
+			}
+			return 1;
+		}
+
 		SceneManager::Get().GetComponentRegistry().AddWithDependencies(entity, info->typeId);
 		return 1;
 	}
@@ -518,8 +547,133 @@ namespace Index {
 
 		Entity entity = scene->GetEntity(handle);
 		if (info->has && !info->has(entity)) return 0;
+
+		// Dynamic `:IComponent` components are dual-attached (storage row +
+		// Managed ScriptComponent.Scripts entry — see Index_Entity_AddComponent
+		// above). Tear down via ScriptSystem::RemoveScript so both halves drop
+		// together; otherwise the inspector would render an orphan empty header
+		// from the leftover Scripts entry.
+		if (info->isDynamic) {
+			if (entity.HasComponent<ScriptComponent>()) {
+				auto& sc = entity.GetComponent<ScriptComponent>();
+				for (size_t i = 0; i < sc.Scripts.size(); ++i) {
+					if (sc.Scripts[i].GetClassName() == componentName &&
+						sc.Scripts[i].GetType() == ScriptType::Managed) {
+						ScriptSystem::RemoveScript(entity, i);
+						return 1;
+					}
+				}
+			}
+			// No paired Scripts entry (pre-Fix1 runtime state). Drop the
+			// storage row directly so the C# call still has the documented
+			// effect.
+			info->remove(entity);
+			return 1;
+		}
+
 		info->remove(entity);
 		return 1;
+	}
+
+	// ── Entity_AddScript / HasScript / RemoveScript ─────────────────
+	// Companion to AddComponent / HasComponent / RemoveComponent for
+	// EntityScript-derived types. The class-name string (passed as
+	// `typeof(T).Name` from C#) is matched directly against
+	// ScriptComponent::Scripts[i].GetClassName() — the same key
+	// ScriptSystem uses when binding.
+	//
+	// Add: emplaces a ScriptComponent if absent, appends a
+	// Managed-type ScriptInstance (mirroring AddManagedComponent's
+	// behavior), and lets ScriptSystem::Update pick up the bind
+	// + Awake/Start on its next tick. We don't synchronously call
+	// BindAndAwakeNow here — the next ScriptSystem tick handles
+	// the lifecycle in the same code path that scene-load uses,
+	// keeping a single bind-source-of-truth. Returns 1 on success
+	// (already-present is also success — idempotent), 0 on
+	// invalid entity / empty name.
+
+	int Index_Entity_AddScript(uint64_t entityID, const char* className)
+	{
+		Scene* scene = nullptr;
+		EntityHandle handle = entt::null;
+		if (!ResolveEntityReference(entityID, scene, handle)) return 0;
+		if (!className || !*className) return 0;
+
+		if (!scene->HasComponent<ScriptComponent>(handle)) {
+			scene->AddComponent<ScriptComponent>(handle);
+		}
+		auto& scriptComponent = scene->GetComponent<ScriptComponent>(handle);
+		if (scriptComponent.HasScript(className)) {
+			return 1;
+		}
+		scriptComponent.AddScript(className, ScriptType::Managed);
+		scene->MarkDirty();
+
+		// Synchronous bind + Awake so the C# wrapper returned by
+		// `entity.AddComponent<MyScript>()` is already live (and has
+		// its OnAwake invoked) before AddComponent returns. Otherwise
+		// the C# side would have to wait a frame for ScriptSystem.Update
+		// to pick the slot up, and `e.AddComponent<MyScript>()` would
+		// momentarily return null. Locate the freshly-added instance
+		// (always the last entry — AddScript appends), bind it, and
+		// drive the managed Awake.
+		ScriptInstance* added = nullptr;
+		for (auto& inst : scriptComponent.Scripts) {
+			if (inst.GetClassName() == className && inst.GetType() == ScriptType::Managed) {
+				added = &inst;
+			}
+		}
+		if (added && !added->HasAnyInstance() && ScriptEngine::ClassExists(className)) {
+			added->Bind(handle);
+			uint32_t gcHandle = ScriptEngine::CreateScriptInstance(className, handle);
+			if (gcHandle != 0) {
+				added->SetGCHandle(gcHandle);
+				ScriptEngine::InvokeAwake(gcHandle);
+			}
+		}
+		return 1;
+	}
+
+	int Index_Entity_HasScript(uint64_t entityID, const char* className)
+	{
+		Scene* scene = nullptr;
+		EntityHandle handle = entt::null;
+		if (!ResolveEntityReference(entityID, scene, handle)) return 0;
+		if (!className || !*className) return 0;
+		if (!scene->HasComponent<ScriptComponent>(handle)) return 0;
+		return scene->GetComponent<ScriptComponent>(handle).HasScript(className) ? 1 : 0;
+	}
+
+	int Index_Entity_RemoveScript(uint64_t entityID, const char* className)
+	{
+		Scene* scene = nullptr;
+		EntityHandle handle = entt::null;
+		if (!ResolveEntityReference(entityID, scene, handle)) return 0;
+		if (!className || !*className) return 0;
+		if (!scene->HasComponent<ScriptComponent>(handle)) return 0;
+
+		auto& scriptComponent = scene->GetComponent<ScriptComponent>(handle);
+		bool removedAny = false;
+		for (auto it = scriptComponent.Scripts.begin(); it != scriptComponent.Scripts.end(); ) {
+			if (it->GetClassName() == className) {
+				// Tear down any bound runtime instance before removing
+				// the slot — leaks otherwise, since ScriptSystem only
+				// destroys instances during teardown / hot-reload.
+				if (it->GetType() == ScriptType::Native && it->HasNativeInstance()) {
+					ScriptSystem::GetNativeHost().DestroyInstance(it->GetNativePtr());
+				}
+				if (it->GetType() == ScriptType::Managed && it->HasManagedInstance()) {
+					ScriptEngine::InvokeOnDestroy(it->GetGCHandle());
+				}
+				it = scriptComponent.Scripts.erase(it);
+				removedAny = true;
+			}
+			else {
+				++it;
+			}
+		}
+		if (removedAny) scene->MarkDirty();
+		return removedAny ? 1 : 0;
 	}
 
 	// Raw component pointer for the ScriptCore ref-API. Returns the address of
@@ -561,19 +715,8 @@ namespace Index {
 		if (!ResolveEntityReference(sourceEntityID, sourceScene, sourceHandle)) return 0;
 
 		Entity source = sourceScene->GetEntity(sourceHandle);
-		std::string name = source.GetName();
-
-		Entity clone = targetScene->CreateRuntimeEntity(name + " (Clone)");
-
-		const auto& registry = SceneManager::Get().GetComponentRegistry();
-		registry.ForEachComponentInfo([&](const std::type_index&, const ComponentInfo& info) {
-			if (info.category != ComponentCategory::Component) return;
-			if (!info.has(source)) return;
-			if (info.copyTo) {
-				info.copyTo(source, clone);
-			}
-		});
-
+		Entity clone = targetScene->CloneEntity(source);
+		if (!clone.IsValid()) return 0;
 		return GetEntityScriptId(*targetScene, clone.GetHandle());
 	}
 
@@ -1059,46 +1202,147 @@ namespace Index {
 		return QueryEntitiesFilteredInScene(GetScene(), withComponents, withoutComponents, mustHaveComponents, enableFilter, outEntityIDs, maxOut);
 	}
 
-	// Pool descriptor for OpenQueryView: same role as QueryComponentRequirement
-	// but also carries the ComponentInfo so we can call getRaw without a second
-	// registry lookup per (entity × pool).
-	struct QueryViewPool {
+	// Pool descriptor for OpenQueryView. Carries the resolved
+	// entt::sparse_set* alongside ComponentInfo so the hot iteration loop
+	// hits direct (inline) sparse_set::contains / value calls instead of
+	// the std::function-based info->has / info->getRaw indirection — the
+	// latter was costing one virtual-style dispatch per (entity × pool)
+	// inside a registry-wide scan and dominated the snapshot phase for
+	// any filtered multi-pool query at 10K+ matched entities.
+	//
+	// Storage is `common_type*` (i.e. basic_sparse_set*), which exposes
+	// the size / contains / value / iteration surface we need without
+	// depending on the component's concrete type at this call site.
+	struct ResolvedQueryPool {
 		const ComponentInfo* Info = nullptr;
-		bool RequiresInfo = true;  // true for write/readonly pools (must yield a pointer)
+		entt::sparse_set*    Storage = nullptr;
+		bool RequiresValue = true;  // write/readonly pools must yield pointers
 	};
 
-	static bool ParseQueryViewPools(const char* names, std::vector<QueryViewPool>& out, bool requireGetRaw) {
+	static bool ResolveQueryPools(
+		entt::registry& registry,
+		const char* names,
+		std::vector<ResolvedQueryPool>& out,
+		bool requireValue)
+	{
 		if (!names || names[0] == '\0') return true;
-		std::string str(names);
+		const std::string_view str(names);
 		size_t start = 0;
-		while (start < str.size()) {
+		while (start <= str.size()) {
 			size_t end = str.find('|', start);
-			if (end == std::string::npos) end = str.size();
-			std::string name = str.substr(start, end - start);
-			if (!name.empty()) {
-				const ComponentInfo* info = FindComponentByName(name);
+			if (end == std::string_view::npos) end = str.size();
+			const std::string_view token = str.substr(start, end - start);
+			if (!token.empty()) {
+				const ComponentInfo* info = FindComponentByName(token);
 				if (!info) return false;
-				if (requireGetRaw && !info->getRaw) {
-					// Empty / tag / managed-only components can't yield a ref
-					// — the user asked for one as a write or readonly pool.
-					return false;
-				}
+				// Write/readonly pools need a payload pointer. Empty / tag /
+				// managed-only components can't supply one, so we reject them
+				// here exactly as the prior ParseQueryViewPools did.
+				if (requireValue && !info->getRaw) return false;
 				if (!info->has) return false;
-				out.push_back({ info, requireGetRaw });
+				// storage(id) returns nullptr in two cases:
+				//   1. No entity has ever held this component (storage pool
+				//      not yet instantiated). The fast path treats this as
+				//      "0 rows for required pools" / "matches everything for
+				//      without pools".
+				//   2. The component is dynamic (registered via
+				//      RegisterDynamic): it lives outside EnTT in a
+				//      DynamicComponentStorage and has no entt::sparse_set
+				//      backing. For this case the caller falls back to the
+				//      legacy `info->has` / `info->getRaw` slow path so the
+				//      query still produces correct rows — same perf as the
+				//      prior implementation, no regression.
+				entt::sparse_set* storage =
+					info->storageHash != 0 ? registry.storage(info->storageHash) : nullptr;
+				out.push_back({ info, storage, requireValue });
 			}
+			if (end == str.size()) break;
 			start = end + 1;
 		}
 		return true;
+	}
+
+	// Fallback / slow path: when any required pool can't be served by EnTT
+	// (dynamic components live in DynamicComponentStorage, not in
+	// entt::registry), iterate the registry once and use the std::function-
+	// based has/getRaw callbacks. Same correctness as the pre-rewrite
+	// implementation; only kicks in for the niche dynamic-component-in-
+	// IJobQuery case.
+	static int OpenQueryViewSlowPath(
+		Scene& scene,
+		entt::registry& registry,
+		const std::vector<ResolvedQueryPool>& writePools,
+		const std::vector<ResolvedQueryPool>& roPools,
+		const std::vector<ResolvedQueryPool>& withPools,
+		const std::vector<ResolvedQueryPool>& withoutPools,
+		int enableFilter,
+		void** outPointers,
+		int maxRows)
+	{
+		const size_t writeCount = writePools.size();
+		const size_t roCount = roPools.size();
+		const size_t poolCount = writeCount + roCount;
+
+		int rowIndex = 0;
+		auto view = registry.view<entt::entity>();
+		for (auto handle : view) {
+			if (!registry.valid(handle)) continue;
+			if (enableFilter == 1 && registry.all_of<DisabledTag>(handle)) continue;
+			if (enableFilter == 2 && !registry.all_of<DisabledTag>(handle)) continue;
+
+			Entity entity = scene.GetEntity(handle);
+
+			bool match = true;
+			for (const auto& pool : writePools) {
+				if (!pool.Info->has(entity)) { match = false; break; }
+			}
+			if (!match) continue;
+			for (const auto& pool : roPools) {
+				if (!pool.Info->has(entity)) { match = false; break; }
+			}
+			if (!match) continue;
+			for (const auto& pool : withPools) {
+				if (!pool.Info->has(entity)) { match = false; break; }
+			}
+			if (!match) continue;
+			for (const auto& pool : withoutPools) {
+				if (pool.Info->has(entity)) { match = false; break; }
+			}
+			if (!match) continue;
+
+			if (outPointers && rowIndex < maxRows) {
+				void** rowBase = outPointers + (static_cast<size_t>(rowIndex) * poolCount);
+				for (size_t i = 0; i < writeCount; ++i) {
+					rowBase[i] = writePools[i].Info->getRaw(entity);
+				}
+				for (size_t i = 0; i < roCount; ++i) {
+					rowBase[writeCount + i] = roPools[i].Info->getRaw(entity);
+				}
+			}
+			rowIndex++;
+		}
+		return rowIndex;
 	}
 
 	// Opens an EnTT-style view across the named pools and fills `outPointers`
 	// with one row per matching entity, `(writeCount + roCount)` pointers per
 	// row, in declaration order. The actual row count is returned; if it
 	// exceeds `maxRows` the caller resizes and retries (same convention as
-	// Scene_QueryEntities). The pointer-fill loop calls info->getRaw once per
-	// (entity × pool) — same sparse-set lookup cost a per-property binding
-	// would have done anyway, except we amortize it across all fields of all
-	// pools on this row instead of paying it per field access.
+	// Scene_QueryEntities).
+	//
+	// Iteration strategy: among the AND-set (writes + readonlys + must-haves)
+	// we pick the smallest pool as the driver and iterate ONLY that pool's
+	// sparse_set. Every other AND-pool is collapsed to an inline
+	// sparse_set::contains() check, and write/readonly pointer fills use
+	// sparse_set::value() — both inline, both touching only the packed and
+	// sparse arrays of one component pool. This replaces a registry-wide
+	// view<entt::entity>() walk that visited every entity in the scene and
+	// burned one std::function call per (entity × pool) on the has-check.
+	//
+	// Result: snapshot cost scales with `min(pool sizes)` instead of total
+	// registry size — order-of-magnitude speedup whenever the rarest required
+	// component is sparse against the scene (the common case for filtered
+	// jobs like `[WithAll(typeof(UserData))]`).
 	static int Index_Scene_OpenQueryView(
 		const char* sceneName,
 		const char* writeNames,
@@ -1112,67 +1356,145 @@ namespace Index {
 		IDX_BINDING_TRY {
 			Scene* scene = ResolveLoadedSceneForQuery(sceneName);
 			if (!scene || !scene->IsLoaded()) return 0;
+			auto& registry = scene->GetRegistry();
 
-			std::vector<QueryViewPool> writePools, roPools, withPools, withoutPools;
-			if (!ParseQueryViewPools(writeNames,    writePools,   /*requireGetRaw=*/true))  return 0;
-			if (!ParseQueryViewPools(readonlyNames, roPools,      /*requireGetRaw=*/true))  return 0;
-			if (!ParseQueryViewPools(mustHaveNames, withPools,    /*requireGetRaw=*/false)) return 0;
-			if (!ParseQueryViewPools(withoutNames,  withoutPools, /*requireGetRaw=*/false)) return 0;
+			std::vector<ResolvedQueryPool> writePools, roPools, withPools, withoutPools;
+			if (!ResolveQueryPools(registry, writeNames,    writePools,   /*requireValue=*/true))  return 0;
+			if (!ResolveQueryPools(registry, readonlyNames, roPools,      /*requireValue=*/true))  return 0;
+			if (!ResolveQueryPools(registry, mustHaveNames, withPools,    /*requireValue=*/false)) return 0;
+			if (!ResolveQueryPools(registry, withoutNames,  withoutPools, /*requireValue=*/false)) return 0;
 
 			const size_t writeCount = writePools.size();
 			const size_t roCount = roPools.size();
 			const size_t poolCount = writeCount + roCount;
 			if (poolCount == 0) return 0;  // empty query is a no-op
 
+			// Fast path: single write component, no filters → iterate that
+			// component's own storage directly via its registered fillRawPointers
+			// lambda. Preserved verbatim from the prior implementation; matches
+			// the simplest IJobQuery shape (`ref T` with no [WithAll]/[Without]).
 			if (writeCount == 1
 				&& roCount == 0
 				&& withPools.empty()
 				&& withoutPools.empty()
 				&& writePools[0].Info->fillRawPointers) {
-				return writePools[0].Info->fillRawPointers(scene->GetRegistry(), outPointers, maxRows, enableFilter);
+				return writePools[0].Info->fillRawPointers(registry, outPointers, maxRows, enableFilter);
 			}
 
+			// If ANY required or without pool can't be served by an EnTT
+			// sparse_set (null Storage), fall back to the std::function-based
+			// slow path. This preserves correctness for dynamic components,
+			// which live outside EnTT in DynamicComponentStorage — null
+			// Storage there means "use info->has / info->getRaw instead",
+			// NOT "zero rows". For built-in components the storage exists
+			// once any entity has ever held the component; the only way
+			// Storage stays null is if the entire pool was never touched,
+			// which IS legitimately "zero rows" — but we also can't
+			// distinguish those two cases here, so the slow path is the
+			// safe choice (and it's identical to the pre-rewrite behavior).
+			auto anyNullStorage = [](const std::vector<ResolvedQueryPool>& pools) {
+				for (const auto& p : pools) { if (!p.Storage) return true; }
+				return false;
+			};
+			if (anyNullStorage(writePools) || anyNullStorage(roPools)
+				|| anyNullStorage(withPools) || anyNullStorage(withoutPools)) {
+				return OpenQueryViewSlowPath(*scene, registry, writePools, roPools,
+					withPools, withoutPools, enableFilter, outPointers, maxRows);
+			}
+
+			// All required pools have EnTT storage. Empty-required short-
+			// circuit: if any required pool's storage is empty, no entity
+			// can match.
+			for (const auto& p : writePools) { if (p.Storage->empty()) return 0; }
+			for (const auto& p : roPools)    { if (p.Storage->empty()) return 0; }
+			for (const auto& p : withPools)  { if (p.Storage->empty()) return 0; }
+
+			// Pick the driver: smallest pool across writes ∪ readonlys ∪ must-haves.
+			// The store-pointer is stable across the rest of this call (we don't
+			// touch the pool vectors after this point).
+			const ResolvedQueryPool* driver = nullptr;
+			size_t driverSize = std::numeric_limits<size_t>::max();
+			auto considerPool = [&](const std::vector<ResolvedQueryPool>& pools) {
+				for (const auto& p : pools) {
+					const size_t s = p.Storage->size();
+					if (s < driverSize) { driver = &p; driverSize = s; }
+				}
+			};
+			considerPool(writePools);
+			considerPool(roPools);
+			considerPool(withPools);
+			// At least one of write/ro must exist (poolCount > 0), so driver is
+			// guaranteed non-null here. Belt-and-braces:
+			if (!driver) return 0;
+
+			// Cache the DisabledTag storage pointer once. Null when no entity has
+			// ever been disabled — that's equivalent to "everyone is enabled".
+			const entt::sparse_set* disabledStorage = nullptr;
+			if (enableFilter != 0) {
+				disabledStorage = registry.storage(entt::type_hash<DisabledTag>::value());
+				// enableFilter == 2 (DisabledOnly) with no disabled storage = 0 rows
+				if (enableFilter == 2 && (!disabledStorage || disabledStorage->empty())) return 0;
+			}
+
+			// Hoist sparse_set pointers into stack arrays so the inner loop touches
+			// raw pointers, not std::vector iterators. SmallVector-ish: the vast
+			// majority of IJobQuery shapes have ≤ 4 pools per category. Empirical
+			// upper bound is 8 (the IJobQuery interface caps at 8 components).
+			constexpr size_t kMaxPoolsPerCategory = 8;
+			entt::sparse_set* otherWriteStorages[kMaxPoolsPerCategory];   size_t otherWriteCount = 0;
+			entt::sparse_set* otherRoStorages[kMaxPoolsPerCategory];      size_t otherRoCount = 0;
+			entt::sparse_set* otherWithStorages[kMaxPoolsPerCategory];    size_t otherWithCount = 0;
+			entt::sparse_set* withoutStorages[kMaxPoolsPerCategory];      size_t withoutCountResolved = 0;
+			for (const auto& p : writePools) { if (&p != driver) otherWriteStorages[otherWriteCount++] = p.Storage; }
+			for (const auto& p : roPools)    { if (&p != driver) otherRoStorages[otherRoCount++] = p.Storage; }
+			for (const auto& p : withPools)  { if (&p != driver) otherWithStorages[otherWithCount++] = p.Storage; }
+			for (const auto& p : withoutPools) {
+				// Null storage = component pool never created = nobody has it →
+				// the without-filter is trivially satisfied for every entity.
+				// Drop the entry entirely so the inner loop's contains() check
+				// doesn't have to branch on null.
+				if (p.Storage) withoutStorages[withoutCountResolved++] = p.Storage;
+			}
+
+			// Iterate the driver's packed array in dense order — cache-friendly,
+			// and every entity here is by construction in at least the driver pool.
 			int rowIndex = 0;
-			auto& registry = scene->GetRegistry();
-			auto view = registry.view<entt::entity>();
+			for (const EntityHandle handle : *driver->Storage) {
+				if (enableFilter == 1) {
+					if (disabledStorage && disabledStorage->contains(handle)) continue;
+				} else if (enableFilter == 2) {
+					// disabledStorage non-null guaranteed by the early-out above
+					if (!disabledStorage->contains(handle)) continue;
+				}
 
-			for (auto handle : view) {
-				if (!registry.valid(handle)) continue;
-
-				if (enableFilter == 1 && registry.all_of<DisabledTag>(handle)) continue;
-				if (enableFilter == 2 && !registry.all_of<DisabledTag>(handle)) continue;
-
-				Entity entity = scene->GetEntity(handle);
-
-				// Match: every write/ro/must-have pool's `has` returns true.
 				bool match = true;
-				for (const auto& pool : writePools) {
-					if (!pool.Info->has(entity)) { match = false; break; }
+				for (size_t i = 0; i < otherWriteCount; ++i) {
+					if (!otherWriteStorages[i]->contains(handle)) { match = false; break; }
 				}
 				if (!match) continue;
-				for (const auto& pool : roPools) {
-					if (!pool.Info->has(entity)) { match = false; break; }
+				for (size_t i = 0; i < otherRoCount; ++i) {
+					if (!otherRoStorages[i]->contains(handle)) { match = false; break; }
 				}
 				if (!match) continue;
-				for (const auto& pool : withPools) {
-					if (!pool.Info->has(entity)) { match = false; break; }
+				for (size_t i = 0; i < otherWithCount; ++i) {
+					if (!otherWithStorages[i]->contains(handle)) { match = false; break; }
 				}
 				if (!match) continue;
-				for (const auto& pool : withoutPools) {
-					if (pool.Info->has(entity)) { match = false; break; }
+				for (size_t i = 0; i < withoutCountResolved; ++i) {
+					if (withoutStorages[i]->contains(handle)) { match = false; break; }
 				}
 				if (!match) continue;
 
-				// Row fits — fill pointers. If outPointers is null or the
-				// row would overflow maxRows, we still count it so the
-				// caller can resize and retry.
+				// Row fits — fill pointers. If outPointers is null or the row
+				// would overflow maxRows, we still count it so the caller can
+				// resize and retry (matches Scene_QueryEntities's grow protocol).
 				if (outPointers && rowIndex < maxRows) {
 					void** rowBase = outPointers + (static_cast<size_t>(rowIndex) * poolCount);
 					for (size_t i = 0; i < writeCount; ++i) {
-						rowBase[i] = writePools[i].Info->getRaw(entity);
+						rowBase[i] = writePools[i].Storage->value(handle);
 					}
 					for (size_t i = 0; i < roCount; ++i) {
-						rowBase[writeCount + i] = roPools[i].Info->getRaw(entity);
+						rowBase[writeCount + i] = roPools[i].Storage->value(handle);
 					}
 				}
 				rowIndex++;
@@ -1537,6 +1859,35 @@ namespace Index {
 		if (auto* tex = TextureManager::GetTexture(comp.TextureHandle); tex) {
 			tex->SetFilter(comp.FilterMode);
 		}
+	}
+
+	// ── Dynamic component registration (runtime, reflection-driven) ─────
+	// Pendant to Index_Component_GetTypeId — the only register/unregister
+	// callable from managed code. Bodies are thin: marshal the strings and
+	// delegate to ComponentRegistry::RegisterDynamic / UnregisterAllDynamic.
+
+	static uint32_t Index_Component_RegisterDynamic(
+		const char* displayName,
+		const char* serializedName,
+		const char* subcategory,
+		uint32_t category,
+		uint32_t size,
+		uint32_t alignment)
+	{
+		const std::string display = displayName ? displayName : std::string{};
+		const std::string serial  = serializedName ? serializedName : display;
+		const std::string sub     = subcategory ? subcategory : std::string{ "Custom" };
+		const ComponentCategory cat = (category == 1)
+			? ComponentCategory::Tag
+			: ComponentCategory::Component;
+		auto& registry = SceneManager::Get().GetComponentRegistry();
+		return registry.RegisterDynamic(display, serial, sub, cat, size, alignment);
+	}
+
+	static void Index_Component_UnregisterAllDynamic()
+	{
+		auto& registry = SceneManager::Get().GetComponentRegistry();
+		registry.UnregisterAllDynamic();
 	}
 
 	// ── TextRenderer ────────────────────────────────────────────────────
@@ -3031,6 +3382,9 @@ namespace Index {
 		b.Entity_HasComponent = &Index_Entity_HasComponent;
 		b.Entity_AddComponent = &Index_Entity_AddComponent;
 		b.Entity_RemoveComponent = &Index_Entity_RemoveComponent;
+		b.Entity_AddScript = &Index_Entity_AddScript;
+		b.Entity_HasScript = &Index_Entity_HasScript;
+		b.Entity_RemoveScript = &Index_Entity_RemoveScript;
 		// Note: legacy non-buffer string slots (Entity_GetManagedComponentFields,
 		// NameComponent_GetName, TextRenderer_GetText, Asset_GetPath/DisplayName/FindAll,
 		// Scene_GetActiveSceneName/EntityNameByUUID/LoadedSceneNameAt) were removed
@@ -3717,6 +4071,10 @@ namespace Index {
 		// ── SpriteRenderer filter (appended for binary compat) ──
 		b.SpriteRenderer_GetFilter = &Index_SpriteRenderer_GetFilter;
 		b.SpriteRenderer_SetFilter = &Index_SpriteRenderer_SetFilter;
+
+		// ── Dynamic component registration (appended for binary compat) ──
+		b.Component_RegisterDynamic       = &Index_Component_RegisterDynamic;
+		b.Component_UnregisterAllDynamic  = &Index_Component_UnregisterAllDynamic;
 	}
 
 } // namespace Index

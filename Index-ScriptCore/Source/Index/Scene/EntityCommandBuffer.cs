@@ -154,7 +154,7 @@ public sealed partial class EntityCommandBuffer : IDisposable
     /// reference. The returned handle is valid until the next
     /// <see cref="Clear"/> or <see cref="Dispose"/>.
     /// </summary>
-    public EntityRef CreateEntity()
+    public EntityRef Create()
     {
         EntityRef r = new EntityRef(m_EntityCount);
         m_EntityCount++;
@@ -184,7 +184,7 @@ public sealed partial class EntityCommandBuffer : IDisposable
         {
             throw new ArgumentException(
                 $"EntityRef index {e.Index} is out of range for this ECB (entityCount = {m_EntityCount}). " +
-                "Did you call CreateEntity on a different ECB?",
+                "Did you call Create on a different ECB?",
                 nameof(e));
         }
 
@@ -221,12 +221,12 @@ public sealed partial class EntityCommandBuffer : IDisposable
     /// the ECB rejects those at playback with a clear error.
     /// </para>
     /// </summary>
-    public unsafe EntityRef InstantiatePrefab(ulong prefabGuid)
+    public unsafe EntityRef Instantiate(ulong prefabGuid)
     {
         if (prefabGuid == 0)
         {
             throw new ArgumentException(
-                "InstantiatePrefab called with prefabGuid == 0; pass a valid prefab asset GUID.",
+                "Instantiate called with prefabGuid == 0; pass a valid prefab asset GUID.",
                 nameof(prefabGuid));
         }
 
@@ -248,23 +248,23 @@ public sealed partial class EntityCommandBuffer : IDisposable
     /// <see cref="Entity.FromPrefabGUID"/> (the same shape user scripts get
     /// from <c>[ShowInEditor] Entity MyPrefab</c> when the field is wired to
     /// a prefab asset in the inspector). Equivalent to
-    /// <c>InstantiatePrefab(prefabAsset.PrefabGUID)</c>.
+    /// <c>Instantiate(prefabAsset.PrefabGUID)</c>.
     /// </summary>
-    public EntityRef InstantiatePrefab(Entity prefabAsset)
+    public EntityRef Instantiate(Entity prefabAsset)
     {
         if (prefabAsset is null || !prefabAsset.IsPrefabAsset)
         {
             throw new ArgumentException(
-                "InstantiatePrefab requires a prefab-asset Entity (Entity.FromPrefabGUID). " +
+                "Instantiate requires a prefab-asset Entity (Entity.FromPrefabGUID). " +
                 "Pass a runtime entity? Use Clone instead.",
                 nameof(prefabAsset));
         }
-        return InstantiatePrefab(prefabAsset.PrefabGUID);
+        return Instantiate(prefabAsset.PrefabGUID);
     }
 
-    // ── CreateEntityWith / CreateEntitiesWith ────────────────────────
+    // ── CreateWith / CreateEntitiesWith ──────────────────────────────
     //
-    // Bundle the common "CreateEntity + N×AddComponent(default)" pattern
+    // Bundle the common "Create + N×AddComponent(default)" pattern
     // into one call. Each component is recorded as a payload-free
     // Ecb_DefaultConstructComponent op so the native playback calls
     // `registry.emplace<T>(handle)` and the C++ default-member-initializers
@@ -273,7 +273,7 @@ public sealed partial class EntityCommandBuffer : IDisposable
     // overwrite those defaults if it traveled through the regular
     // Ecb_AddComponent path.
     //
-    // To set initial values per entity, follow CreateEntityWith with an
+    // To set initial values per entity, follow CreateWith with an
     // `AddComponent(ref, value)` for the components you want to override
     // (last-write-wins per type on a given entity), or set them in-place
     // via `GetCreatedEntity(i).GetRef<T>()` after Playback.
@@ -291,7 +291,7 @@ public sealed partial class EntityCommandBuffer : IDisposable
         {
             throw new ArgumentException(
                 $"EntityRef index {e.Index} is out of range for this ECB (entityCount = {m_EntityCount}). " +
-                "Did you call CreateEntity on a different ECB?",
+                "Did you call Create on a different ECB?",
                 nameof(e));
         }
 
@@ -306,10 +306,10 @@ public sealed partial class EntityCommandBuffer : IDisposable
     /// <summary>
     /// Records a single entity with one default-constructed component.
     /// </summary>
-    public EntityRef CreateEntityWith<T1>()
+    public EntityRef CreateWith<T1>()
         where T1 : unmanaged, IComponent
     {
-        EntityRef e = CreateEntity();
+        EntityRef e = Create();
         RecordDefaultConstruct<T1>(e);
         return e;
     }
@@ -317,11 +317,11 @@ public sealed partial class EntityCommandBuffer : IDisposable
     /// <summary>
     /// Records a single entity with two default-constructed components.
     /// </summary>
-    public EntityRef CreateEntityWith<T1, T2>()
+    public EntityRef CreateWith<T1, T2>()
         where T1 : unmanaged, IComponent
         where T2 : unmanaged, IComponent
     {
-        EntityRef e = CreateEntity();
+        EntityRef e = Create();
         RecordDefaultConstruct<T1>(e);
         RecordDefaultConstruct<T2>(e);
         return e;
@@ -330,12 +330,12 @@ public sealed partial class EntityCommandBuffer : IDisposable
     /// <summary>
     /// Records a single entity with three default-constructed components.
     /// </summary>
-    public EntityRef CreateEntityWith<T1, T2, T3>()
+    public EntityRef CreateWith<T1, T2, T3>()
         where T1 : unmanaged, IComponent
         where T2 : unmanaged, IComponent
         where T3 : unmanaged, IComponent
     {
-        EntityRef e = CreateEntity();
+        EntityRef e = Create();
         RecordDefaultConstruct<T1>(e);
         RecordDefaultConstruct<T2>(e);
         RecordDefaultConstruct<T3>(e);
@@ -345,13 +345,13 @@ public sealed partial class EntityCommandBuffer : IDisposable
     /// <summary>
     /// Records a single entity with four default-constructed components.
     /// </summary>
-    public EntityRef CreateEntityWith<T1, T2, T3, T4>()
+    public EntityRef CreateWith<T1, T2, T3, T4>()
         where T1 : unmanaged, IComponent
         where T2 : unmanaged, IComponent
         where T3 : unmanaged, IComponent
         where T4 : unmanaged, IComponent
     {
-        EntityRef e = CreateEntity();
+        EntityRef e = Create();
         RecordDefaultConstruct<T1>(e);
         RecordDefaultConstruct<T2>(e);
         RecordDefaultConstruct<T3>(e);
@@ -362,14 +362,14 @@ public sealed partial class EntityCommandBuffer : IDisposable
     /// <summary>
     /// Records a single entity with five default-constructed components.
     /// </summary>
-    public EntityRef CreateEntityWith<T1, T2, T3, T4, T5>()
+    public EntityRef CreateWith<T1, T2, T3, T4, T5>()
         where T1 : unmanaged, IComponent
         where T2 : unmanaged, IComponent
         where T3 : unmanaged, IComponent
         where T4 : unmanaged, IComponent
         where T5 : unmanaged, IComponent
     {
-        EntityRef e = CreateEntity();
+        EntityRef e = Create();
         RecordDefaultConstruct<T1>(e);
         RecordDefaultConstruct<T2>(e);
         RecordDefaultConstruct<T3>(e);
@@ -381,7 +381,7 @@ public sealed partial class EntityCommandBuffer : IDisposable
     /// <summary>
     /// Records a single entity with six default-constructed components.
     /// </summary>
-    public EntityRef CreateEntityWith<T1, T2, T3, T4, T5, T6>()
+    public EntityRef CreateWith<T1, T2, T3, T4, T5, T6>()
         where T1 : unmanaged, IComponent
         where T2 : unmanaged, IComponent
         where T3 : unmanaged, IComponent
@@ -389,7 +389,7 @@ public sealed partial class EntityCommandBuffer : IDisposable
         where T5 : unmanaged, IComponent
         where T6 : unmanaged, IComponent
     {
-        EntityRef e = CreateEntity();
+        EntityRef e = Create();
         RecordDefaultConstruct<T1>(e);
         RecordDefaultConstruct<T2>(e);
         RecordDefaultConstruct<T3>(e);
@@ -402,7 +402,7 @@ public sealed partial class EntityCommandBuffer : IDisposable
     /// <summary>
     /// Records a single entity with seven default-constructed components.
     /// </summary>
-    public EntityRef CreateEntityWith<T1, T2, T3, T4, T5, T6, T7>()
+    public EntityRef CreateWith<T1, T2, T3, T4, T5, T6, T7>()
         where T1 : unmanaged, IComponent
         where T2 : unmanaged, IComponent
         where T3 : unmanaged, IComponent
@@ -411,7 +411,7 @@ public sealed partial class EntityCommandBuffer : IDisposable
         where T6 : unmanaged, IComponent
         where T7 : unmanaged, IComponent
     {
-        EntityRef e = CreateEntity();
+        EntityRef e = Create();
         RecordDefaultConstruct<T1>(e);
         RecordDefaultConstruct<T2>(e);
         RecordDefaultConstruct<T3>(e);
@@ -425,7 +425,7 @@ public sealed partial class EntityCommandBuffer : IDisposable
     /// <summary>
     /// Records a single entity with eight default-constructed components.
     /// </summary>
-    public EntityRef CreateEntityWith<T1, T2, T3, T4, T5, T6, T7, T8>()
+    public EntityRef CreateWith<T1, T2, T3, T4, T5, T6, T7, T8>()
         where T1 : unmanaged, IComponent
         where T2 : unmanaged, IComponent
         where T3 : unmanaged, IComponent
@@ -435,7 +435,7 @@ public sealed partial class EntityCommandBuffer : IDisposable
         where T7 : unmanaged, IComponent
         where T8 : unmanaged, IComponent
     {
-        EntityRef e = CreateEntity();
+        EntityRef e = Create();
         RecordDefaultConstruct<T1>(e);
         RecordDefaultConstruct<T2>(e);
         RecordDefaultConstruct<T3>(e);
@@ -461,7 +461,7 @@ public sealed partial class EntityCommandBuffer : IDisposable
         ValidateCreateEntitiesArgs(length, output.Length);
         for (int i = 0; i < length; i++)
         {
-            EntityRef e = CreateEntity();
+            EntityRef e = Create();
             RecordDefaultConstruct<T1>(e);
             output[i] = e;
         }
@@ -479,7 +479,7 @@ public sealed partial class EntityCommandBuffer : IDisposable
         ValidateCreateEntitiesArgs(length, output.Length);
         for (int i = 0; i < length; i++)
         {
-            EntityRef e = CreateEntity();
+            EntityRef e = Create();
             RecordDefaultConstruct<T1>(e);
             RecordDefaultConstruct<T2>(e);
             output[i] = e;
@@ -499,7 +499,7 @@ public sealed partial class EntityCommandBuffer : IDisposable
         ValidateCreateEntitiesArgs(length, output.Length);
         for (int i = 0; i < length; i++)
         {
-            EntityRef e = CreateEntity();
+            EntityRef e = Create();
             RecordDefaultConstruct<T1>(e);
             RecordDefaultConstruct<T2>(e);
             RecordDefaultConstruct<T3>(e);
@@ -521,7 +521,7 @@ public sealed partial class EntityCommandBuffer : IDisposable
         ValidateCreateEntitiesArgs(length, output.Length);
         for (int i = 0; i < length; i++)
         {
-            EntityRef e = CreateEntity();
+            EntityRef e = Create();
             RecordDefaultConstruct<T1>(e);
             RecordDefaultConstruct<T2>(e);
             RecordDefaultConstruct<T3>(e);
@@ -545,7 +545,7 @@ public sealed partial class EntityCommandBuffer : IDisposable
         ValidateCreateEntitiesArgs(length, output.Length);
         for (int i = 0; i < length; i++)
         {
-            EntityRef e = CreateEntity();
+            EntityRef e = Create();
             RecordDefaultConstruct<T1>(e);
             RecordDefaultConstruct<T2>(e);
             RecordDefaultConstruct<T3>(e);
@@ -571,7 +571,7 @@ public sealed partial class EntityCommandBuffer : IDisposable
         ValidateCreateEntitiesArgs(length, output.Length);
         for (int i = 0; i < length; i++)
         {
-            EntityRef e = CreateEntity();
+            EntityRef e = Create();
             RecordDefaultConstruct<T1>(e);
             RecordDefaultConstruct<T2>(e);
             RecordDefaultConstruct<T3>(e);
@@ -599,7 +599,7 @@ public sealed partial class EntityCommandBuffer : IDisposable
         ValidateCreateEntitiesArgs(length, output.Length);
         for (int i = 0; i < length; i++)
         {
-            EntityRef e = CreateEntity();
+            EntityRef e = Create();
             RecordDefaultConstruct<T1>(e);
             RecordDefaultConstruct<T2>(e);
             RecordDefaultConstruct<T3>(e);
@@ -629,7 +629,7 @@ public sealed partial class EntityCommandBuffer : IDisposable
         ValidateCreateEntitiesArgs(length, output.Length);
         for (int i = 0; i < length; i++)
         {
-            EntityRef e = CreateEntity();
+            EntityRef e = Create();
             RecordDefaultConstruct<T1>(e);
             RecordDefaultConstruct<T2>(e);
             RecordDefaultConstruct<T3>(e);

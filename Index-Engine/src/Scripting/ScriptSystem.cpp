@@ -4,6 +4,8 @@
 #include "Scripting/ScriptComponent.hpp"
 #include "Scripting/NativeScript.hpp"
 #include "Scene/Scene.hpp"
+#include "Scene/SceneManager.hpp"
+#include "Scene/ComponentRegistry.hpp"
 #include "Components/Tags.hpp"
 #include "Physics/Collision2D.hpp"
 #include "Core/Log.hpp"
@@ -1474,6 +1476,20 @@ namespace Index {
 
 		scriptComp.Scripts.erase(scriptComp.Scripts.begin() + static_cast<ptrdiff_t>(index));
 		RemovePendingFieldValuesForClass(scriptComp, removedClassName);
+
+		// Symmetric cleanup for `:IComponent` C# structs: every dynamic
+		// ComponentInfo is paired with a Managed-type ScriptComponent.Scripts
+		// entry (see Index_Entity_AddComponent and AttachScriptToEntity).
+		// Dropping just the Scripts entry would leave the DynamicComponentStorage
+		// row in place, so Entity.HasNativeComponent<T>() / GetRef<T>() would
+		// still see the component after the inspector "removed" it.
+		auto& componentRegistry = SceneManager::Get().GetComponentRegistry();
+		if (const ComponentInfo* info = componentRegistry.FindBySerializedName(removedClassName)) {
+			if (info->isDynamic && info->remove) {
+				info->remove(entity);
+			}
+		}
+
 		InvokeManagedScriptTeardown(*scene, managedState);
 		InvokeNativeScriptTeardown(*scene, nativeState, m_NativeHost);
 		return true;

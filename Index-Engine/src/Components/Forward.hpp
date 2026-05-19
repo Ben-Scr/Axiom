@@ -27,7 +27,6 @@ namespace Index {
 	struct EntityMetaDataComponent;
 	struct PrefabInstanceComponent;
 	struct HierarchyComponent;
-	struct NewNativeComponent;
 
 	// Graphics
 	struct INDEX_API SpriteRendererComponent;

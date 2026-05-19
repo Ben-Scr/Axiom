@@ -998,36 +998,52 @@ namespace Index {
 		m_EventBus.Clear();
 		m_LayerStack.Clear();
 
+		// Each subsystem shutdown is guarded so that a throw doesn't skip
+		// the rest. Critically, every owning unique_ptr is .reset() in the
+		// same step as its Shutdown — otherwise an exception would leave
+		// the pointer non-null and a re-entrant render path (e.g. a frame
+		// triggered by a hook firing during teardown) could call into a
+		// half-shutdown object.
+		auto guardedShutdownStatic = [](const char* name, auto&& fn) {
+			try { fn(); }
+			catch (const std::exception& e) {
+				IDX_CORE_ERROR_TAG("Application::Shutdown", "{} threw: {}", name, e.what());
+			}
+			catch (...) {
+				IDX_CORE_ERROR_TAG("Application::Shutdown", "{} threw unknown exception", name);
+			}
+		};
+		auto guardedShutdownOwned = [&guardedShutdownStatic](const char* name, auto& ptr) {
+			if (!ptr) return;
+			guardedShutdownStatic(name, [&] { ptr->Shutdown(); });
+			ptr.reset();  // null even on throw so render path can't reach a half-torn object
+		};
+
 		// Order matters: subsystems that hold package callbacks tear down BEFORE PackageHost::UnloadAll.
-		if (m_SceneManager) m_SceneManager->Shutdown();
-		if (ScriptEngine::IsInitialized()) ScriptEngine::Shutdown();
-		if (FontManager::IsInitialized()) FontManager::Shutdown();
-		if (m_Configuration.EnableTextureManager) TextureManager::Shutdown();
-		if (ShaderManager::IsInitialized()) ShaderManager::Shutdown();
+		if (m_SceneManager) guardedShutdownStatic("SceneManager", [&]{ m_SceneManager->Shutdown(); });
+		if (ScriptEngine::IsInitialized()) guardedShutdownStatic("ScriptEngine", []{ ScriptEngine::Shutdown(); });
+		if (FontManager::IsInitialized()) guardedShutdownStatic("FontManager", []{ FontManager::Shutdown(); });
+		if (m_Configuration.EnableTextureManager) guardedShutdownStatic("TextureManager", []{ TextureManager::Shutdown(); });
+		if (ShaderManager::IsInitialized()) guardedShutdownStatic("ShaderManager", []{ ShaderManager::Shutdown(); });
 
-		if (m_PhysicsSystem2D) m_PhysicsSystem2D->Shutdown();
-		if (m_GuiRenderer) m_GuiRenderer->Shutdown();
-		if (m_GizmoRenderer2D) m_GizmoRenderer2D->Shutdown();
-		if (m_Renderer2D) m_Renderer2D->Shutdown();
-		if (RenderApi::IsInitialized()) RenderApi::Shutdown();
+		guardedShutdownOwned("PhysicsSystem2D", m_PhysicsSystem2D);
+		guardedShutdownOwned("GuiRenderer", m_GuiRenderer);
+		guardedShutdownOwned("GizmoRenderer2D", m_GizmoRenderer2D);
+		guardedShutdownOwned("Renderer2D", m_Renderer2D);
+		if (RenderApi::IsInitialized()) guardedShutdownStatic("RenderApi", []{ RenderApi::Shutdown(); });
 
-		if (AudioManager::IsInitialized())
-			AudioManager::Shutdown();
+		if (AudioManager::IsInitialized()) guardedShutdownStatic("AudioManager", []{ AudioManager::Shutdown(); });
 
-		if (m_Configuration.EnablePackageHost) PackageHost::UnloadAll();
+		if (m_Configuration.EnablePackageHost) guardedShutdownStatic("PackageHost", []{ PackageHost::UnloadAll(); });
 
 		if (m_Window) {
-			m_Window->SetEventCallback({});
-			m_Window->Destroy();
+			guardedShutdownStatic("Window::Destroy", [&]{
+				m_Window->SetEventCallback({});
+				m_Window->Destroy();
+			});
 		}
-		if (Window::IsInitialized()) {
-			Window::Shutdown();
-		}
+		if (Window::IsInitialized()) guardedShutdownStatic("Window::Shutdown", []{ Window::Shutdown(); });
 
-		m_GuiRenderer.reset();
-		m_GizmoRenderer2D.reset();
-		m_Renderer2D.reset();
-		m_PhysicsSystem2D.reset();
 		m_Window.reset();
 
 		// Release FrameArenas backing buffers. Pairs with the Initialize

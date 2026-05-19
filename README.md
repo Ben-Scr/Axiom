@@ -17,7 +17,7 @@ Index is a lightweight C++20 2D game engine focused on performance.
 </p>
 
 ## External Libraries / APIs
-- [OpenGL](https://www.opengl.org/) - Rendering API
+- [WebGPU via Dawn](https://dawn.googlesource.com/dawn) - Rendering API (Dawn picks D3D12/Vulkan/Metal at adapter request time)
 - [STB](https://github.com/nothings/stb) - Graphics image library
 - [GLM](https://github.com/g-truc/glm) - Graphics math library
 - [GLFW](https://github.com/glfw/glfw) - Windowing/input library
@@ -25,18 +25,22 @@ Index is a lightweight C++20 2D game engine focused on performance.
 - [Axiom-Physics](https://github.com/Ben-Scr/Axiom-Physics2D) - Lightweight 2D physics library
 - [ENTT](https://github.com/skypjack/entt) - ECS library
 - [Miniaudio](https://github.com/mackron/miniaudio) - Multiplatform audio library
+- [Tracy](https://github.com/wolfpld/tracy) - Profiler (optional, gated by `--no-profiler`)
+- [.NET 9 / hostfxr](https://dotnet.microsoft.com/) - C# scripting host
 
 ## Prerequisites
 - Git with submodule support.
 - Python 3.10 or newer. `scripts/Setup.py` enforces this version.
 - Premake 5. Windows expects `vendor/bin/premake5.exe`; Linux expects `vendor/bin/premake5` or a `premake5` executable on `PATH`.
 - Windows: Visual Studio 2022 with the MSVC v143 C++ toolset, Windows SDK, and .NET 9 SDK/runtime for scripting projects and native hosting files.
-- Linux: a C++20-capable compiler, GNU Make, Python 3.10+, and native packages for GLFW/OpenGL. On Ubuntu:
+- Linux: a C++20-capable compiler, GNU Make, Python 3.10+, and native packages for GLFW. On Ubuntu:
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y build-essential xorg-dev libglu1-mesa-dev xvfb
+sudo apt-get install -y build-essential xorg-dev xvfb
 ```
+
+- GPU backend: the engine renders through Dawn (WebGPU). Dawn is pre-built and linked via `scripts/dawn/SetupDawn.bat` — re-run that script if `External/dawn/build/` is missing or out of date. Dawn picks the underlying runtime API (D3D12 / Vulkan / Metal) at adapter-request time; you do not select it at build time.
 
 The repository currently has no Git LFS patterns in `.gitattributes`. Setup skips `git lfs pull` unless LFS attributes are added later. Use `--skip-lfs` to force a skip or `--require-lfs` to fail if declared LFS assets cannot be pulled.
 

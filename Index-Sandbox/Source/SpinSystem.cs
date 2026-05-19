@@ -1,10 +1,13 @@
 using Index;
 using Index.Components;
-// The Native* structs in Index.Components live alongside the managed
-// `Index.Transform2D` / `Index.SpriteRenderer` class wrappers. Names are
-// disambiguated by the `Native` prefix, so a single `using Index.Components;`
-// is enough — no per-file aliases. Mix freely: managed class for cold paths,
-// Native struct for hot loops in this system.
+using Index.Native;
+// The native ECS structs live in `Index.Native` (`NativeTransform2D`,
+// `NativeSpriteRenderer`); the managed wrappers `Index.Transform2D` /
+// `Index.SpriteRenderer` keep their unprefixed names in the root `Index`
+// namespace. The `Native` prefix on the struct names is what keeps the two
+// worlds unambiguous when both `using Index;` and `using Index.Native;` are
+// in scope. Mix freely: managed class for cold paths, native struct for
+// hot loops in this system.
 
 // Demonstrates the ECS ref-API query system. Inactive until the user adds it
 // to a scene via the editor's GameSystem inspector. Shows the two iteration

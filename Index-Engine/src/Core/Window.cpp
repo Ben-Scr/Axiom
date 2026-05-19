@@ -2,7 +2,6 @@
 #include "Window.hpp"
 #include "Application.hpp"
 #include "Graphics/Texture2D.hpp"
-#include "Graphics/OpenGL.hpp"
 #include "Graphics/RenderApi.hpp"
 #include "Events/WindowEvents.hpp"
 #include "Events/KeyEvents.hpp"

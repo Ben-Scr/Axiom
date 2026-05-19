@@ -24,9 +24,10 @@ namespace Index;
 // `.Without<T>()`, `.With<T>()`, `.EnabledOnly()`/`.IncludeDisabled()`/
 // `.DisabledOnly()`, `.Readonly<T>()` (adds a readonly component row).
 //
-// All `T` parameters here are the `Native*` structs from `Index.Components` —
-// the constraint `where T : unmanaged, IComponent` only admits those, the
-// managed wrapper classes (`Index.Transform2D` etc.) won't compile here.
+// All `T` parameters here are the `Native*` blittable structs from
+// `Index.Native` — the constraint `where T : unmanaged, IComponent` only
+// admits those, the managed wrapper classes (`Index.Transform2D` etc.)
+// won't compile here.
 
 internal struct QueryRefFilters
 {

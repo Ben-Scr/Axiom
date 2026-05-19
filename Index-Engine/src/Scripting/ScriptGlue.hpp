@@ -100,6 +100,16 @@ namespace Index {
 		int      (*Entity_HasComponent)(uint64_t entityID, const char* componentName);
 		int      (*Entity_AddComponent)(uint64_t entityID, const char* componentName);
 		int      (*Entity_RemoveComponent)(uint64_t entityID, const char* componentName);
+		// Script-specific routes (EntityScript subclasses). Mirror the
+		// component triplet but target ScriptComponent.Scripts +
+		// ScriptSystem instead of the ECS pool. Class name is the C#
+		// short type name (e.g. "TutorialScript").
+		int      (*Entity_AddScript)(uint64_t entityID, const char* className);
+		int      (*Entity_HasScript)(uint64_t entityID, const char* className);
+		int      (*Entity_RemoveScript)(uint64_t entityID, const char* className);
+		// Delayed destruction — push onto Scene::m_PendingDestroys.
+		// Forwards to Scene::DestroyEntity(handle, delay).
+		void     (*Entity_DestroyDelayed)(uint64_t entityID, float delay);
 		int      (*Entity_GetManagedComponentFieldsBuffer)(uint64_t entityID, const char* componentName, char* outBuffer, int capacity);
 		int      (*Entity_GetIsStatic)(uint64_t entityID);
 		void     (*Entity_SetIsStatic)(uint64_t entityID, int isStatic);
@@ -966,6 +976,26 @@ namespace Index {
 		// {Point=0, Bilinear=1, Trilinear=2, Anisotropic=3}.
 		int  (*SpriteRenderer_GetFilter)(uint64_t entityID);
 		void (*SpriteRenderer_SetFilter)(uint64_t entityID, int filter);
+
+		// ── Dynamic component registration (appended for binary compat) ──
+		// Called from the C# host (DynamicComponentRegistrar) at user-
+		// assembly load. Reflects over every struct annotated
+		// [NativeComponent(..., Generate = true)] and registers it with
+		// ComponentRegistry via this entry point — no codegen, no engine
+		// rebuild. Returns the assigned stable typeIdU32, or 0 on failure
+		// (duplicate name, zero size, etc.). Category: 0 = Component, 1 = Tag.
+		uint32_t (*Component_RegisterDynamic)(
+			const char* displayName,
+			const char* serializedName,
+			const char* subcategory,
+			uint32_t category,
+			uint32_t size,
+			uint32_t alignment);
+
+		// Drops every dynamic registration. Called from UnloadUserAssembly
+		// BEFORE the ALC tears down so captured lambdas don't outlive the
+		// storage they reference. Idempotent.
+		void (*Component_UnregisterAllDynamic)();
 	};
 
 	/// Layout must match C# ManagedCallbacksStruct exactly.

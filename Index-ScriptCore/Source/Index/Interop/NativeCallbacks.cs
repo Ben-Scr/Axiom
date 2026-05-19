@@ -89,6 +89,10 @@ internal unsafe struct NativeBindingsStruct
     public delegate* unmanaged<ulong, byte*, int> Entity_HasComponent;
     public delegate* unmanaged<ulong, byte*, int> Entity_AddComponent;
     public delegate* unmanaged<ulong, byte*, int> Entity_RemoveComponent;
+    public delegate* unmanaged<ulong, byte*, int> Entity_AddScript;
+    public delegate* unmanaged<ulong, byte*, int> Entity_HasScript;
+    public delegate* unmanaged<ulong, byte*, int> Entity_RemoveScript;
+    public delegate* unmanaged<ulong, float, void> Entity_DestroyDelayed;
     public delegate* unmanaged<ulong, byte*, byte*, int, int> Entity_GetManagedComponentFieldsBuffer;
     public delegate* unmanaged<ulong, int> Entity_GetIsStatic;
     public delegate* unmanaged<ulong, int, void> Entity_SetIsStatic;
@@ -856,6 +860,14 @@ internal unsafe struct NativeBindingsStruct
     // for the bound texture so the change takes effect this frame.
     public delegate* unmanaged<ulong, int> SpriteRenderer_GetFilter;
     public delegate* unmanaged<ulong, int, void> SpriteRenderer_SetFilter;
+
+    // ── Dynamic component registration (appended for binary compat) ──
+    // Called from DynamicComponentRegistrar at user-assembly load. The
+    // managed registrar reflects [NativeComponent(..., Generate = true)]
+    // structs and calls this for each — no codegen, no engine rebuild.
+    // Returns the assigned typeIdU32 (0 on failure). Category: 0=Component, 1=Tag.
+    public delegate* unmanaged<byte*, byte*, byte*, uint, uint, uint, uint> Component_RegisterDynamic;
+    public delegate* unmanaged<void> Component_UnregisterAllDynamic;
 }
 
 internal static unsafe class NativeCallbacks

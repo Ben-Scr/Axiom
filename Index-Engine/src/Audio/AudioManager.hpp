@@ -83,8 +83,9 @@ namespace Index {
 			AudioHandle AudioHandle;
 			// Bumped on every Recycle so a stale handle to this slot fails GetSoundInstance.
 			// Without this, a recycled index silently aliases a different sound (the bug that
-			// produced the audit's CR2).
-			uint16_t Generation = 0;
+			// produced the audit's CR2). 32-bit so the runtime counter doesn't pinch as the
+			// encoded ID's generation field grew from 16 to 24 bits (see EncodeAudioInstanceId).
+			uint32_t Generation = 0;
 			bool HasDataSource = false;
 			bool IsValid = false;
 		};

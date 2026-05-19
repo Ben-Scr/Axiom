@@ -184,7 +184,15 @@ namespace Index {
 
 			uint64_t id = ReadMetaId(normalizedPath);
 			if (id == 0) {
-				id = static_cast<uint64_t>(UUID());
+				// Freshly-minted GUID. The 64-bit space makes collision
+				// astronomically unlikely, but multiple assets created in
+				// the same frame can still race and birthday-collide if a
+				// PRNG is reseeded badly. Re-mint until the slot is free
+				// so the post-WriteMeta state holds the registry invariant
+				// "every Id maps to exactly one Path".
+				do {
+					id = static_cast<uint64_t>(UUID());
+				} while (id != 0 && s_IdToRecord.find(id) != s_IdToRecord.end());
 			} else if (auto existing = s_IdToRecord.find(id); existing != s_IdToRecord.end()) {
 				// GUID collision: a different asset already owns this GUID.
 				// Regenerate so we don't break the existing reference, but
@@ -193,7 +201,9 @@ namespace Index {
 				IDX_CORE_WARN_TAG("AssetRegistry",
 					"GUID collision while indexing '{}': id {} already owned by '{}' — regenerating new GUID for '{}'",
 					normalizedPath, id, existing->second.Path, normalizedPath);
-				id = static_cast<uint64_t>(UUID());
+				do {
+					id = static_cast<uint64_t>(UUID());
+				} while (id != 0 && s_IdToRecord.find(id) != s_IdToRecord.end());
 			}
 
 			WriteMeta(normalizedPath, id, Classify(normalizedPath));

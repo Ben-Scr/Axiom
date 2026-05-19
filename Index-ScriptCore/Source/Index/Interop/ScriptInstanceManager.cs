@@ -120,6 +120,16 @@ internal static class ScriptInstanceManager
     // ConcurrentDictionary so TryGetValue / indexer / TryRemove / Clear / Values
     // snapshots are all safe under concurrent access.
     private static readonly ConcurrentDictionary<int, ScriptInstanceData> s_Instances = new();
+    // Secondary index for O(1) Entity.GetComponent<TScript>() / HasComponent /
+    // TryGetComponent. Without this the lookup had to enumerate the full
+    // primary dictionary and allocate a snapshot list on every call —
+    // visible cost when scripts call GetComponent inside per-frame OnUpdate.
+    // Keyed by (entityID, runtime type) so two scripts of different types
+    // on the same entity each get their own slot. Updated alongside the
+    // primary store in CreateScriptInstance / DestroyScriptInstance and
+    // cleared in the same paths that clear s_Instances (assembly unload,
+    // hot reload, scene teardown).
+    private static readonly ConcurrentDictionary<(ulong EntityID, Type Type), int> s_InstancesByType = new();
     private static readonly ConcurrentDictionary<int, GameSystem> s_GameSystems = new();
     private static readonly ConcurrentDictionary<int, GlobalSystem> s_GlobalSystems = new();
     // Incremented from any thread that creates an instance; ++ on a plain int is
@@ -218,6 +228,24 @@ internal static class ScriptInstanceManager
         if (entityID == 0 || string.IsNullOrWhiteSpace(className))
             return null;
 
+        // Fast path: resolve the class name to a Type via the cache and
+        // hit the (entityID, Type) -> handle secondary index. O(1) and
+        // allocation-free, which matters because GetComponent<TScript>()
+        // is now the canonical "find this script" API and may be called
+        // every frame from user OnUpdate.
+        ScriptClassInfo? classInfo = ResolveClassByName(className);
+        if (classInfo != null
+            && s_InstancesByType.TryGetValue((entityID, classInfo.Type), out int cachedHandle)
+            && s_Instances.TryGetValue(cachedHandle, out var cachedData))
+        {
+            return cachedData.Instance;
+        }
+
+        // Slow path: secondary index miss. Falls back to the original
+        // O(N) walk so callers passing a className we haven't cached
+        // (or that resolved before the index was populated) still
+        // resolve correctly. Same comparison rules: short name OR
+        // full name match.
         foreach (var data in SnapshotInstances())
         {
             EntityScript instance = data.Instance;
@@ -232,6 +260,30 @@ internal static class ScriptInstanceManager
             }
         }
 
+        return null;
+    }
+
+    // Look up the cached ScriptClassInfo for a given className (short or
+    // full name). Returns null when no cache entry exists OR when the
+    // entry isn't a script — keeps the fast-path quiet for non-script
+    // names (e.g. native component names that happen to flow through
+    // here on a mistaken call site).
+    private static ScriptClassInfo? ResolveClassByName(string className)
+    {
+        if (s_ClassCache.TryGetValue(className, out ScriptClassInfo? info) && info != null && info.IsScript)
+            return info;
+        // Scan all cache entries by short name to handle the typeof(T).Name
+        // case (e.g. "TutorialScript") when the cache key was "MyNs.TutorialScript".
+        foreach (var kv in s_ClassCache)
+        {
+            ScriptClassInfo? candidate = kv.Value;
+            if (candidate == null || !candidate.IsScript) continue;
+            if (string.Equals(candidate.Type.Name, className, StringComparison.Ordinal)
+                || string.Equals(candidate.Type.FullName, className, StringComparison.Ordinal))
+            {
+                return candidate;
+            }
+        }
         return null;
     }
 
@@ -401,6 +453,12 @@ internal static class ScriptInstanceManager
                 HasStarted = false,
                 HasAwoken = false
             };
+            // Secondary (entityID, type) -> handle index. Indexer write
+            // overwrites — re-attaching the same script type on the same
+            // entity replaces the prior mapping (matches the s_Instances
+            // behaviour where the prior handle keeps an entry until the
+            // teardown path clears it).
+            s_InstancesByType[(entityID, classInfo.Type)] = handle;
 
             return handle;
         }
@@ -412,7 +470,21 @@ internal static class ScriptInstanceManager
     }
 
     [UnmanagedCallersOnly]
-    public static void DestroyScriptInstance(int handle) => s_Instances.TryRemove(handle, out _);
+    public static void DestroyScriptInstance(int handle)
+    {
+        if (!s_Instances.TryRemove(handle, out ScriptInstanceData data))
+            return;
+        // Mirror removal in the secondary index. The reverse lookup walks
+        // the dictionary once — acceptable because DestroyScriptInstance
+        // is cold (called on teardown / hot-reload / explicit remove), not
+        // per-frame.
+        ulong entityID = data.Instance.Entity != null ? data.Instance.Entity.ID : 0;
+        if (entityID != 0)
+        {
+            Type type = data.Instance.GetType();
+            s_InstancesByType.TryRemove((entityID, type), out _);
+        }
+    }
 
     [UnmanagedCallersOnly]
     public static void InvokeStart(int handle)
@@ -730,8 +802,14 @@ internal static class ScriptInstanceManager
 
             if (s_UserLoadContext != null)
             {
+                // Drop previous dynamic registrations before tearing down
+                // the existing assembly load context — same reason
+                // UnloadUserAssembly does, just for the reload path.
+                DynamicComponentRegistrar.UnregisterAll();
+
                 CancelAllInstanceCoroutines();
                 s_Instances.Clear();
+                s_InstancesByType.Clear();
                 s_GameSystems.Clear();
                 s_GameSystemAwoken.Clear();
                 s_GlobalSystems.Clear();
@@ -749,6 +827,12 @@ internal static class ScriptInstanceManager
                 new System.IO.MemoryStream(assemblyBytes));
 
             Log.Info($"User assembly loaded: {path}");
+
+            // Reflect over the freshly-loaded assembly and register every
+            // [NativeComponent(..., Generate = true)] struct with the engine.
+            // Replaces the build-time codegen pipeline — components are now
+            // visible to the editor / ECS the moment the C# project rebuilds.
+            DynamicComponentRegistrar.RegisterAll(s_UserAssembly);
             return 1;
         }
         catch (Exception ex)
@@ -761,8 +845,14 @@ internal static class ScriptInstanceManager
     [UnmanagedCallersOnly]
     public static void UnloadUserAssembly()
     {
+        // Drop dynamic component registrations BEFORE the ALC unloads so
+        // captured DynamicComponentStorage pointers in native callbacks
+        // don't outlive the storage that owns them.
+        DynamicComponentRegistrar.UnregisterAll();
+
         CancelAllInstanceCoroutines();
         s_Instances.Clear();
+        s_InstancesByType.Clear();
         s_GameSystems.Clear();
         s_GameSystemAwoken.Clear();
         s_GlobalSystems.Clear();

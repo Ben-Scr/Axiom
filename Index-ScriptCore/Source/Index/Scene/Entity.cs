@@ -322,6 +322,19 @@ public class Entity : IEquatable<Entity>
         if (IsPrefabAsset)
             return null;
 
+        // Script branch: T : EntityScript routes through the script
+        // backend (ScriptComponent.Scripts + ScriptInstanceManager).
+        // C# can't disambiguate by constraint (CS0111), so we dispatch
+        // at runtime on typeof(T). The script's OnAwake / OnStart fire
+        // immediately via the native BindAndAwakeNow path so the
+        // returned instance is fully live before this method returns.
+        if (typeof(EntityScript).IsAssignableFrom(typeof(T)))
+        {
+            if (!InternalCalls.Entity_AddScript(ID, typeof(T).Name))
+                return null;
+            return ScriptInstanceManager.GetScriptInstance(ID, typeof(T).Name) as T;
+        }
+
         string? nativeName = GetNativeName<T>();
         if (nativeName == null)
             return null;
@@ -360,6 +373,10 @@ public class Entity : IEquatable<Entity>
         if (IsPrefabAsset)
             return false;
 
+        // Script branch (see AddComponent for the CS0111 rationale).
+        if (typeof(EntityScript).IsAssignableFrom(typeof(T)))
+            return InternalCalls.Entity_HasScript(ID, typeof(T).Name);
+
         string? nativeName = GetNativeName<T>();
         return nativeName != null && InternalCalls.Entity_HasComponent(ID, nativeName);
     }
@@ -378,6 +395,10 @@ public class Entity : IEquatable<Entity>
     {
         if (IsPrefabAsset)
             return false;
+
+        // Script branch (see AddComponent for the CS0111 rationale).
+        if (typeof(EntityScript).IsAssignableFrom(typeof(T)))
+            return InternalCalls.Entity_RemoveScript(ID, typeof(T).Name);
 
         string? nativeName = GetNativeName<T>();
         if (nativeName == null) return false;
@@ -407,6 +428,95 @@ public class Entity : IEquatable<Entity>
     {
         return GetComponentByType(typeof(T)) as T;
     }
+
+    /// <summary>
+    /// Out-param variant of <see cref="GetComponent{T}"/>. Works for any
+    /// T : Component, new() — including EntityScript subclasses, which
+    /// resolve via the script storage (ScriptInstanceManager). Returns
+    /// true when the component / script is present on the entity.
+    /// </summary>
+    public bool TryGetComponent<T>(out T? value) where T : Component, new()
+    {
+        value = GetComponent<T>();
+        return value != null;
+    }
+
+    // ── HasComponents<T1..T8> (variadic AND-semantics) ───────────────
+    //
+    // Per-T constraint is `Component, new()` so the same arities cover
+    // managed components AND scripts (EntityScript : Component). Mixing
+    // shapes in one call is fine — each HasComponent<Ti>() dispatches
+    // on typeof(Ti) at runtime. For native IComponent structs, use the
+    // separately-named HasNativeComponents counterpart (added below)
+    // since C# can't unify `Component`-constrained generics with
+    // `unmanaged, IComponent`-constrained generics (CS0111).
+
+    public bool HasComponents<T1>()
+        where T1 : Component, new()
+        => HasComponent<T1>();
+
+    public bool HasComponents<T1, T2>()
+        where T1 : Component, new()
+        where T2 : Component, new()
+        => HasComponent<T1>() && HasComponent<T2>();
+
+    public bool HasComponents<T1, T2, T3>()
+        where T1 : Component, new()
+        where T2 : Component, new()
+        where T3 : Component, new()
+        => HasComponent<T1>() && HasComponent<T2>() && HasComponent<T3>();
+
+    public bool HasComponents<T1, T2, T3, T4>()
+        where T1 : Component, new()
+        where T2 : Component, new()
+        where T3 : Component, new()
+        where T4 : Component, new()
+        => HasComponent<T1>() && HasComponent<T2>() && HasComponent<T3>()
+           && HasComponent<T4>();
+
+    public bool HasComponents<T1, T2, T3, T4, T5>()
+        where T1 : Component, new()
+        where T2 : Component, new()
+        where T3 : Component, new()
+        where T4 : Component, new()
+        where T5 : Component, new()
+        => HasComponent<T1>() && HasComponent<T2>() && HasComponent<T3>()
+           && HasComponent<T4>() && HasComponent<T5>();
+
+    public bool HasComponents<T1, T2, T3, T4, T5, T6>()
+        where T1 : Component, new()
+        where T2 : Component, new()
+        where T3 : Component, new()
+        where T4 : Component, new()
+        where T5 : Component, new()
+        where T6 : Component, new()
+        => HasComponent<T1>() && HasComponent<T2>() && HasComponent<T3>()
+           && HasComponent<T4>() && HasComponent<T5>() && HasComponent<T6>();
+
+    public bool HasComponents<T1, T2, T3, T4, T5, T6, T7>()
+        where T1 : Component, new()
+        where T2 : Component, new()
+        where T3 : Component, new()
+        where T4 : Component, new()
+        where T5 : Component, new()
+        where T6 : Component, new()
+        where T7 : Component, new()
+        => HasComponent<T1>() && HasComponent<T2>() && HasComponent<T3>()
+           && HasComponent<T4>() && HasComponent<T5>() && HasComponent<T6>()
+           && HasComponent<T7>();
+
+    public bool HasComponents<T1, T2, T3, T4, T5, T6, T7, T8>()
+        where T1 : Component, new()
+        where T2 : Component, new()
+        where T3 : Component, new()
+        where T4 : Component, new()
+        where T5 : Component, new()
+        where T6 : Component, new()
+        where T7 : Component, new()
+        where T8 : Component, new()
+        => HasComponent<T1>() && HasComponent<T2>() && HasComponent<T3>()
+           && HasComponent<T4>() && HasComponent<T5>() && HasComponent<T6>()
+           && HasComponent<T7>() && HasComponent<T8>();
 
     public object? GetComponent(string componentOrScriptName)
     {
@@ -458,15 +568,15 @@ public class Entity : IEquatable<Entity>
     // Chains exactly like today's `entity.Transform.Position` — ref-returns are
     // lvalues, so `+= v` writes through to EnTT storage. Skips the per-frame
     // GetComponent<Transform2D>() class-wrapper alloc + dictionary lookup.
-    public unsafe ref Components.NativeTransform2D TransformRef
+    public unsafe ref Native.NativeTransform2D TransformRef
     {
         get
         {
-            void* p = InternalCalls.Entity_GetComponentPtr(ID, Components.NativeTransform2D.NativeName);
+            void* p = InternalCalls.Entity_GetComponentPtr(ID, Native.NativeTransform2D.NativeName);
             if (p == null)
                 throw new InvalidOperationException(
                     $"Entity {ID} has no Transform 2D component.");
-            return ref Unsafe.AsRef<Components.NativeTransform2D>(p);
+            return ref Unsafe.AsRef<Native.NativeTransform2D>(p);
         }
     }
 
@@ -484,6 +594,16 @@ public class Entity : IEquatable<Entity>
     {
         if (IsPrefabAsset)
             return null;
+
+        // Script branch: scripts live in ScriptInstanceManager keyed by
+        // (entityID, className). EntityScript : Component, so the same
+        // `T : Component, new()` constrained call site resolves into
+        // either backend based on runtime type. Returning the script
+        // instance directly bypasses m_ComponentCache (which is for
+        // Component class-wrappers around ECS data, not script
+        // instances that already cache their own state).
+        if (typeof(EntityScript).IsAssignableFrom(type))
+            return ScriptInstanceManager.GetScriptInstance(ID, type.Name);
 
         string? nativeName = GetComponentName(type);
         if (nativeName == null)
@@ -954,7 +1074,20 @@ public class Entity : IEquatable<Entity>
         entity.Destroy();
     }
 
-    public Entity Clone() => Instantiate(this);
+    /// <summary>
+    /// Schedule the destruction <paramref name="delay"/> seconds in the
+    /// future. The entity stays valid until the next Scene update on
+    /// which (accumulated dt) ≥ delay. Non-positive delay collapses to
+    /// immediate destruction. Cached components are invalidated up
+    /// front so any stored references stop dereferencing into stale
+    /// EnTT slots before the queue drains.
+    /// </summary>
+    public static void Destroy(Entity entity, float delay)
+    {
+        if (entity is null || entity == Invalid)
+            return;
+        entity.Destroy(delay);
+    }
 
     public void Destroy()
     {
@@ -963,6 +1096,26 @@ public class Entity : IEquatable<Entity>
 
         InvalidateAllCachedComponents();
         InternalCalls.Entity_Destroy(ID);
+    }
+
+    public void Destroy(float delay)
+    {
+        if (IsPrefabAsset)
+            return;
+
+        if (delay <= 0.0f)
+        {
+            Destroy();
+            return;
+        }
+
+        // Don't invalidate cached components here — the entity is still
+        // live until the timer fires, and a script that scheduled its
+        // own delayed destroy may want to keep accessing its components
+        // for the remainder of the delay window. The cache is dropped
+        // by the eventual immediate-destroy path on the native side
+        // when the queue drains.
+        InternalCalls.Entity_DestroyDelayed(ID, delay);
     }
 
     public bool Equals(Entity? other)

@@ -226,6 +226,22 @@ namespace Index {
 			return;
 		}
 		s_Queue.enqueue(std::move(work));
+
+		// Tight race: the state load above saw Running, but Shutdown may
+		// have flipped it after the load and before the enqueue completed.
+		// In that window the workers have already exited their drain
+		// loop, and Shutdown's belt-and-braces sink would silently discard
+		// our work. Re-check; if shutdown started, drain the queue inline
+		// so the enqueue we just performed (and anyone else's racing
+		// enqueues) still execute. moodycamel's queue is safe for
+		// concurrent dequeue against Shutdown's sink loop — whichever side
+		// wins each item, the work runs.
+		if (s_State.load(std::memory_order_acquire) != PoolState::Running) {
+			std::function<void()> drained;
+			while (s_Queue.try_dequeue(drained)) {
+				if (drained) ExecuteJob(std::move(drained));
+			}
+		}
 	}
 
 	bool JobSystem::TryPopAndRun() {

@@ -88,13 +88,17 @@ namespace Index {
 		// EntityIndex by the per-writer base offset. Sub-buffers contribute
 		// contiguous ranges in worker order so GetCreatedEntity(i) returns
 		// the i-th entity as recorded across the whole parallel batch.
-		entt::registry& registry = scene.GetRegistry();
+		//
+		// Apply takes Scene& and EntityHandle& now — same signature
+		// change documented in NativeEntityCommandBuffer.hpp. Lets
+		// Instantiate thunks rewrite the merged-handle slot in place
+		// when a parallel writer records a prefab spawn.
 		uint32_t base = 0;
 		for (auto& sub : m_Subs) {
 			const uint32_t subCount = sub.m_EntityCount;
 			for (auto& cmd : sub.m_Commands) {
 				if (cmd.EntityIndex < subCount) {
-					cmd.Apply(cmd.Storage, registry, m_CreatedHandles[base + cmd.EntityIndex]);
+					cmd.Apply(cmd.Storage, scene, m_CreatedHandles[base + cmd.EntityIndex]);
 				}
 			}
 			base += subCount;

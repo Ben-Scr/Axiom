@@ -35,6 +35,15 @@ namespace Index {
 				return false;
 			}
 
+			// The popup keeps captured Entity + Scene references across at
+			// least one ImGui frame, and the click handler can fire after a
+			// hot-reload / scene-swap event has destroyed the entity or
+			// invalidated the scene. Bail before we reach into a stale
+			// ComponentRegistry or AddComponent on a dead handle.
+			if (!entity.IsValid() || !scene.IsValid(entity.GetHandle())) {
+				return false;
+			}
+
 			if (!entity.HasComponent<ScriptComponent>()) {
 				entity.AddComponent<ScriptComponent>();
 			}
@@ -45,6 +54,23 @@ namespace Index {
 			}
 
 			scriptComponent.AddScript(scriptEntry.ClassName, scriptEntry.Type);
+
+			// For `: IComponent` structs (DynamicComponentRegistrar registered
+			// these at user-assembly load), also populate the backing
+			// DynamicComponentStorage so the entity actually lands in the ECS
+			// pool — not just in ScriptComponent.Scripts. Without this the
+			// inspector renders fine (it reads the managed instance), but a
+			// user script's Entity.HasNativeComponent<T>() / GetRef<T>() looks
+			// at the storage and sees nothing.
+			if (scriptEntry.IsNativeComponent) {
+				auto& componentRegistry = SceneManager::Get().GetComponentRegistry();
+				if (const ComponentInfo* info = componentRegistry.FindBySerializedName(scriptEntry.ClassName)) {
+					if (info->isDynamic && info->add && (!info->has || !info->has(entity))) {
+						info->add(entity);
+					}
+				}
+			}
+
 			scene.MarkDirty();
 			return true;
 		}
@@ -52,6 +78,11 @@ namespace Index {
 		bool AttachManagedComponentToEntity(Entity entity, Scene& scene, const EditorScriptDiscovery::ScriptEntry& scriptEntry)
 		{
 			if (scriptEntry.ClassName.empty() || !scriptEntry.IsManagedComponent) {
+				return false;
+			}
+
+			// Same teardown-race guard as AttachScriptToEntity above.
+			if (!entity.IsValid() || !scene.IsValid(entity.GetHandle())) {
 				return false;
 			}
 
@@ -139,8 +170,92 @@ namespace Index {
 			return false;
 		};
 
+		// Collect project script entries up front. addComponentToAll captures
+		// nativeScriptByClassName for its dynamic-component branch — the maps
+		// MUST be defined before the lambda, otherwise the lambda's name
+		// lookup fails at parse time.
+		std::vector<EditorScriptDiscovery::ScriptEntry> scriptEntries;
+		EditorScriptDiscovery::CollectProjectScriptEntries(scriptEntries);
+
+		// Index the .cs files that pair with a C++ component by display name
+		// so we can:
+		//   (a) hide hand-authored mirror .cs files from the regular subcategory
+		//       buckets — they'd otherwise duplicate the C++ entry already
+		//       listed there;
+		//   (b) render the "Native Components (C#)" mirror tree using the C++
+		//       display name (e.g. "Transform 2D") instead of the raw .cs
+		//       file stem.
+		//
+		// Runtime-registered (info.isDynamic == true) components are NOT
+		// mirrors — their .cs file IS the component's source of truth, so
+		// they get routed by their declared Subcategory like built-ins do.
+		// The mirror tree only lists hand-authored mirrors of existing C++
+		// components (NativeTransform2D etc.).
+		std::unordered_map<std::string, const EditorScriptDiscovery::ScriptEntry*> nativeBackingByDisplayName;
+		for (const auto& scriptEntry : scriptEntries) {
+			if (!scriptEntry.IsNativeComponent || scriptEntry.NativeName.empty()) continue;
+			nativeBackingByDisplayName.emplace(scriptEntry.NativeName, &scriptEntry);
+		}
+		const auto isHandMirror = [&](const ComponentInfo& info) {
+			if (info.isDynamic) return false; // dynamic components route by Subcategory
+			return nativeBackingByDisplayName.find(info.displayName) != nativeBackingByDisplayName.end();
+		};
+
+		// Index user-authored `: IComponent` .cs files by class name. Used by
+		// the addComponentToAll path to recognise that a dynamic ComponentInfo
+		// (DynamicComponentRegistrar registers `MyStruct : IComponent` with
+		// displayName == "MyStruct") came from a user .cs file, and to route
+		// it through the same script-attach path drag-drop uses — otherwise
+		// the inspector would render the component header but no field rows
+		// (DynamicComponentRegistrar populates info.add / has / getRaw but
+		// neither drawInspector nor properties, so DispatchComponentInspector
+		// has nothing to draw).
+		std::unordered_map<std::string, const EditorScriptDiscovery::ScriptEntry*> nativeScriptByClassName;
+		for (const auto& scriptEntry : scriptEntries) {
+			if (!scriptEntry.IsNativeComponent) continue;
+			if (scriptEntry.ClassName.empty()) continue;
+			nativeScriptByClassName.emplace(scriptEntry.ClassName, &scriptEntry);
+		}
+
 		auto addComponentToAll = [&](const ComponentInfo& info) {
 			bool added = false;
+			// Dynamic ComponentInfo (DynamicComponentRegistrar.cs path)
+			// has no editor metadata — its info.drawInspector is null and
+			// info.properties is empty, so DispatchComponentInspector
+			// can't render anything for it. The matching .cs file IS the
+			// source of truth: route the add through ScriptComponent.Scripts
+			// so the inspector picks up `[ShowInEditor]` fields via the
+			// existing managed-reflection path (the same path drag-drop
+			// uses when the user drops a `: IComponent` .cs onto the
+			// Inspector). Keeps the popup and drag-drop behaviour identical.
+			if (info.isDynamic) {
+				auto scriptIt = nativeScriptByClassName.find(info.displayName);
+				if (scriptIt != nativeScriptByClassName.end() && scriptIt->second) {
+					const auto& scriptEntry = *scriptIt->second;
+					for (const Entity& e : entities) {
+						if (AttachScriptToEntity(const_cast<Entity&>(e), scene, scriptEntry)) {
+							added = true;
+						}
+					}
+					if (added) markChanged();
+					return;
+				}
+				// No matching .cs file (dynamic registered from somewhere
+				// other than DynamicComponentRegistrar) — fall back to the
+				// bare storage add. The user gets an empty section, same
+				// as before, but at least the entity is in the pool.
+				for (const Entity& e : entities) {
+					if (!info.has(e)) {
+						info.add(e);
+						added = true;
+					}
+				}
+				if (added) {
+					scene.MarkDirty();
+					markChanged();
+				}
+				return;
+			}
 			for (const Entity& e : entities) {
 				if (!info.has(e)) {
 					registry.AddWithDependencies(e, info.typeId);
@@ -176,28 +291,6 @@ namespace Index {
 			return false;
 		};
 
-		std::vector<EditorScriptDiscovery::ScriptEntry> scriptEntries;
-		EditorScriptDiscovery::CollectProjectScriptEntries(scriptEntries);
-
-		// Index the .cs files that pair with a C++ component by display name
-		// so we can:
-		//   (a) hide the C++ entry from the regular General/Rendering/Physics/
-		//       Audio buckets — it would otherwise be a duplicate of the entry
-		//       under Native Components (C#);
-		//   (b) render Native Components (C#) using the C++ display name (what
-		//       the user sees in the runtime, e.g. "New Native") instead of
-		//       the raw .cs file stem.
-		// The lookup is keyed on `ComponentInfo::displayName` since that's the
-		// string the [NativeComponent("...")] attribute matches against.
-		std::unordered_map<std::string, const EditorScriptDiscovery::ScriptEntry*> nativeBackingByDisplayName;
-		for (const auto& scriptEntry : scriptEntries) {
-			if (!scriptEntry.IsNativeComponent || scriptEntry.NativeName.empty()) continue;
-			nativeBackingByDisplayName.emplace(scriptEntry.NativeName, &scriptEntry);
-		}
-		const auto isNativeBacked = [&](const ComponentInfo& info) {
-			return nativeBackingByDisplayName.find(info.displayName) != nativeBackingByDisplayName.end();
-		};
-
 		if (hasFilter) {
 			// Flat filtered list when searching across both built-in components
 			// and project scripts.
@@ -209,7 +302,7 @@ namespace Index {
 				// Components (C#) heading below — skip here to avoid the
 				// duplicate ("New Native" appeared both in General and as
 				// the .cs entry).
-				if (isNativeBacked(info)) return;
+				if (isHandMirror(info)) return;
 
 				std::string lowerName = info.displayName;
 				std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(), ::tolower);
@@ -238,7 +331,7 @@ namespace Index {
 				if (info.category != ComponentCategory::Component) return;
 				if (info.displayName == "Scripts") return;
 				if (!componentMissingFromAny(info)) return;
-				if (!isNativeBacked(info)) return;
+				if (!isHandMirror(info)) return;
 
 				std::string lowerName = info.displayName;
 				std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(), ::tolower);
@@ -316,7 +409,7 @@ namespace Index {
 				// Routed to the Native Components (C#) tree below — keeps
 				// the regular General/Rendering/... categories free of
 				// duplicate entries for scripts that own a paired C++ pool.
-				if (isNativeBacked(info)) return;
+				if (isHandMirror(info)) return;
 
 				std::string sub = info.subcategory.empty() ? "General" : info.subcategory;
 				auto it = categoryIndex.find(sub);
@@ -362,7 +455,7 @@ namespace Index {
 			registry.ForEachComponentInfo([&](const std::type_index& typeId, const ComponentInfo& info) {
 				if (info.category != ComponentCategory::Component) return;
 				if (info.displayName == "Scripts") return;
-				if (!isNativeBacked(info)) return;
+				if (!isHandMirror(info)) return;
 				if (!componentMissingFromAny(info)) return;
 				nativeBackedComponents.push_back({ typeId, &info });
 			});

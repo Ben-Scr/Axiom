@@ -3,6 +3,7 @@ using Index;
 using Index.Collections.Native;
 using Index.Components;
 using Index.Jobs;
+using Index.Native;
 
 // Worked example + integration test for EntityCommandBuffer.ParallelWriter.
 //
@@ -47,7 +48,7 @@ public class CreateEntityJobSample : GameSystem
 
         public void Execute(int i)
         {
-            EntityRef e = Ecb.CreateEntity();
+            EntityRef e = Ecb.Create();
             Ecb.AddComponent(e, new NativeTransform2D
             {
                 LocalPosition = Positions[i],
@@ -196,7 +197,7 @@ public class CreateEntityJobSample : GameSystem
         using var ecb = new EntityCommandBuffer(initialCapacity: 64 * 1024);
         for (int i = 0; i < n; i++)
         {
-            EntityRef e = ecb.CreateEntity();
+            EntityRef e = ecb.Create();
             ecb.AddComponent(e, new NativeTransform2D { LocalPosition = new Vector2(i, 0f) });
         }
 

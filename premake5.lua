@@ -322,20 +322,10 @@ CopyIndexEngineDll = '{COPYFILE} "' ..
     path.join(ROOT_DIR, "bin/" .. outputdir, "Index-Engine", "Index-Engine.dll") ..
     '" "%{cfg.targetdir}/Index-Engine.dll"'
 
--- Shared postbuild command: copy the user-component sidecar DLL next to
--- each consumer exe. The engine's CodegenSidecarLoader uses
--- Path::ExecutableDir() to find this file at scene-manager init. The
--- file always exists once the solution has been built — the stub at
--- Index-GameComponents/src/CodegenComponents.cpp exports a no-op
--- IndexRegisterCodegenComponents until codegen rewrites it with a real
--- body. Gated on Scripting because that's where user components live.
-if IndexModules.Scripting then
-    CopyIndexGameComponentsDll = '{COPYFILE} "' ..
-        path.join(ROOT_DIR, "bin/" .. outputdir, "Index-GameComponents", "Index-GameComponents.dll") ..
-        '" "%{cfg.targetdir}/Index-GameComponents.dll"'
-else
-    CopyIndexGameComponentsDll = "" -- no-op when scripting is off
-end
+-- The Index-GameComponents sidecar DLL is removed — user components now
+-- register at runtime via DynamicComponentRegistrar in Index-ScriptCore.
+-- No per-project codegen artifact gets shipped alongside consumer exes.
+CopyIndexGameComponentsDll = "" -- retained as a no-op so any leftover postbuild reference stays harmless
 
 -- GLFW and Glad are SharedLibs so all consumers (engine.dll + consumer .exes) share
 -- one copy of their global state. Each consumer ships the DLLs alongside its binary.
@@ -556,12 +546,6 @@ include "Index-Engine"
 if IndexModules.Scripting then
     include "Index-ScriptCore"
     include "Index-Sandbox"
-    -- Per-project native sidecar (a SharedLib next to the engine DLL).
-    -- Owns C++ mirrors of [NativeComponent(..., Generate = true)] C#
-    -- structs so user-defined components no longer mix into engine.dll.
-    -- The engine resolves the sidecar at runtime; build order is
-    -- Index-Engine → Index-GameComponents.
-    include "Index-GameComponents"
 end
 
 if IndexModules.Editor then

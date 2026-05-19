@@ -53,6 +53,16 @@ namespace Index {
 		Entity CreateRuntimeEntity();
 		Entity CreateRuntimeEntity(const std::string& name);
 		Entity CreatePrefabInstance(AssetGUID prefabGuid, const std::string& name = "Entity");
+
+		// Runtime clone of an existing entity. Copies every registered
+		// Component (ComponentRegistry::ForEachComponentInfo where
+		// category == Component and info.copyTo is set) from `source`
+		// onto a fresh runtime entity named "<source name> (Clone)".
+		// Returns Entity::Null when the source is invalid. Lifted out
+		// of the per-call ScriptBindings clone path so native
+		// Entity::Instantiate(Entity) and the script binding share
+		// one implementation.
+		Entity CloneEntity(Entity source);
 		// Info: Creates an entity handle and applies scene invariants such as UUID + dirty tracking
 		EntityHandle CreateEntityHandle(
 			EntityOrigin origin = EntityOrigin::Scene,
@@ -84,6 +94,14 @@ namespace Index {
 
 		void DestroyEntity(Entity entity);
 		void DestroyEntity(EntityHandle nativeEntity);
+		// Schedule a destruction `delay` seconds in the future. The
+		// entity stays valid until the next Scene::UpdateSystems tick on
+		// which `(accumulated frame dt) >= delay` — at that point the
+		// queue drains via DestroyEntityInternal(handle, true). Frame-
+		// rate independent (decrements by GetDeltaTime each tick). Safe
+		// to call after the scheduling script itself is destroyed; the
+		// queue lives on the Scene, not on any per-entity component.
+		void DestroyEntity(EntityHandle nativeEntity, float delay);
 		void ClearEntities();
 
 		// ─── Bulk load helpers ─────────────────────────────────────────
@@ -605,8 +623,22 @@ namespace Index {
 		bool m_TearingDown = false;
 		bool m_TransformHierarchyDirty = true;
 		std::vector<EntityHandle> m_DirtyTransformEntities;
-		std::unordered_set<uint32_t> m_DirtyTransformEntitySet;
+		// Keep the set typed as EntityHandle (not uint32_t) so a future
+		// EnTT version that changes the underlying entity representation
+		// doesn't silently break the lookup hash. EntityHandle's std::hash
+		// is defined by EnTT — see entt/entity/entity.hpp.
+		std::unordered_set<EntityHandle> m_DirtyTransformEntitySet;
 		uint64_t m_StaticRenderDataVersion = 1;
+
+		// Pending delayed destructions. Each entry is (handle,
+		// remaining seconds). UpdateSystems decrements `remaining`
+		// by Time::GetDeltaTime() once per frame and swap-pops any
+		// entry whose remaining hits <= 0, routing through
+		// DestroyEntityInternal. Vector (not heap) because the queue
+		// is expected to be tiny (a handful of entries) — linear walk
+		// beats heap maintenance at that size, and swap-pop preserves
+		// O(1) expiration.
+		std::vector<std::pair<EntityHandle, float>> m_PendingDestroys;
 
 		// Closures pushed by DeferEntityRefFixup, drained by
 		// RunPendingEntityRefFixups. Lives on the scene so that the

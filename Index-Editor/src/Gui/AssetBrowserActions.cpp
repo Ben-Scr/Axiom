@@ -9,6 +9,7 @@
 #include "Project/ProjectManager.hpp"
 #include "Scene/Scene.hpp"
 #include "Scene/SceneManager.hpp"
+#include "Scripting/ScriptDiscovery.hpp"
 #include "Serialization/Directory.hpp"
 #include "Serialization/File.hpp"
 #include "Serialization/Json.hpp"
@@ -335,9 +336,12 @@ namespace Index {
 					className = className.substr(0, className.size() - ext.size());
 			}
 
-			if (className.empty()) {
-				className = isComponent ? "NewComponent" : (isGameSystem ? "NewGameSystem" : (isGlobalSystem ? "NewGlobalSystem" : "NewScript"));
-			}
+			const std::string classNameFallback = isComponent       ? "NewComponent"
+			                                    : isNativeComponent ? "NewNativeComponent"
+			                                    : isGameSystem      ? "NewGameSystem"
+			                                    : isGlobalSystem    ? "NewGlobalSystem"
+			                                                        : "NewScript";
+			className = EditorScriptDiscovery::SanitizeIdentifier(className, classNameFallback);
 
 			std::string finalFileName = className + ext;
 			std::string finalPath = (std::filesystem::path(m_PendingScriptDir) / finalFileName).string();
@@ -360,18 +364,16 @@ namespace Index {
 				}
 				else if (isNativeComponent) {
 					boilerplate =
+						"using System.Runtime.InteropServices;\n"
 						"using Index;\n"
 						"using Index.Components;\n"
 						"\n"
+						"[StructLayout(LayoutKind.Sequential)]\n"
 						"public struct " + className + " : IComponent\n"
 						"{\n"
 						"    public float Value = 0.0f;\n"
 						"\n"
-						"    public " + className + "()\n"
-						"    {\n"
-						"     \n"
-						"    }\n"
-						"\n"
+						"    public " + className + "() { }\n"
 						"}\n";
 				}
 				else if (isGameSystem) {

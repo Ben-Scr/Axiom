@@ -49,8 +49,21 @@ namespace Index {
 			TextureFilter filter = TextureFilter::Linear);
 
 		// Release backend handles. Idempotent — safe to call on an
-		// already-empty framebuffer.
+		// already-empty framebuffer. Under WebGPU the actual Dawn resources
+		// are NOT freed immediately — they're moved to a two-frame deferred-
+		// destroy queue so that any ImGui frame still referencing the
+		// color view's raw WGPUTextureView pointer (handed out via
+		// GetColorTextureBackendId) finishes rendering before the view is
+		// released. The queue is drained by ProcessFrameEndDeferredDestroy
+		// once per frame from WebGPUApi::Present.
 		void Destroy();
+
+		// Drains the two-frame deferred-destroy queue. Called once per
+		// frame from WebGPUApi::Present after the surface has presented and
+		// ImGui has fully submitted, so any color-view pointer ImGui held
+		// is no longer in flight by the time the underlying Dawn resources
+		// release. Safe to call when the queue is empty.
+		static void ProcessFrameEndDeferredDestroy();
 
 		bool IsValid() const { return m_BackendId != 0; }
 

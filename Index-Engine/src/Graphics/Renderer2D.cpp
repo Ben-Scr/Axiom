@@ -759,12 +759,9 @@ namespace Index {
 
 		const size_t n = CollectSpriteInstances(scene, viewportAABB, g_InstancesScratch, g_TexturesScratch);
 		m_RenderedInstancesCount = n;
-		if (n == 0) {
-			finishTiming();
-			return;
+		if (n > 0) {
+			SortInstancesInPlace(n);
 		}
-
-		SortInstancesInPlace(n);
 
 		// Capture the caller's bound target up front. After the optional
 		// PP redirect below, we'll restore this so subsequent renderers in
@@ -800,6 +797,15 @@ namespace Index {
 			}
 		}
 
+		// Empty scene fast path: only safe to bail when PP is also off.
+		// When PP is on, effects (vignette, color grading, ...) must still
+		// apply to the cleared background, so we fall through and let the
+		// PP redirect + PostProcessor::Run handle the empty intermediate.
+		if (n == 0 && !usePostProcess) {
+			finishTiming();
+			return;
+		}
+
 		// Redirect the upcoming sprite pass into the intermediate HDR FBO
 		// instead of writing direct to the caller. Reuse whatever clear
 		// colour the caller already set (BeginFrame pulls it from the
@@ -830,134 +836,139 @@ namespace Index {
 			}
 		}
 
-		auto target = WebGPUBackend::BeginRenderToCurrentTarget();
-		if (!target.Valid) {
-			if (usePostProcess) WebGPUBackend::RestoreBoundTarget(callerSnap);
-			finishTiming();
-			return;
-		}
-
-		wgpu::Device device = WebGPUBackend::GetDevice();
-		wgpu::Queue  queue  = WebGPUBackend::GetQueue();
-		if (!device || !queue) {
-			finishTiming();
-			return;
-		}
-
-		const bool wireframePass = RenderApi::GetPolygonMode() == PolygonMode::Wireframe;
-		const auto pipelineMode = wireframePass
-			? WebGPUSpriteResources::SpritePipelineMode::Wireframe
-			: WebGPUSpriteResources::SpritePipelineMode::Filled;
-		wgpu::RenderPipeline pipeline = WebGPUSpriteResources::GetSpritePipeline(
-			target.ColorFormat, target.HasDepth, pipelineMode);
-		if (!pipeline) {
-			IDX_CORE_WARN_TAG("Renderer2D",
-				"No pipeline for color-format {} (hasDepth={}) — skipping submit",
-				static_cast<int>(target.ColorFormat), target.HasDepth);
-			finishTiming();
-			return;
-		}
-
-		if (!EnsureUniformBuffer(device)) {
-			finishTiming();
-			return;
-		}
-		queue.WriteBuffer(g_UniformBuffer, 0, glm::value_ptr(vp), 64);
-
-		if (!EnsureInstanceBuffer(device, static_cast<uint32_t>(n))) {
-			finishTiming();
-			return;
-		}
-		g_GpuInstanceScratch.resize(n);
-		for (size_t k = 0; k < n; ++k) {
-			WebGPUSpriteResources::EncodeInstance44(g_InstancesScratch[k], g_GpuInstanceScratch[k]);
-		}
-		queue.WriteBuffer(g_InstanceBuffer, 0,
-			g_GpuInstanceScratch.data(),
-			n * sizeof(SpriteInstance));
-
-		wgpu::CommandEncoder encoder = WebGPUBackend::GetFrameEncoder();
-		if (!encoder) {
-			finishTiming();
-			return;
-		}
-
-		// Open the sprite render pass — Load semantics so a prior
-		// RenderApi::Clear's result is preserved instead of double-cleared.
-		wgpu::RenderPassColorAttachment colorAtt{};
-		colorAtt.view       = target.ColorView;
-		colorAtt.loadOp     = wgpu::LoadOp::Load;
-		colorAtt.storeOp    = wgpu::StoreOp::Store;
-		colorAtt.depthSlice = wgpu::kDepthSliceUndefined;
-
-		wgpu::RenderPassDepthStencilAttachment depthAtt{};
-		if (target.HasDepth) {
-			depthAtt.view              = target.DepthView;
-			depthAtt.depthLoadOp       = wgpu::LoadOp::Load;
-			depthAtt.depthStoreOp      = wgpu::StoreOp::Store;
-			depthAtt.stencilLoadOp     = wgpu::LoadOp::Load;
-			depthAtt.stencilStoreOp    = wgpu::StoreOp::Store;
-		}
-
-		wgpu::RenderPassDescriptor passDesc{};
-		passDesc.label                  = "renderer2d-sprites";
-		passDesc.colorAttachmentCount   = 1;
-		passDesc.colorAttachments       = &colorAtt;
-		passDesc.depthStencilAttachment = target.HasDepth ? &depthAtt : nullptr;
-
-		wgpu::RenderPassEncoder pass = encoder.BeginRenderPass(&passDesc);
-
-		// Set common state once. The pipeline carries vertex layout / blend /
-		// primitive state — only what varies per batch (bind group +
-		// firstInstance offset) gets re-set inside the loop.
-		pass.SetPipeline(pipeline);
-		pass.SetVertexBuffer(0, WebGPUSpriteResources::GetQuadVertexBuffer());
-		pass.SetVertexBuffer(1, g_InstanceBuffer);
-		pass.SetIndexBuffer(WebGPUSpriteResources::GetQuadIndexBuffer(pipelineMode),
-			wgpu::IndexFormat::Uint16);
-
-		// Group instances by resolved texture and issue one DrawIndexed
-		// per run with firstInstance offsetting into the same instance
-		// buffer — uses WebGPU's firstInstance parameter rather than
-		// per-batch buffer rebinding.
-		const TextureHandle defaultTexture = TextureManager::GetDefaultTexture(DefaultTexture::Square);
-		auto resolveHandle = [&](TextureHandle h) {
-			return TextureManager::IsValid(h) ? h : defaultTexture;
-		};
-		const std::uint32_t indexCount = WebGPUSpriteResources::GetQuadIndexCount(pipelineMode);
-
-		size_t i = 0;
-		while (i < n) {
-			const TextureHandle runHandle = resolveHandle(g_TexturesScratch[i]);
-			size_t runEnd = i + 1;
-			while (runEnd < n
-				&& resolveHandle(g_TexturesScratch[runEnd]).index == runHandle.index
-				&& resolveHandle(g_TexturesScratch[runEnd]).generation == runHandle.generation)
-			{
-				++runEnd;
+		// Sprite pass — only when there are sprites to draw. When n == 0
+		// with PP enabled we fall through to the PostProcessor below so
+		// effects still apply to the cleared intermediate background.
+		if (n > 0) {
+			auto target = WebGPUBackend::BeginRenderToCurrentTarget();
+			if (!target.Valid) {
+				if (usePostProcess) WebGPUBackend::RestoreBoundTarget(callerSnap);
+				finishTiming();
+				return;
 			}
-			const uint32_t count = static_cast<uint32_t>(runEnd - i);
 
-			wgpu::BindGroup bg = ResolveBindGroup(device, runHandle);
-			if (!bg) {
-				// Default texture also missing — engine-shutdown edge case,
-				// or IndexAssets not on disk. Skip the run rather than
-				// crash; warning is already logged by TextureManager.
+			wgpu::Device device = WebGPUBackend::GetDevice();
+			wgpu::Queue  queue  = WebGPUBackend::GetQueue();
+			if (!device || !queue) {
+				finishTiming();
+				return;
+			}
+
+			const bool wireframePass = RenderApi::GetPolygonMode() == PolygonMode::Wireframe;
+			const auto pipelineMode = wireframePass
+				? WebGPUSpriteResources::SpritePipelineMode::Wireframe
+				: WebGPUSpriteResources::SpritePipelineMode::Filled;
+			wgpu::RenderPipeline pipeline = WebGPUSpriteResources::GetSpritePipeline(
+				target.ColorFormat, target.HasDepth, pipelineMode);
+			if (!pipeline) {
+				IDX_CORE_WARN_TAG("Renderer2D",
+					"No pipeline for color-format {} (hasDepth={}) — skipping submit",
+					static_cast<int>(target.ColorFormat), target.HasDepth);
+				finishTiming();
+				return;
+			}
+
+			if (!EnsureUniformBuffer(device)) {
+				finishTiming();
+				return;
+			}
+			queue.WriteBuffer(g_UniformBuffer, 0, glm::value_ptr(vp), 64);
+
+			if (!EnsureInstanceBuffer(device, static_cast<uint32_t>(n))) {
+				finishTiming();
+				return;
+			}
+			g_GpuInstanceScratch.resize(n);
+			for (size_t k = 0; k < n; ++k) {
+				WebGPUSpriteResources::EncodeInstance44(g_InstancesScratch[k], g_GpuInstanceScratch[k]);
+			}
+			queue.WriteBuffer(g_InstanceBuffer, 0,
+				g_GpuInstanceScratch.data(),
+				n * sizeof(SpriteInstance));
+
+			wgpu::CommandEncoder encoder = WebGPUBackend::GetFrameEncoder();
+			if (!encoder) {
+				finishTiming();
+				return;
+			}
+
+			// Open the sprite render pass — Load semantics so a prior
+			// RenderApi::Clear's result is preserved instead of double-cleared.
+			wgpu::RenderPassColorAttachment colorAtt{};
+			colorAtt.view       = target.ColorView;
+			colorAtt.loadOp     = wgpu::LoadOp::Load;
+			colorAtt.storeOp    = wgpu::StoreOp::Store;
+			colorAtt.depthSlice = wgpu::kDepthSliceUndefined;
+
+			wgpu::RenderPassDepthStencilAttachment depthAtt{};
+			if (target.HasDepth) {
+				depthAtt.view              = target.DepthView;
+				depthAtt.depthLoadOp       = wgpu::LoadOp::Load;
+				depthAtt.depthStoreOp      = wgpu::StoreOp::Store;
+				depthAtt.stencilLoadOp     = wgpu::LoadOp::Load;
+				depthAtt.stencilStoreOp    = wgpu::StoreOp::Store;
+			}
+
+			wgpu::RenderPassDescriptor passDesc{};
+			passDesc.label                  = "renderer2d-sprites";
+			passDesc.colorAttachmentCount   = 1;
+			passDesc.colorAttachments       = &colorAtt;
+			passDesc.depthStencilAttachment = target.HasDepth ? &depthAtt : nullptr;
+
+			wgpu::RenderPassEncoder pass = encoder.BeginRenderPass(&passDesc);
+
+			// Set common state once. The pipeline carries vertex layout / blend /
+			// primitive state — only what varies per batch (bind group +
+			// firstInstance offset) gets re-set inside the loop.
+			pass.SetPipeline(pipeline);
+			pass.SetVertexBuffer(0, WebGPUSpriteResources::GetQuadVertexBuffer());
+			pass.SetVertexBuffer(1, g_InstanceBuffer);
+			pass.SetIndexBuffer(WebGPUSpriteResources::GetQuadIndexBuffer(pipelineMode),
+				wgpu::IndexFormat::Uint16);
+
+			// Group instances by resolved texture and issue one DrawIndexed
+			// per run with firstInstance offsetting into the same instance
+			// buffer — uses WebGPU's firstInstance parameter rather than
+			// per-batch buffer rebinding.
+			const TextureHandle defaultTexture = TextureManager::GetDefaultTexture(DefaultTexture::Square);
+			auto resolveHandle = [&](TextureHandle h) {
+				return TextureManager::IsValid(h) ? h : defaultTexture;
+			};
+			const std::uint32_t indexCount = WebGPUSpriteResources::GetQuadIndexCount(pipelineMode);
+
+			size_t i = 0;
+			while (i < n) {
+				const TextureHandle runHandle = resolveHandle(g_TexturesScratch[i]);
+				size_t runEnd = i + 1;
+				while (runEnd < n
+					&& resolveHandle(g_TexturesScratch[runEnd]).index == runHandle.index
+					&& resolveHandle(g_TexturesScratch[runEnd]).generation == runHandle.generation)
+				{
+					++runEnd;
+				}
+				const uint32_t count = static_cast<uint32_t>(runEnd - i);
+
+				wgpu::BindGroup bg = ResolveBindGroup(device, runHandle);
+				if (!bg) {
+					// Default texture also missing — engine-shutdown edge case,
+					// or IndexAssets not on disk. Skip the run rather than
+					// crash; warning is already logged by TextureManager.
+					i = runEnd;
+					continue;
+				}
+				pass.SetBindGroup(0, bg);
+				pass.DrawIndexed(/*indexCount=*/indexCount,
+					/*instanceCount=*/count,
+					/*firstIndex=*/0,
+					/*baseVertex=*/0,
+					/*firstInstance=*/static_cast<uint32_t>(i));
+				++m_DrawCallsCount;
+
 				i = runEnd;
-				continue;
 			}
-			pass.SetBindGroup(0, bg);
-			pass.DrawIndexed(/*indexCount=*/indexCount,
-				/*instanceCount=*/count,
-				/*firstIndex=*/0,
-				/*baseVertex=*/0,
-				/*firstInstance=*/static_cast<uint32_t>(i));
-			++m_DrawCallsCount;
 
-			i = runEnd;
+			pass.End();
 		}
-
-		pass.End();
 
 		// If we redirected through the intermediate HDR FBO, run the
 		// PostProcessor stage (effect passes + final composite back to

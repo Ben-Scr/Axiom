@@ -4,10 +4,12 @@
 #include "Core/Log.hpp"
 #include "Components/Tags.hpp"
 #include "Scene/ComponentInfo.hpp"
+#include "Scene/DynamicComponentStorage.hpp"
 
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -349,12 +351,221 @@ namespace Index {
         void ForEachComponentInfo(F&& fn) {
             for (auto& [id, info] : m_map)
                 fn(id, info);
+            // Dynamic components carry no real type_index — surface typeid(void)
+            // for the callback parameter. Callers that key by type_index (e.g.
+            // HasConflict / AddWithDependencies) implicitly skip dynamics; for
+            // those paths dynamics are looked up by typeIdU32 / hash instead.
+            for (auto& [tid, info] : m_dynamicMap) {
+                (void)tid;
+                fn(s_VoidTypeIndex, info);
+            }
         }
 
         template <typename F>
         void ForEachComponentInfo(F&& fn) const {
             for (const auto& [id, info] : m_map)
                 fn(id, info);
+            for (const auto& [tid, info] : m_dynamicMap) {
+                (void)tid;
+                fn(s_VoidTypeIndex, info);
+            }
+        }
+
+        // ── Dynamic (runtime-registered) component path ──────────────────
+        //
+        // RegisterDynamic is called from the script host AFTER the user
+        // assembly loads: DynamicComponentRegistrar reflects over every
+        // struct annotated [NativeComponent(..., Generate=true)] and
+        // calls this for each. Returns the assigned stable typeIdU32, or
+        // 0 on failure (duplicate serializedName, zero-size, etc.).
+        //
+        // The DynamicComponentStorage instance owned here outlives every
+        // captured callback because the registry tears the storage down
+        // only via UnregisterAllDynamic (driven by UnloadUserAssembly).
+        uint32_t RegisterDynamic(
+            const std::string& displayName,
+            const std::string& serializedName,
+            const std::string& subcategory,
+            ComponentCategory category,
+            uint32_t size,
+            uint32_t alignment)
+        {
+            if (size == 0) {
+                IDX_CORE_WARN_TAG("ComponentRegistry",
+                    "RegisterDynamic refused '{}': size is zero", displayName);
+                return 0;
+            }
+            // Alignment must be a power of two, fit within the default
+            // allocator's guarantee, and divide size evenly so element N's
+            // offset (idx * size) stays aligned. The backing vector<uint8_t>
+            // gives alignof(max_align_t) at offset 0; ensuring size is a
+            // multiple of alignment keeps every subsequent element aligned.
+            // Misalignment is a SIGBUS on ARM and a silent perf hit on x86.
+            if (alignment == 0 || (alignment & (alignment - 1)) != 0) {
+                IDX_CORE_WARN_TAG("ComponentRegistry",
+                    "RegisterDynamic refused '{}': alignment {} is not a power of two",
+                    displayName, alignment);
+                return 0;
+            }
+            if (alignment > alignof(std::max_align_t)) {
+                IDX_CORE_WARN_TAG("ComponentRegistry",
+                    "RegisterDynamic refused '{}': alignment {} exceeds max_align_t ({})",
+                    displayName, alignment, static_cast<uint32_t>(alignof(std::max_align_t)));
+                return 0;
+            }
+            if ((size % alignment) != 0) {
+                IDX_CORE_WARN_TAG("ComponentRegistry",
+                    "RegisterDynamic refused '{}': size {} is not a multiple of alignment {} "
+                    "(successive elements would land at misaligned offsets)",
+                    displayName, size, alignment);
+                return 0;
+            }
+            const uint64_t serializedHash = serializedName.empty()
+                ? 0u : detail::FnvHash64(serializedName);
+            // Duplicate-name check: if a dynamic registration with the same
+            // serialized name already exists (e.g. a previous reload left
+            // stale state), refuse rather than silently shadow it. Static
+            // components win — never let dynamic registration clobber a
+            // built-in.
+            if (serializedHash != 0 && m_hashIndex.find(serializedHash) != m_hashIndex.end()) {
+                IDX_CORE_WARN_TAG("ComponentRegistry",
+                    "RegisterDynamic refused '{}': serializedName '{}' already taken",
+                    displayName, serializedName);
+                return 0;
+            }
+
+            // Allocate the underlying byte storage. Outlives every callback
+            // captured below — destroyed only by UnregisterAllDynamic.
+            auto storage = std::make_unique<DynamicComponentStorage>(size, alignment);
+            DynamicComponentStorage* storagePtr = storage.get();
+
+            ComponentInfo info{};
+            info.displayName       = displayName;
+            info.serializedName    = serializedName;
+            info.subcategory       = subcategory;
+            info.category          = category;
+            info.serializedNameHash = serializedHash;
+            info.isDynamic         = true;
+            info.rawSize           = size;
+            // typeId stays at typeid(void) — dynamics share this sentinel
+            // because std::type_index can't be synthesized. Callers that
+            // care about identity use typeIdU32 / serializedNameHash.
+
+            info.has = [storagePtr](Entity e) -> bool {
+                return e.IsValid() && storagePtr->Contains(e.GetHandle());
+            };
+            info.add = [storagePtr](Entity e) {
+                if (e.IsValid()) storagePtr->Add(e.GetHandle());
+            };
+            info.remove = [storagePtr](Entity e) {
+                if (e.IsValid()) storagePtr->Remove(e.GetHandle());
+            };
+            info.getRaw = [storagePtr](Entity e) -> void* {
+                if (!e.IsValid()) return nullptr;
+                return storagePtr->Get(e.GetHandle());
+            };
+            info.emplaceFromBytes = [storagePtr](entt::registry&, EntityHandle e,
+                const void* bytes, size_t byteSize) {
+                IDX_CORE_ASSERT(byteSize == storagePtr->ElementSize(),
+                    IndexErrorCode::InvalidValue,
+                    "Dynamic component emplaceFromBytes size mismatch");
+                storagePtr->EmplaceOrReplace(e, bytes);
+            };
+            info.defaultEmplace = [storagePtr](entt::registry&, EntityHandle e) {
+                storagePtr->Add(e);
+            };
+            info.copyTo = [storagePtr](Entity src, Entity dst) {
+                if (!src.IsValid() || !dst.IsValid()) return;
+                const void* srcBytes = storagePtr->Get(src.GetHandle());
+                if (!srcBytes) return;
+                storagePtr->EmplaceOrReplace(dst.GetHandle(), srcBytes);
+            };
+            info.fillRawPointers = [storagePtr](entt::registry& reg, void** outPointers,
+                int maxRows, int enableFilter) -> int {
+                // Snapshot the entity list before iterating. The filter
+                // checks below call into entt::registry, which can fire
+                // on_construct/on_destroy hooks (e.g. DisabledTag callbacks);
+                // a hook that mutates this storage's underlying vector
+                // would invalidate the iterator. The snapshot is cheap —
+                // dynamics rarely have thousands of instances — and the
+                // pointer values written into outPointers stay valid as
+                // long as the storage isn't mutated between this call and
+                // the caller's use, which is the existing contract.
+                std::vector<EntityHandle> entitiesSnapshot = storagePtr->Entities();
+                int count = 0;
+                for (EntityHandle e : entitiesSnapshot) {
+                    if (enableFilter == 1 && reg.all_of<DisabledTag>(e)) continue;
+                    if (enableFilter == 2 && !reg.all_of<DisabledTag>(e)) continue;
+                    if (outPointers && count < maxRows) {
+                        outPointers[count] = storagePtr->Get(e);
+                    }
+                    ++count;
+                }
+                return count;
+            };
+
+            // Assign typeIdU32. Slot 0 stays reserved as the null sentinel.
+            if (m_byTypeId.empty()) m_byTypeId.push_back(nullptr);
+            info.typeIdU32 = static_cast<uint32_t>(m_byTypeId.size());
+            m_byTypeId.push_back(nullptr); // placeholder; patched below
+
+            // EnTT storage hash — derived from the serializedName hash so it's
+            // stable across registrations of the same component. Has no entt
+            // pool behind it (dynamics live outside EnTT) but the field is
+            // still populated for the by-storage-hash lookup paths that
+            // currently key on it (ScriptBindings line ~816 etc.).
+            info.storageHash = static_cast<entt::id_type>(serializedHash != 0
+                ? serializedHash : static_cast<uint64_t>(info.typeIdU32));
+
+            const uint32_t typeIdU32 = info.typeIdU32;
+            m_dynamicStorages.emplace(typeIdU32, std::move(storage));
+            auto inserted = m_dynamicMap.emplace(typeIdU32, std::move(info));
+            ComponentInfo& stored = inserted.first->second;
+            if (stored.serializedNameHash != 0) {
+                m_hashIndex[stored.serializedNameHash] = &stored;
+            }
+            if (stored.typeIdU32 < m_byTypeId.size()) {
+                m_byTypeId[stored.typeIdU32] = &stored;
+            }
+            return typeIdU32;
+        }
+
+        // Removes the entity from every DynamicComponentStorage instance.
+        // EnTT runs on_destroy hooks for typed components automatically, but
+        // dynamics live outside the EnTT pool system — without this hook
+        // they leak bytes until scene unload / assembly reload. Called from
+        // Scene::DestroyEntityInternal right before m_Registry.destroy().
+        // Cheap when the entity has no dynamic components attached (each
+        // Remove is a hashmap miss).
+        void ScrubEntity(EntityHandle e) {
+            for (auto& [typeIdU32, storage] : m_dynamicStorages) {
+                (void)typeIdU32;
+                if (storage) {
+                    storage->Remove(e);
+                }
+            }
+        }
+
+        // Drops every component registered via RegisterDynamic. Called from
+        // the script host BEFORE the user assembly unloads (so captured
+        // lambdas don't outlive their storage). Slots in m_byTypeId are
+        // nulled — never reused — so any cached typeIdU32 on the managed
+        // side becomes invalid (managed re-resolves on the next assembly
+        // load anyway).
+        void UnregisterAllDynamic() {
+            for (auto& [typeIdU32, info] : m_dynamicMap) {
+                if (info.serializedNameHash != 0) {
+                    const auto it = m_hashIndex.find(info.serializedNameHash);
+                    if (it != m_hashIndex.end() && it->second == &info) {
+                        m_hashIndex.erase(it);
+                    }
+                }
+                if (typeIdU32 < m_byTypeId.size()) {
+                    m_byTypeId[typeIdU32] = nullptr;
+                }
+            }
+            m_dynamicMap.clear();
+            m_dynamicStorages.clear();
         }
 
         void CopyComponents(Entity src, Entity dst) const {
@@ -499,16 +710,34 @@ namespace Index {
         }
 
         std::unordered_map<std::type_index, ComponentInfo> m_map;
-        // Hash → ComponentInfo* (pointers into m_map). Maintained in lockstep
-        // with m_map by Register(). Pointers stay stable across re-registration
-        // because `insert_or_assign` reuses the existing node's storage when
-        // the key already exists.
+        // Hash → ComponentInfo* (pointers into m_map or m_dynamicMap).
+        // Maintained in lockstep with both by Register / RegisterDynamic.
+        // Pointers stay stable across re-registration because
+        // `insert_or_assign` and `emplace` on unordered_map reuse the
+        // existing node's storage when the key already exists.
         std::unordered_map<uint64_t, const ComponentInfo*> m_hashIndex;
-        // typeIdU32 → ComponentInfo* (pointers into m_map). 1-indexed; slot 0
-        // is reserved as a null sentinel matching the "unregistered" meaning
-        // in the EntityCommandBuffer wire format. Grows monotonically — IDs
-        // are never reused, even if a registration were ever removed, so the
-        // managed-side cache and any persisted-by-id artifact stays valid.
+        // typeIdU32 → ComponentInfo* (pointers into m_map or m_dynamicMap).
+        // 1-indexed; slot 0 is reserved as a null sentinel matching the
+        // "unregistered" meaning in the EntityCommandBuffer wire format.
+        // Grows monotonically — IDs are never reused, even when a dynamic
+        // component is unregistered, so the managed-side cache and any
+        // persisted-by-id artifact stays valid.
         std::vector<const ComponentInfo*> m_byTypeId;
+        // Dynamic-registration map. Keyed by typeIdU32 (synthesized at
+        // registration) since dynamic components share typeid(void) and
+        // can't live in m_map. ComponentInfo nodes are pointer-stable
+        // because std::unordered_map preserves node addresses across
+        // rehash, so m_hashIndex / m_byTypeId references stay valid for
+        // the entry's lifetime.
+        std::unordered_map<uint32_t, ComponentInfo> m_dynamicMap;
+        // Owned DynamicComponentStorage instances, parallel to m_dynamicMap.
+        // Lives here (not in ComponentInfo) so the storage outlives every
+        // callback that captures storagePtr by raw pointer.
+        std::unordered_map<uint32_t, std::unique_ptr<DynamicComponentStorage>> m_dynamicStorages;
+        // Single shared sentinel handed to ForEachComponentInfo callers for
+        // dynamic entries. `std::type_index` requires a real type_info — we
+        // can't synthesize per-component handles — so dynamics all share
+        // typeid(void). Callers that key by type_index implicitly skip them.
+        static inline const std::type_index s_VoidTypeIndex{ typeid(void) };
     };
 }

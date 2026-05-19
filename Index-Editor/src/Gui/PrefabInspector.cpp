@@ -117,6 +117,13 @@ namespace Index {
 				return;
 			}
 
+			// Mirrors the entity inspector guard (ImGuiEditorLayer): dynamic
+			// `:IComponent` components render through the paired Scripts entry,
+			// so the registry wrapper here would just be an empty section.
+			if (info.isDynamic && !info.drawInspector && info.properties.empty()) {
+				return;
+			}
+
 			bool removeRequested = false;
 			bool open = ImGuiUtils::BeginComponentSection(info.displayName.c_str(), removeRequested,
 				[]() {});
@@ -161,7 +168,7 @@ namespace Index {
 		// Add System button in the scene-systems inspector, not on a prefab.
 		if (ImGui::BeginDragDropTarget()) {
 			if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ASSET_BROWSER_ITEM")) {
-				std::string droppedPath(static_cast<const char*>(payload->Data));
+				std::string droppedPath(static_cast<const char*>(payload->Data), static_cast<std::size_t>(payload->DataSize));
 				std::vector<EditorScriptDiscovery::ScriptEntry> droppedScripts;
 				EditorScriptDiscovery::CollectScriptFile(std::filesystem::path(droppedPath), droppedScripts);
 				for (const auto& scriptEntry : droppedScripts) {

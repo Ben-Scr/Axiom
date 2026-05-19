@@ -53,7 +53,6 @@ project "Index-Runtime"
         CopyGlfwDll,
         CopyGladDll
     }
-    if IndexModules.Scripting then postbuildcommands { CopyIndexGameComponentsDll } end
     if IndexProfiler.Enabled then postbuildcommands { CopyTracyDll } end
 
     filter "system:windows"

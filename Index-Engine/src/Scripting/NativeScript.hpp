@@ -105,5 +105,8 @@ namespace Index {
 
 #define REGISTER_SCRIPT(ClassName) \
 	static struct ClassName##_AutoReg { \
-		ClassName##_AutoReg() { Index::NativeScriptRegistry::Register(#ClassName, []() -> Index::NativeScript* { return new ClassName(); }); } \
+		ClassName##_AutoReg() { \
+			Index::NativeScriptRegistry::Register(#ClassName, []() -> Index::NativeScript* { return new ClassName(); }); \
+			Index::NativeScriptRegistry::RegisterType(typeid(ClassName), #ClassName); \
+		} \
 	} s_##ClassName##_autoreg;

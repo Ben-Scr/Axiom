@@ -30,7 +30,6 @@
 #include "Core/Window.hpp"
 #include "Events/EventDispatcher.hpp"
 #include "Events/WindowFocusEvent.hpp"
-#include "Graphics/OpenGL.hpp"
 #include "Graphics/Renderer2D.hpp"
 #include "Graphics/GizmoRenderer.hpp"
 #include "Profiling/Profiler.hpp"
@@ -218,6 +217,23 @@ namespace Index {
 			}
 
 			scriptComponent.AddScript(scriptEntry.ClassName, scriptEntry.Type);
+
+			// For `: IComponent` structs (DynamicComponentRegistrar registered
+			// these at user-assembly load), also populate the backing
+			// DynamicComponentStorage so the entity actually lands in the ECS
+			// pool — not just in ScriptComponent.Scripts. Without this the
+			// inspector renders fine (it reads the managed instance), but a
+			// user script's Entity.HasNativeComponent<T>() / GetRef<T>() looks
+			// at the storage and sees nothing.
+			if (scriptEntry.IsNativeComponent) {
+				auto& componentRegistry = SceneManager::Get().GetComponentRegistry();
+				if (const ComponentInfo* info = componentRegistry.FindBySerializedName(scriptEntry.ClassName)) {
+					if (info->isDynamic && info->add && (!info->has || !info->has(entity))) {
+						info->add(entity);
+					}
+				}
+			}
+
 			scene.MarkDirty();
 			return true;
 		}
@@ -3165,7 +3181,7 @@ namespace Index {
 							}
 						}
 						if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ASSET_BROWSER_ITEM")) {
-							std::string droppedPath(static_cast<const char*>(payload->Data));
+							std::string droppedPath(static_cast<const char*>(payload->Data), static_cast<std::size_t>(payload->DataSize));
 							std::string ext = std::filesystem::path(droppedPath).extension().string();
 							std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
 							if (ext == ".prefab") {
@@ -3313,7 +3329,7 @@ namespace Index {
 						}
 					}
 					if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ASSET_BROWSER_ITEM")) {
-						std::string droppedPath(static_cast<const char*>(payload->Data));
+						std::string droppedPath(static_cast<const char*>(payload->Data), static_cast<std::size_t>(payload->DataSize));
 						std::string ext = std::filesystem::path(droppedPath).extension().string();
 						std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
 						if (ext == ".scene") {
@@ -3376,7 +3392,7 @@ namespace Index {
 
 		auto acceptDroppedGameSystems = [&]() {
 			if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ASSET_BROWSER_ITEM")) {
-				std::string droppedPath(static_cast<const char*>(payload->Data));
+				std::string droppedPath(static_cast<const char*>(payload->Data), static_cast<std::size_t>(payload->DataSize));
 				std::vector<EditorScriptDiscovery::ScriptEntry> droppedScripts;
 				EditorScriptDiscovery::CollectScriptFile(std::filesystem::path(droppedPath), droppedScripts);
 				for (const auto& scriptEntry : droppedScripts) {
@@ -3834,6 +3850,15 @@ namespace Index {
 				return;
 			}
 
+			// Dynamic components (DynamicComponentRegistrar / RegisterDynamic)
+			// have no drawInspector and no PropertyDescriptors, so the outer
+			// wrapper would render an empty section. Their fields surface via
+			// the paired ScriptComponent.Scripts entry rendered above by the
+			// "Scripts" case — that path is the single source of truth.
+			if (info.isDynamic && !info.drawInspector && info.properties.empty()) {
+				return;
+			}
+
 			bool removeRequested = false;
 			bool copyRequested = false;
 			bool pasteRequested = false;
@@ -4111,7 +4136,7 @@ namespace Index {
 		// Drag-drop target: accept script files dropped onto the Inspector panel
 		if (ImGui::BeginDragDropTarget()) {
 			if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ASSET_BROWSER_ITEM")) {
-				std::string droppedPath(static_cast<const char*>(payload->Data));
+				std::string droppedPath(static_cast<const char*>(payload->Data), static_cast<std::size_t>(payload->DataSize));
 				std::vector<EditorScriptDiscovery::ScriptEntry> droppedScripts;
 				EditorScriptDiscovery::CollectScriptFile(std::filesystem::path(droppedPath), droppedScripts);
 				bool scriptDroppedSomething = false;

@@ -190,7 +190,45 @@ namespace Index {
 		}
 
 		absolutePath = absolutePath.lexically_normal();
-		return absolutePath.has_filename() && absolutePath != absolutePath.root_path();
+		if (!absolutePath.has_filename() || absolutePath == absolutePath.root_path()) {
+			return false;
+		}
+
+		// Require at least 2 path components past the root. This blocks
+		// disasters like `C:\Windows` or `/usr` while still allowing any
+		// legitimate `<drive>/parent/project` layout. `relative()` against
+		// the root_path drops the drive/leading-slash so its components are
+		// strictly post-root.
+		std::filesystem::path postRoot = absolutePath.lexically_relative(absolutePath.root_path());
+		std::size_t componentCount = 0;
+		for (const auto& part : postRoot) {
+			if (!part.empty() && part != ".") {
+				++componentCount;
+			}
+		}
+		if (componentCount < 2) {
+			return false;
+		}
+
+		// Reject paths whose leading component matches a well-known system
+		// folder name. Defense-in-depth — the depth check above already
+		// rules out most danger, but a corrupted registry pointing at
+		// `C:\Windows\Temp\SomethingProjecty` shouldn't reach remove_all
+		// just because something forged an index-project.json there.
+		static constexpr const char* k_SystemFolderNames[] = {
+			"Windows", "Program Files", "Program Files (x86)", "ProgramData",
+			"System Volume Information", "$Recycle.Bin",
+			"usr", "etc", "bin", "sbin", "boot", "lib", "lib64", "dev",
+			"proc", "sys", "var"
+		};
+		const std::string firstComponent = postRoot.begin()->string();
+		for (const char* banned : k_SystemFolderNames) {
+			if (firstComponent == banned) {
+				return false;
+			}
+		}
+
+		return true;
 	}
 
 	// ── Lifecycle ───────────────────────────────────────────────────

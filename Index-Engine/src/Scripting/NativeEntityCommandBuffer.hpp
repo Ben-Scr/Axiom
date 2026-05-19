@@ -33,10 +33,17 @@
 
 #include "Core/Export.hpp"
 #include "Scene/EntityHandle.hpp"
+// Inline AddComponent thunks call `scene.GetRegistry()`. Including
+// Scene.hpp here keeps that out of every translation unit's hot
+// header — but the recorder is already a heavyweight component-emit
+// path, so the include cost is negligible vs the alternative
+// (defining thunks via macros or shoving them to .cpp).
+#include "Scene/Scene.hpp"
 
 #include <cstddef>
 #include <cstdint>
 #include <new>
+#include <span>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -68,6 +75,23 @@ namespace Index {
 		// a handle that subsequent AddComponent calls reference. The handle
 		// is stable until Clear() or destruction.
 		EntityRef CreateEntity();
+
+		// Records the spawn of the prefab tree identified by
+		// `prefabGuid`. Returns an EntityRef for the prefab's ROOT entity.
+		// Children are bulk-created on the native side at Playback (not
+		// addressable via additional ECB records — reach them via the
+		// root's children list AFTER Playback). Mirrors the managed
+		// ECB's Instantiate(ulong) — the native side records an
+		// Instantiate command instead of using a separate wire opcode
+		// because the native ECB is record-based, not byte-packed.
+		EntityRef Instantiate(uint64_t prefabGuid);
+
+		// Convenience overload — accepts a prefab-asset Entity (one
+		// produced by an inspector-wired field or Entity::FromPrefabGUID).
+		// Forwards to Instantiate(prefabAsset.GetPrefabGUID()). Returns
+		// an empty EntityRef (Index == 0 and no recorded entity) when
+		// the source isn't a prefab asset.
+		EntityRef Instantiate(class Entity prefabAsset);
 
 		// Add a component using its C++ default constructor. For
 		// Transform2DComponent this gives Scale = (1,1); for
@@ -101,6 +125,23 @@ namespace Index {
 		// Tag (empty-type) variant. No payload, no patch.
 		template <typename T>
 		std::enable_if_t<std::is_empty_v<T>> AddComponent(EntityRef e);
+
+		// CreateEntity + default-construct each Ti, returned as one
+		// EntityRef. Engine defaults (Transform2D Scale = (1,1), etc.)
+		// survive because each AddComponent<Ti>(e) goes through the
+		// default-constructor overload above. Variadic — pick any
+		// arity; templates don't have a 1..8 cap on the native side.
+		template <typename... Ts>
+		EntityRef CreateWith();
+
+		// CreateEntity + default-construct each Ti, repeated `length`
+		// times. Outputs the resulting EntityRefs into `output` in
+		// creation order. `output.size() >= length` must hold. Matches
+		// the shape of the managed ECB's CreateEntitiesWith — useful
+		// when the caller wants stable refs into the merged batch
+		// before Playback.
+		template <typename... Ts>
+		void CreateEntitiesWith(int length, std::span<EntityRef> output);
 
 		// Ships the recorded batch to `scene`. Mirrors the managed ECB's
 		// fast path: ReserveForLoadRuntime -> CreateEntitiesBulk -> LoadGuard
@@ -137,8 +178,18 @@ namespace Index {
 		// inside a single cache line.
 		struct Command {
 			uint32_t EntityIndex;
-			// Type-erased applier. `state` points at Storage.
-			void (*Apply)(void* state, entt::registry& registry, EntityHandle handle);
+			// Type-erased applier. `state` points at Storage. Takes
+			// Scene& (not just entt::registry&) so prefab-instantiate
+			// commands can call into SceneSerializer, which needs the
+			// scene for entity-identity setup beyond the bare registry.
+			// Component-emplace thunks pay one extra inline call
+			// (scene.GetRegistry()) — negligible vs. the emplace work.
+			//
+			// The `handle` parameter is a reference so the Instantiate
+			// thunk can rewrite m_CreatedHandles[EntityIndex] in place
+			// (its placeholder gets destroyed and replaced by the
+			// prefab root). AddComponent thunks treat it as read-only.
+			void (*Apply)(void* state, Scene& scene, EntityHandle& handle);
 			// Type-erased destructor for the captured state. nullptr for
 			// trivially-destructible captures so Clear() can skip the call.
 			void (*Destroy)(void* state);
@@ -156,7 +207,7 @@ namespace Index {
 		// fresh Command slot in m_Commands and returns a pointer to its
 		// state storage so the caller can placement-new the capture there.
 		Command& AppendCommand(uint32_t entityIndex,
-			void (*apply)(void*, entt::registry&, EntityHandle),
+			void (*apply)(void*, Scene&, EntityHandle&),
 			void (*destroy)(void*));
 
 		// Lets ParallelEntityCommandBuffer reach into the merge details
@@ -172,9 +223,9 @@ namespace Index {
 		// Default-construct only — captures nothing, so Destroy is null
 		// and Apply is a stateless thunk that compiles to one call.
 		AppendCommand(e.Index,
-			[](void*, entt::registry& registry, EntityHandle handle) {
+			[](void*, Scene& scene, EntityHandle& handle) {
 				if constexpr (std::is_default_constructible_v<T>) {
-					registry.emplace<T>(handle);
+					scene.GetRegistry().emplace<T>(handle);
 				}
 				else {
 					static_assert(std::is_default_constructible_v<T>,
@@ -200,9 +251,9 @@ namespace Index {
 			"Component alignment exceeds NativeEntityCommandBuffer storage alignment.");
 
 		Command& cmd = AppendCommand(e.Index,
-			[](void* state, entt::registry& registry, EntityHandle handle) {
+			[](void* state, Scene& scene, EntityHandle& handle) {
 				T* held = std::launder(reinterpret_cast<T*>(state));
-				registry.emplace<T>(handle, std::move(*held));
+				scene.GetRegistry().emplace<T>(handle, std::move(*held));
 			},
 			std::is_trivially_destructible_v<T>
 				? nullptr
@@ -231,9 +282,9 @@ namespace Index {
 			"[](Transform2DComponent& tr) { tr.Position = ...; }");
 
 		Command& cmd = AppendCommand(e.Index,
-			[](void* state, entt::registry& registry, EntityHandle handle) {
+			[](void* state, Scene& scene, EntityHandle& handle) {
 				Patch* patch = std::launder(reinterpret_cast<Patch*>(state));
-				T& component = registry.emplace<T>(handle);
+				T& component = scene.GetRegistry().emplace<T>(handle);
 				(*patch)(component);
 			},
 			std::is_trivially_destructible_v<Patch>
@@ -248,10 +299,39 @@ namespace Index {
 	std::enable_if_t<std::is_empty_v<T>>
 	NativeEntityCommandBuffer::AddComponent(EntityRef e) {
 		AppendCommand(e.Index,
-			[](void*, entt::registry& registry, EntityHandle handle) {
-				registry.emplace<T>(handle);
+			[](void*, Scene& scene, EntityHandle& handle) {
+				scene.GetRegistry().emplace<T>(handle);
 			},
 			nullptr);
+	}
+
+	template <typename... Ts>
+	NativeEntityCommandBuffer::EntityRef
+	NativeEntityCommandBuffer::CreateWith() {
+		EntityRef e = CreateEntity();
+		// Fold-expression expands to AddComponent<T1>(e),
+		// AddComponent<T2>(e), … one per Ti. Default-construction path
+		// is picked at each call because we pass no second argument —
+		// so engine C++ default-initializers (Transform2D Scale = (1,1),
+		// SpriteRenderer Color = white) fire correctly at Playback.
+		(AddComponent<Ts>(e), ...);
+		return e;
+	}
+
+	template <typename... Ts>
+	void NativeEntityCommandBuffer::CreateEntitiesWith(int length, std::span<EntityRef> output) {
+		if (length < 0 || static_cast<std::size_t>(length) > output.size()) {
+			// Defensive: same contract the managed ECB enforces. A
+			// length>output.size() would write past the span; -ve is a
+			// programming error. Native code aborts via assert
+			// elsewhere — here we just bail out leaving output
+			// unchanged so the caller can detect partial work via
+			// EntityCount() not increasing.
+			return;
+		}
+		for (int i = 0; i < length; ++i) {
+			output[i] = CreateWith<Ts...>();
+		}
 	}
 
 } // namespace Index

@@ -1,6 +1,7 @@
 using System.Runtime.InteropServices;
+using Index.Components;
 
-namespace Index.Components;
+namespace Index.Native;
 
 // Native (ECS pool-resident) view of the Sprite Renderer component. The managed
 // `Index.SpriteRenderer` class is the script-friendly wrapper around the same

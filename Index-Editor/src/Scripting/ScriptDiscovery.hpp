@@ -100,6 +100,30 @@ namespace Index::EditorScriptDiscovery {
 		return true;
 	}
 
+	// Strips characters disallowed in C#/C++ identifiers and prefixes an
+	// underscore if the result would start with a digit. Stricter than
+	// IsValidRegisteredScriptToken: no ':' (this is for single class names,
+	// not fully-qualified namespace tokens). Returns `fallback` when the
+	// input is empty or sanitizes down to nothing.
+	inline std::string SanitizeIdentifier(const std::string& input, const std::string& fallback)
+	{
+		std::string out;
+		out.reserve(input.size());
+		for (char ch : input) {
+			const unsigned char uch = static_cast<unsigned char>(ch);
+			if (std::isalnum(uch) != 0 || ch == '_') {
+				out.push_back(ch);
+			}
+		}
+		if (out.empty()) {
+			return fallback;
+		}
+		if (std::isdigit(static_cast<unsigned char>(out[0])) != 0) {
+			out.insert(out.begin(), '_');
+		}
+		return out;
+	}
+
 	inline bool ContainsScriptEntry(
 		const std::vector<ScriptEntry>& entries,
 		const std::string& className,

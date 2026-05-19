@@ -66,6 +66,19 @@ namespace Index {
 		std::unordered_map<uint64_t, uint32_t> g_ColorViewToFbo;
 		uint32_t g_NextFbId = 1;
 
+		// Two-frame deferred-destroy queue. When Framebuffer::Destroy runs we
+		// move the entry into g_PendingDestroyThisFrame instead of erasing
+		// immediately, because ImGui may still hold the color view's raw
+		// pointer for the current frame's submitted draws. Each call to
+		// ProcessFrameEndDeferredDestroy (from WebGPUApi::Present) advances
+		// the queue: this-frame entries roll to last-frame, last-frame
+		// entries finally release. So a Destroy() during frame N keeps the
+		// Dawn resources alive through the end of frame N+1, which gives
+		// any in-flight ImGui submit + Dawn command-buffer execution time
+		// to land before the underlying view/texture is dropped.
+		std::vector<GpuFramebuffer> g_PendingDestroyThisFrame;
+		std::vector<GpuFramebuffer> g_PendingDestroyLastFrame;
+
 		uint32_t AllocateFbId() {
 			uint32_t id = g_NextFbId++;
 			if (id == 0) id = g_NextFbId++;  // overflow guard, theoretical
@@ -283,20 +296,38 @@ namespace Index {
 
 	void Framebuffer::Destroy() {
 		if (m_BackendId != 0) {
-			// Clear the color-view reverse-map entry before erasing the
-			// main entry, so a concurrent lookup can't dangle through an
-			// already-freed slot. The view object itself is owned by the
-			// GpuFramebuffer entry and will be released by g_Framebuffers.erase.
+			// Clear the color-view reverse-map entry before moving the
+			// main entry into the deferred-destroy queue: any future
+			// LookupFramebufferColorViewByTextureId call will fail fast.
+			// The view + texture handles themselves stay alive in the
+			// pending bucket for one extra frame so an in-flight ImGui
+			// frame holding the raw view pointer doesn't dereference a
+			// freed Dawn resource.
 			if (m_ColorTextureId != 0) {
 				g_ColorViewToFbo.erase(m_ColorTextureId);
 			}
-			g_Framebuffers.erase(m_BackendId);
+			auto it = g_Framebuffers.find(m_BackendId);
+			if (it != g_Framebuffers.end()) {
+				g_PendingDestroyThisFrame.push_back(std::move(it->second));
+				g_Framebuffers.erase(it);
+			}
 
 			m_BackendId         = 0;
 			m_ColorTextureId    = 0;
 			m_DepthRenderbuffer = 0;
 		}
 		m_Viewport = Viewport{ 0, 0 };
+	}
+
+	void Framebuffer::ProcessFrameEndDeferredDestroy() {
+		// Two-frame bucket roll. Entries enqueued during frame N stay alive
+		// through the end of frame N+1: the call at the end of frame N moves
+		// them from ThisFrame -> LastFrame, and the call at the end of
+		// frame N+1 finally releases LastFrame. This window is wide enough
+		// that any ImGui draw issued before Destroy() reaches Dawn's GPU
+		// before the underlying view goes away.
+		g_PendingDestroyLastFrame.clear();
+		g_PendingDestroyLastFrame.swap(g_PendingDestroyThisFrame);
 	}
 
 }  // namespace Index

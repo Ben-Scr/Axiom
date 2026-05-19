@@ -24,6 +24,16 @@
 
 namespace Index {
 
+	// DEPRECATED. All in-tree callers have been migrated to RenderApi::*.
+	// This shim stays as a deprecation bridge for out-of-tree consumers
+	// (project templates, sample code, plugin packages) that still
+	// reference the historical OpenGL:: surface. Scheduled for deletion
+	// after one engine release cycle; remove `OpenGL.hpp` and `OpenGL.cpp`
+	// (and the vcxproj entries via premake regen) once no consumers
+	// remain. The [[deprecated]] attribute is intentionally not applied:
+	// it would force OpenGL.cpp's own definitions to be wrapped in a
+	// suppression pragma. The doc-comment + migrated in-tree call sites
+	// are sufficient signal that new code should not use this class.
 	class INDEX_API OpenGL {
 	public:
 		OpenGL() = delete;

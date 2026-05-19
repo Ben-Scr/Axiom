@@ -5,6 +5,7 @@
 #include "Scene/Entity.hpp"
 #include "Serialization/Json.hpp"
 
+#include <functional>
 #include <span>
 #include <string>
 #include <typeindex>
@@ -43,10 +44,15 @@ namespace Index {
 		// (e.g. registration with an empty serializedName).
 		uint64_t serializedNameHash = 0;
 
-		bool (*has)(Entity) = nullptr;
-		void (*add)(Entity) = nullptr;
-		void (*remove)(Entity) = nullptr;
-		void (*copyTo)(Entity src, Entity dst) = nullptr;
+		// std::function (not raw function pointer) so dynamic-registration
+		// callbacks can capture their backing DynamicComponentStorage. Static
+		// registrations from Register<T>() continue to assign non-capturing
+		// lambdas — those convert to std::function with no heap allocation
+		// (most std libs SBO-store stateless callables inline).
+		std::function<bool(Entity)> has;
+		std::function<void(Entity)> add;
+		std::function<void(Entity)> remove;
+		std::function<void(Entity src, Entity dst)> copyTo;
 
 		// Raw pointer to the component instance for this entity (nullptr when missing).
 		// Powers the ScriptCore ref-based API: C# casts the void* to a struct mirror of
@@ -56,13 +62,13 @@ namespace Index {
 		// until the next structural change to the same component pool (EnTT may move
 		// the storage on add/remove), so callers must refetch rather than cache across
 		// frames.
-		void* (*getRaw)(Entity) = nullptr;
+		std::function<void*(Entity)> getRaw;
 
 		// Fast path for simple ref queries. Fills `outPointers` with pointers to each
 		// component instance in the component's own EnTT storage and returns the full
 		// row count. If the count exceeds `maxRows`, only the prefix is written and
 		// the managed caller retries with a larger buffer.
-		int (*fillRawPointers)(entt::registry& registry, void** outPointers, int maxRows, int enableFilter) = nullptr;
+		std::function<int(entt::registry& registry, void** outPointers, int maxRows, int enableFilter)> fillRawPointers;
 
 		// sizeof(T) for the underlying C++ component, or 0 for empty/tag types.
 		// Used by the managed side at script-engine init to detect layout drift between
@@ -94,8 +100,8 @@ namespace Index {
 		// Components with scene-bound runtime state (e.g. ParticleSystem2DComponent's
 		// emitter handle) must override this at registration time to rebind correctly,
 		// the same way they currently override `copyTo`.
-		void (*emplaceFromBytes)(entt::registry& registry, EntityHandle entity,
-			const void* bytes, size_t size) = nullptr;
+		std::function<void(entt::registry& registry, EntityHandle entity,
+			const void* bytes, size_t size)> emplaceFromBytes;
 
 		// Default-construct emplacer. Calls `registry.emplace<T>(entity)`, firing the
 		// C++ default-member-initializers (e.g. Transform2DComponent::Scale{1,1},
@@ -105,7 +111,7 @@ namespace Index {
 		// `CreateEntityWith<T...>` attaches components with engine defaults — the
 		// managed-side `default(T)` is all-zero bytes and would silently clobber
 		// those defaults if routed through emplaceFromBytes instead.
-		void (*defaultEmplace)(entt::registry& registry, EntityHandle entity) = nullptr;
+		std::function<void(entt::registry& registry, EntityHandle entity)> defaultEmplace;
 
 		// Symmetric counterpart to emplaceFromBytes — serializes the live
 		// component instance to a contiguous byte buffer that emplaceFromBytes
@@ -243,6 +249,13 @@ namespace Index {
 		// simply leaves the new field at its default.
 		void (*serializeArchive)(Entity, Index::Serialization::IArchive&) = nullptr;
 		std::uint16_t serializationVersion = 1;
+
+		// True when the component was registered via ComponentRegistry::RegisterDynamic
+		// (i.e., it was authored in the user's C# project, not as a hand-written C++
+		// struct). UnregisterAllDynamic walks the registry on assembly unload and
+		// drops every entry with this flag set, freeing the backing
+		// DynamicComponentStorage and reclaiming its typeIdU32 slot.
+		bool isDynamic = false;
 	};
 
 } // namespace Index

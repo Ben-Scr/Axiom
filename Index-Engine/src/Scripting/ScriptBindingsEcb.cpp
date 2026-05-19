@@ -2,6 +2,7 @@
 #include "Scripting/EntityCommandBufferWire.hpp"
 #include "Scripting/ScriptGlue.hpp"
 #include "Scripting/ScriptBindings.hpp"
+#include "Scripting/ScriptComponent.hpp"
 #include "Scripting/ScriptEngine.hpp"
 #include "Scene/Scene.hpp"
 #include "Scene/SceneManager.hpp"
@@ -279,6 +280,24 @@ namespace Index {
 		std::vector<EntityHandle> prefabSlotScratch;
 		std::size_t nextPrefabSpawn = 0;
 
+		// Mirror Index_Entity_AddComponent (ScriptBindings.cpp): a dynamic
+		// `:IComponent` add must also seed a Managed ScriptComponent.Scripts
+		// entry so the inspector's script-field renderer picks it up. Applies
+		// to every ECB opcode that introduces a dynamic component on an entity.
+		// Idempotent — guards make repeated calls (e.g. SetComponent after
+		// AddComponent) no-ops.
+		auto seedScriptsEntryForDynamic = [&](const ComponentInfo* info, EntityHandle handle) {
+			if (!info->isDynamic) return;
+			Entity entity = scene->GetEntity(handle);
+			if (!entity.HasComponent<ScriptComponent>()) {
+				entity.AddComponent<ScriptComponent>();
+			}
+			auto& sc = entity.GetComponent<ScriptComponent>();
+			if (!sc.HasScript(info->serializedName, ScriptType::Managed)) {
+				sc.AddScript(info->serializedName, ScriptType::Managed);
+			}
+		};
+
 		const uint8_t* cursor = commandStreamPtr;
 		for (uint32_t cmdIdx = 0; cmdIdx < header.commandCount; ++cmdIdx) {
 			// Pre-scan already bounds-checked every record, but re-check
@@ -322,6 +341,7 @@ namespace Index {
 				}
 				info->emplaceFromBytes(scene->GetRegistry(), handles[entityIndex],
 					payload, payloadSize);
+				seedScriptsEntryForDynamic(info, handles[entityIndex]);
 			}
 			else if (opcode == Ecb_DefaultConstructComponent) {
 				// Payload-free record — typeId selects the component, and the
@@ -340,6 +360,7 @@ namespace Index {
 					return kEcbErrorUnknownComponent;
 				}
 				info->defaultEmplace(scene->GetRegistry(), handles[entityIndex]);
+				seedScriptsEntryForDynamic(info, handles[entityIndex]);
 			}
 			else if (opcode == Ecb_InstantiatePrefab) {
 				// prefabSpawns is built in command-stream order by the

@@ -93,8 +93,6 @@
     <Compile Include="Source\Index\Collections\Timer.cs" />
     <Compile Include="Source\Index\Components\ComponentTypes.cs" />
     <Compile Include="Source\Index\Components\IComponent.cs" />
-    <Compile Include="Source\Index\Components\NativeSpriteRenderer.cs" />
-    <Compile Include="Source\Index\Components\NativeTransform2D.cs" />
     <Compile Include="Source\Index\Components\Ref.cs" />
     <Compile Include="Source\Index\Components\TextureHandle.cs" />
     <Compile Include="Source\Index\Core\Application.cs" />
@@ -115,6 +113,7 @@
     <Compile Include="Source\Index\Graphics\Gizmo.cs" />
     <Compile Include="Source\Index\Graphics\Renderer2D.cs" />
     <Compile Include="Source\Index\Graphics\Texture.cs" />
+    <Compile Include="Source\Index\Interop\DynamicComponentRegistrar.cs" />
     <Compile Include="Source\Index\Interop\NativeCallbacks.cs" />
     <Compile Include="Source\Index\Interop\NativeInterop.cs" />
     <Compile Include="Source\Index\Interop\PackageNativeResolver.cs" />
@@ -150,6 +149,8 @@
     <Compile Include="Source\Index\Math\Vector3Int.cs" />
     <Compile Include="Source\Index\Math\Vector4.cs" />
     <Compile Include="Source\Index\Math\Vector4Int.cs" />
+    <Compile Include="Source\Index\Native\NativeSpriteRenderer.cs" />
+    <Compile Include="Source\Index\Native\NativeTransform2D.cs" />
     <Compile Include="Source\Index\Physics\Collision2D.cs" />
     <Compile Include="Source\Index\Physics\FastPhysics2D.cs" />
     <Compile Include="Source\Index\Physics\Physics2D.cs" />

@@ -35,7 +35,7 @@
 #include "Audio/AudioManager.hpp"
 #include "Graphics/TextureManager.hpp"
 #include "Graphics/Gizmo.hpp"
-#include "Graphics/OpenGL.hpp"
+#include "Graphics/RenderApi.hpp"
 #include "Physics/Physics2D.hpp"
 #include "Core/Version.hpp"
 
@@ -386,17 +386,17 @@ namespace Index {
 	{
 		// Returns the version string set by the active backend.
 		// Empty until the renderer initializes.
-		return CopyToManagedBuffer(OpenGL::GetVersionString(), outBuffer, capacity);
+		return CopyToManagedBuffer(RenderApi::GetVersionString(), outBuffer, capacity);
 	}
 
 	static int Index_Engine_GetGpuVendorBuffer(char* outBuffer, int capacity)
 	{
-		return CopyToManagedBuffer(OpenGL::GetVendorString(), outBuffer, capacity);
+		return CopyToManagedBuffer(RenderApi::GetVendorString(), outBuffer, capacity);
 	}
 
 	static int Index_Engine_GetGpuRendererBuffer(char* outBuffer, int capacity)
 	{
-		return CopyToManagedBuffer(OpenGL::GetRendererString(), outBuffer, capacity);
+		return CopyToManagedBuffer(RenderApi::GetRendererString(), outBuffer, capacity);
 	}
 
 	// ── Time Bindings ───────────────────────────────────────────────────
@@ -527,6 +527,14 @@ namespace Index {
 		scene->DestroyEntity(handle);
 	}
 
+	static void Index_Entity_DestroyDelayed(uint64_t entityID, float delay)
+	{
+		Scene* scene = nullptr;
+		EntityHandle handle = entt::null;
+		if (!ResolveEntityReference(entityID, scene, handle)) return;
+		scene->DestroyEntity(handle, delay);
+	}
+
 	static uint64_t Index_Entity_Create(const char* name)
 	{
 		Scene* scene = GetScene();
@@ -609,6 +617,7 @@ namespace Index {
 		b.Entity_IsValid = &Index_Entity_IsValid;
 		b.Entity_FindByName = &Index_Entity_FindByName;
 		b.Entity_Destroy = &Index_Entity_Destroy;
+		b.Entity_DestroyDelayed = &Index_Entity_DestroyDelayed;
 		b.Entity_Create = &Index_Entity_Create;
 	}
 

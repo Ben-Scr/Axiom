@@ -2,6 +2,7 @@ using System;
 using Index;
 using Index.Components;
 using Index.Jobs;
+using Index.Native;
 
 // End-to-end sample + regression test for the three-phase prefab fast path:
 //   1. Native PrefabTemplateCache (first spawn bakes, second hits cache).
@@ -57,7 +58,7 @@ public class PrefabSpawnJobSample : GameSystem
 
         public void Execute(int i)
         {
-            EntityRef root = Ctx.Ecb.InstantiatePrefab(PrefabGuid);
+            EntityRef root = Ctx.Ecb.Instantiate(PrefabGuid);
             Ctx.Ecb.AddComponent(root, new NativeTransform2D
             {
                 LocalPosition = new Vector2(i, Ctx.GetRng().NextFloat01() * 10f),
@@ -149,7 +150,7 @@ public class PrefabSpawnJobSample : GameSystem
         ulong guid = BulletPrefab.PrefabGUID;
         for (int i = 0; i < n; i++)
         {
-            EntityRef root = ecb.InstantiatePrefab(guid);
+            EntityRef root = ecb.Instantiate(guid);
             ecb.AddComponent(root, new NativeTransform2D { LocalPosition = new Vector2(i, 0f) });
         }
 
@@ -168,7 +169,7 @@ public class PrefabSpawnJobSample : GameSystem
         bool threw = false;
         try
         {
-            ecb.InstantiatePrefab(0ul);
+            ecb.Instantiate(0ul);
         }
         catch (ArgumentException) { threw = true; }
         if (!threw)
@@ -185,7 +186,7 @@ public class PrefabSpawnJobSample : GameSystem
         bool threw = false;
         try
         {
-            ecb.InstantiatePrefab(Entity.Invalid);
+            ecb.Instantiate(Entity.Invalid);
         }
         catch (ArgumentException) { threw = true; }
         if (!threw)

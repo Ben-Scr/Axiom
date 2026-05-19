@@ -315,6 +315,9 @@ internal static unsafe class InternalCalls
 
     internal static void Entity_Destroy(ulong entityID) => NativeCallbacks.Bindings.Entity_Destroy(entityID);
 
+    internal static void Entity_DestroyDelayed(ulong entityID, float delay)
+        => NativeCallbacks.Bindings.Entity_DestroyDelayed(entityID, delay);
+
     internal static ulong Entity_Clone(ulong sourceEntityID)
         => NativeCallbacks.Bindings.Entity_Clone(sourceEntityID);
 
@@ -349,6 +352,32 @@ internal static unsafe class InternalCalls
     {
         byte[] buf = EncodeUtf8Z(componentName);
         fixed (byte* ptr = buf) return NativeCallbacks.Bindings.Entity_RemoveComponent(entityID, ptr) != 0;
+    }
+
+    // ── Script add/has/remove ─────────────────────────────────────────
+    // These mirror Entity_AddComponent / HasComponent / RemoveComponent
+    // but route to the ScriptComponent.Scripts vector + ScriptSystem
+    // bind path instead of the ECS pool. Used by Entity.cs's script
+    // branch when typeof(T) : EntityScript — see AddComponent<T> above
+    // for the CS0111 rationale. Class name is the script's short type
+    // name (typeof(T).Name); the native side matches against
+    // ScriptInstance::GetClassName().
+    internal static bool Entity_AddScript(ulong entityID, string className)
+    {
+        byte[] buf = EncodeUtf8Z(className);
+        fixed (byte* ptr = buf) return NativeCallbacks.Bindings.Entity_AddScript(entityID, ptr) != 0;
+    }
+
+    internal static bool Entity_HasScript(ulong entityID, string className)
+    {
+        byte[] buf = EncodeUtf8Z(className);
+        fixed (byte* ptr = buf) return NativeCallbacks.Bindings.Entity_HasScript(entityID, ptr) != 0;
+    }
+
+    internal static bool Entity_RemoveScript(ulong entityID, string className)
+    {
+        byte[] buf = EncodeUtf8Z(className);
+        fixed (byte* ptr = buf) return NativeCallbacks.Bindings.Entity_RemoveScript(entityID, ptr) != 0;
     }
 
     // Returns the raw void* into the entity's component slot, or null when the
@@ -1455,4 +1484,33 @@ internal static unsafe class InternalCalls
     internal static void WidthConstraint_SetMinWidth(ulong id, float v) => NativeCallbacks.Bindings.WidthConstraint_SetMinWidth(id, v);
     internal static float WidthConstraint_GetMaxWidth(ulong id) => NativeCallbacks.Bindings.WidthConstraint_GetMaxWidth(id);
     internal static void WidthConstraint_SetMaxWidth(ulong id, float v) => NativeCallbacks.Bindings.WidthConstraint_SetMaxWidth(id, v);
+
+    // ── Dynamic component registration ───────────────────────────────
+    // Called from DynamicComponentRegistrar after the user assembly loads.
+    // Replaces the build-time codegen pipeline — every [NativeComponent(...,
+    // Generate = true)] struct registers via this entry at runtime, no
+    // engine rebuild required.
+    internal static uint Component_RegisterDynamic(
+        string displayName,
+        string serializedName,
+        string subcategory,
+        uint category,
+        uint size,
+        uint alignment)
+    {
+        byte[] dispBuf  = EncodeUtf8Z(displayName);
+        byte[] serBuf   = EncodeUtf8Z(serializedName);
+        byte[] subBuf   = EncodeUtf8Z(subcategory);
+        fixed (byte* d = dispBuf)
+        fixed (byte* s = serBuf)
+        fixed (byte* c = subBuf)
+        {
+            return NativeCallbacks.Bindings.Component_RegisterDynamic(d, s, c, category, size, alignment);
+        }
+    }
+
+    internal static void Component_UnregisterAllDynamic()
+    {
+        NativeCallbacks.Bindings.Component_UnregisterAllDynamic();
+    }
 }
