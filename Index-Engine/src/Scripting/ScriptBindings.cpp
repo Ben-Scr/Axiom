@@ -1491,6 +1491,13 @@ namespace Index {
 
 		comp.TextureAssetId = UUID(assetId);
 		comp.TextureHandle = TextureManager::LoadTextureByUUID(assetId);
+		// Apply the component's filter to the freshly bound texture so a
+		// script that does `sprite.Texture = ...` after setting FilterMode
+		// doesn't render with whatever sampler the texture happened to
+		// have from a previous owner.
+		if (auto* tex = TextureManager::GetTexture(comp.TextureHandle); tex) {
+			tex->SetFilter(comp.FilterMode);
+		}
 	}
 
 	static int Index_SpriteRenderer_GetSortingOrder(uint64_t entityID)
@@ -1515,6 +1522,21 @@ namespace Index {
 	{
 		GET_COMPONENT(SpriteRendererComponent, entityID, );
 		comp.SortingLayer = static_cast<uint8_t>(layer);
+	}
+
+	static int Index_SpriteRenderer_GetFilter(uint64_t entityID)
+	{
+		GET_COMPONENT(SpriteRendererComponent, entityID, static_cast<int>(Filter::Bilinear));
+		return static_cast<int>(comp.FilterMode);
+	}
+
+	static void Index_SpriteRenderer_SetFilter(uint64_t entityID, int filter)
+	{
+		GET_COMPONENT(SpriteRendererComponent, entityID, );
+		comp.FilterMode = static_cast<Filter>(filter);
+		if (auto* tex = TextureManager::GetTexture(comp.TextureHandle); tex) {
+			tex->SetFilter(comp.FilterMode);
+		}
 	}
 
 	// ── TextRenderer ────────────────────────────────────────────────────
@@ -3691,6 +3713,10 @@ namespace Index {
 		b.WidthConstraint_SetMinWidth = &Index_WidthConstraint_SetMinWidth;
 		b.WidthConstraint_GetMaxWidth = &Index_WidthConstraint_GetMaxWidth;
 		b.WidthConstraint_SetMaxWidth = &Index_WidthConstraint_SetMaxWidth;
+
+		// ── SpriteRenderer filter (appended for binary compat) ──
+		b.SpriteRenderer_GetFilter = &Index_SpriteRenderer_GetFilter;
+		b.SpriteRenderer_SetFilter = &Index_SpriteRenderer_SetFilter;
 	}
 
 } // namespace Index

@@ -2039,7 +2039,7 @@ public class GridLayoutGroup : Component
     }
 }
 
-// ── ContentSizeFitter ───────────────────────────────────────────────
+// ── ContentSizeFitter ───────────────────────────────────────────────<div style='direction:ltr;border-width:100%'>
 //
 // Auto-resizes the entity's RectTransform along enabled axes to fit the
 // bounding box of its direct children. See

@@ -124,7 +124,19 @@ namespace Index {
 		// UnloadAll. This eliminates the per-frame device.CreateBindGroup
 		// storm that the previous per-frame clear caused for scenes with
 		// many unique textures.
-		std::unordered_map<uint64_t, wgpu::BindGroup> g_BindGroupCache;
+		//
+		// We also remember the wgpu::Sampler each bind group was built
+		// against, because bind groups in WebGPU are immutable — when
+		// Texture2D::SetFilter rebuilds the sampler we must rebuild the
+		// bind group too, or the draw keeps using the stale sampler the
+		// old bind group baked in. Same applies if the view changes
+		// (hot reload swaps the slot).
+		struct CachedBindGroup {
+			wgpu::BindGroup     Group;
+			wgpu::Sampler       Sampler;
+			wgpu::TextureView   View;
+		};
+		std::unordered_map<uint64_t, CachedBindGroup> g_BindGroupCache;
 
 		// Token returned from TextureManager::AddDestroyListener so
 		// Shutdown can unregister cleanly. 0 = no listener installed.
@@ -572,12 +584,22 @@ namespace Index {
 			if (!tex || !tex->IsValid()) return nullptr;
 			const uint64_t poolId = tex->GetHandle();
 
-			auto cacheIt = g_BindGroupCache.find(poolId);
-			if (cacheIt != g_BindGroupCache.end()) return cacheIt->second;
-
 			const auto lookup = WebGPUBackend::LookupTexture2D(poolId);
 			if (!lookup.Valid || !lookup.View || !lookup.Sampler) {
 				return nullptr;
+			}
+
+			auto cacheIt = g_BindGroupCache.find(poolId);
+			if (cacheIt != g_BindGroupCache.end()) {
+				const CachedBindGroup& cached = cacheIt->second;
+				if (cached.Sampler.Get() == lookup.Sampler.Get()
+					&& cached.View.Get() == lookup.View.Get()) {
+					return cached.Group;
+				}
+				// Sampler or view rebuilt under us (filter change, hot
+				// reload) — drop the stale group so we recreate one
+				// against the current handles.
+				g_BindGroupCache.erase(cacheIt);
 			}
 
 			wgpu::BindGroupEntry entries[3] = {};
@@ -598,7 +620,7 @@ namespace Index {
 
 			wgpu::BindGroup bg = device.CreateBindGroup(&desc);
 			if (!bg) return nullptr;
-			g_BindGroupCache.emplace(poolId, bg);
+			g_BindGroupCache.emplace(poolId, CachedBindGroup{ bg, lookup.Sampler, lookup.View });
 			return bg;
 		}
 	}

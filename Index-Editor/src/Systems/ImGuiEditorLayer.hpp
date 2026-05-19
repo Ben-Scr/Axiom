@@ -92,6 +92,13 @@ namespace Index {
 		void RenderInspectorPanel(Scene& scene);
 		void RenderEditorView(Scene& scene);
 		void RenderGameView(Scene& scene);
+		// Editor-only particle preview tick. Runs once per frame from
+		// OnPreRender so the simulation keeps advancing while the user
+		// switches between the Editor View and Game View tabs — the
+		// in-viewport Play / Pause / Stop overlay is the only thing
+		// that gates emission/simulation. No-op in play mode (the
+		// ParticleUpdateSystem owns ticking there).
+		void TickParticlePreview(Scene& scene);
 		void RenderLogPanel();
 		void RenderProjectPanel();
 		void RenderBuildPanel();

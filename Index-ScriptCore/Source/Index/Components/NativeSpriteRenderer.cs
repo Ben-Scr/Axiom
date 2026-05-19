@@ -8,7 +8,7 @@ namespace Index.Components;
 // Entity.GetRef<NativeSpriteRenderer>() / scene.QueryRef<...>.
 //
 // Layout MUST match Index-Engine/src/Components/Graphics/SpriteRendererComponent.hpp.
-// Total size = 32 bytes (verified by Entity_GetComponentSize at script host init).
+// Total size = 40 bytes (verified by Entity_GetComponentSize at script host init).
 //
 // Field offsets (Windows x64, MSVC natural alignment):
 //   00: short SortingOrder
@@ -17,7 +17,9 @@ namespace Index.Components;
 //   04: TextureHandle (2 × uint16)
 //   08: ulong TextureAssetId (UUID)
 //   16: Color (4 × float)
-//   32: struct end (8-byte alignment from UUID)
+//   32: int  FilterMode (TextureFilter enum, 4 bytes)
+//   36: 4-byte tail pad (struct rounded up to UUID's 8-byte alignment)
+//   40: struct end
 //
 // The texture is identified two ways:
 //   - `TextureAssetId` (UUID) is the persistent identity that survives scene
@@ -33,9 +35,12 @@ public struct NativeSpriteRenderer : IComponent
     // object-initializer syntax like `new NativeSpriteRenderer { SortingOrder = 1 }`)
     // triggers the field initializers below. WARNING: C# language rule —
     // `default(NativeSpriteRenderer)` and uninitialized struct declarations
-    // still produce a zero-init value where Color = (0,0,0,0). Callers using
-    // EntityCommandBuffer should prefer `new NativeSpriteRenderer { ... }`
-    // so the renderer doesn't paint sprites as fully transparent black.
+    // still produce a zero-init value where Color = (0,0,0,0). This trap is
+    // real for any direct `ecb.AddComponent<NativeSpriteRenderer>(e, default)`
+    // call. The `ecb.CreateEntityWith<..., NativeSpriteRenderer>()` family is
+    // safe — it records a payload-free Ecb_DefaultConstructComponent op so
+    // the C++ member-initializers fire on the native side and the renderer
+    // paints sprites white, not transparent black.
     public NativeSpriteRenderer() { }
 
     public short SortingOrder;
@@ -44,10 +49,16 @@ public struct NativeSpriteRenderer : IComponent
 
     public TextureHandle TextureHandle;
     public ulong         TextureAssetId;
-    // Mirror of SpriteRendererComponent.hpp:15 `Color{1.0f, 1.0f, 1.0f, 1.0f}` —
+    // Mirror of SpriteRendererComponent.hpp `Color{1.0f, 1.0f, 1.0f, 1.0f}` —
     // matches the C++ default so freshly-created sprites are white-tinted
     // rather than transparent black.
     public Color         Color = new(1f, 1f, 1f, 1f);
+    // Mirror of SpriteRendererComponent.hpp `FilterMode{ Filter::Bilinear }`.
+    // Writing this field directly only mutates the per-entity setting; to
+    // actually rebuild the texture sampler use the managed SpriteRenderer
+    // wrapper's FilterMode property (which routes through the inspector
+    // setter so Texture2D::SetFilter is called).
+    public TextureFilter FilterMode = TextureFilter.Bilinear;
 
     internal const string NativeName = "Sprite Renderer";
 }

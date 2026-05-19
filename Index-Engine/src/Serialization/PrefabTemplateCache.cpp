@@ -121,6 +121,8 @@ namespace Index {
 		const std::type_index metaComponentTypeIndex = typeid(EntityMetaDataComponent);
 
 		for (uint32_t i = 0; i < entityCount; ++i) {
+			if (!tmpl->bakeable) break;  // see post-loop reset; no point walking further
+
 			EntityHandle h = ordered[i].first;
 			PrefabTemplate::EntitySlot& slot = tmpl->entities[i];
 			slot.parentIndex = ordered[i].second;
@@ -145,7 +147,10 @@ namespace Index {
 						tmpl->bakeable = false;
 						tmpl->unbakeableReason = "component '" +
 							(info.serializedName.empty() ? info.displayName : info.serializedName) +
-							"' has no writeBytes callback or stable type id; cannot bake";
+							"' has no writeBytes callback or stable type id; cannot bake "
+							"(component is not trivially-destructible — register a custom "
+							"writeBytes/emplaceFromBytes that handles its heap-owned state, "
+							"or accept the slow-path prefab spawn for this prefab)";
 						return;
 					}
 
@@ -168,6 +173,13 @@ namespace Index {
 		}
 
 		if (!tmpl->bakeable) {
+			// Drop the partial bake — Hydrate gates on `bakeable` so these
+			// bytes would never be replayed, and they pin the heap for the
+			// lifetime of the cache entry. Reset to the minimal "unbakeable
+			// marker" form the contract describes.
+			tmpl->entities.clear();
+			tmpl->components.clear();
+			tmpl->payloadBlob.clear();
 			IDX_CORE_WARN_TAG("PrefabTemplateCache",
 				"Marking prefab {} as unbakeable: {}", prefabGuid, tmpl->unbakeableReason);
 		}

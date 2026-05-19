@@ -189,28 +189,53 @@ public sealed partial class EntityCommandBuffer
 
         // ── CreateEntityWith / CreateEntitiesWith ────────────────────
         //
-        // Per-worker mirror of the main ECB overloads. Each call routes
-        // through the calling thread's WorkerSlot via the existing
-        // CreateEntity / AddComponent on this struct, so thread-safety
-        // and entity-index locality are inherited from those primitives.
+        // Per-worker mirror of the main ECB overloads. Each call records a
+        // payload-free Ecb_DefaultConstructComponent op against the calling
+        // thread's WorkerSlot, so the native playback default-constructs
+        // each component from C++ (preserving Transform2D Scale = (1,1),
+        // SpriteRenderer Color = white). Thread-safety and entity-index
+        // locality are inherited from CreateEntity on this struct.
         //
         // Native IComponent only — the parent ECB never records managed
         // Component subclasses.
 
+        // Records an Ecb_DefaultConstructComponent op against `e` on the
+        // calling thread's worker slot. Same wire format as the main ECB's
+        // helper — payload-free, 11-byte prefix.
+        private void RecordDefaultConstruct<T>(EntityRef e) where T : unmanaged, IComponent
+        {
+            WorkerSlot slot = m_Parent.GetOrCreateSlotForCurrentThread();
+            if (e.Index >= slot.EntityCount)
+            {
+                throw new ArgumentException(
+                    $"EntityRef index {e.Index} is out of range for this worker slot " +
+                    $"(thread {slot.ManagedThreadId} entityCount = {slot.EntityCount}). " +
+                    "Did you pass an EntityRef across worker threads, or call CreateEntity on a different ECB?",
+                    nameof(e));
+            }
+
+            EcbWire.WriteDefaultConstructRecord(
+                ref slot.Commands,
+                ref slot.CommandsLen,
+                ref slot.CommandCount,
+                e.Index,
+                ComponentTypes<T>.NativeId);
+        }
+
         /// <summary>
-        /// Records a single entity with one default-initialized component
+        /// Records a single entity with one default-constructed component
         /// in the calling thread's sub-buffer.
         /// </summary>
         public EntityRef CreateEntityWith<T1>()
             where T1 : unmanaged, IComponent
         {
             EntityRef e = CreateEntity();
-            AddComponent<T1>(e, default);
+            RecordDefaultConstruct<T1>(e);
             return e;
         }
 
         /// <summary>
-        /// Records a single entity with two default-initialized components
+        /// Records a single entity with two default-constructed components
         /// in the calling thread's sub-buffer.
         /// </summary>
         public EntityRef CreateEntityWith<T1, T2>()
@@ -218,13 +243,13 @@ public sealed partial class EntityCommandBuffer
             where T2 : unmanaged, IComponent
         {
             EntityRef e = CreateEntity();
-            AddComponent<T1>(e, default);
-            AddComponent<T2>(e, default);
+            RecordDefaultConstruct<T1>(e);
+            RecordDefaultConstruct<T2>(e);
             return e;
         }
 
         /// <summary>
-        /// Records a single entity with three default-initialized components
+        /// Records a single entity with three default-constructed components
         /// in the calling thread's sub-buffer.
         /// </summary>
         public EntityRef CreateEntityWith<T1, T2, T3>()
@@ -233,14 +258,14 @@ public sealed partial class EntityCommandBuffer
             where T3 : unmanaged, IComponent
         {
             EntityRef e = CreateEntity();
-            AddComponent<T1>(e, default);
-            AddComponent<T2>(e, default);
-            AddComponent<T3>(e, default);
+            RecordDefaultConstruct<T1>(e);
+            RecordDefaultConstruct<T2>(e);
+            RecordDefaultConstruct<T3>(e);
             return e;
         }
 
         /// <summary>
-        /// Records a single entity with four default-initialized components
+        /// Records a single entity with four default-constructed components
         /// in the calling thread's sub-buffer.
         /// </summary>
         public EntityRef CreateEntityWith<T1, T2, T3, T4>()
@@ -250,15 +275,15 @@ public sealed partial class EntityCommandBuffer
             where T4 : unmanaged, IComponent
         {
             EntityRef e = CreateEntity();
-            AddComponent<T1>(e, default);
-            AddComponent<T2>(e, default);
-            AddComponent<T3>(e, default);
-            AddComponent<T4>(e, default);
+            RecordDefaultConstruct<T1>(e);
+            RecordDefaultConstruct<T2>(e);
+            RecordDefaultConstruct<T3>(e);
+            RecordDefaultConstruct<T4>(e);
             return e;
         }
 
         /// <summary>
-        /// Records a single entity with five default-initialized components
+        /// Records a single entity with five default-constructed components
         /// in the calling thread's sub-buffer.
         /// </summary>
         public EntityRef CreateEntityWith<T1, T2, T3, T4, T5>()
@@ -269,16 +294,16 @@ public sealed partial class EntityCommandBuffer
             where T5 : unmanaged, IComponent
         {
             EntityRef e = CreateEntity();
-            AddComponent<T1>(e, default);
-            AddComponent<T2>(e, default);
-            AddComponent<T3>(e, default);
-            AddComponent<T4>(e, default);
-            AddComponent<T5>(e, default);
+            RecordDefaultConstruct<T1>(e);
+            RecordDefaultConstruct<T2>(e);
+            RecordDefaultConstruct<T3>(e);
+            RecordDefaultConstruct<T4>(e);
+            RecordDefaultConstruct<T5>(e);
             return e;
         }
 
         /// <summary>
-        /// Records a single entity with six default-initialized components
+        /// Records a single entity with six default-constructed components
         /// in the calling thread's sub-buffer.
         /// </summary>
         public EntityRef CreateEntityWith<T1, T2, T3, T4, T5, T6>()
@@ -290,17 +315,17 @@ public sealed partial class EntityCommandBuffer
             where T6 : unmanaged, IComponent
         {
             EntityRef e = CreateEntity();
-            AddComponent<T1>(e, default);
-            AddComponent<T2>(e, default);
-            AddComponent<T3>(e, default);
-            AddComponent<T4>(e, default);
-            AddComponent<T5>(e, default);
-            AddComponent<T6>(e, default);
+            RecordDefaultConstruct<T1>(e);
+            RecordDefaultConstruct<T2>(e);
+            RecordDefaultConstruct<T3>(e);
+            RecordDefaultConstruct<T4>(e);
+            RecordDefaultConstruct<T5>(e);
+            RecordDefaultConstruct<T6>(e);
             return e;
         }
 
         /// <summary>
-        /// Records a single entity with seven default-initialized components
+        /// Records a single entity with seven default-constructed components
         /// in the calling thread's sub-buffer.
         /// </summary>
         public EntityRef CreateEntityWith<T1, T2, T3, T4, T5, T6, T7>()
@@ -313,18 +338,18 @@ public sealed partial class EntityCommandBuffer
             where T7 : unmanaged, IComponent
         {
             EntityRef e = CreateEntity();
-            AddComponent<T1>(e, default);
-            AddComponent<T2>(e, default);
-            AddComponent<T3>(e, default);
-            AddComponent<T4>(e, default);
-            AddComponent<T5>(e, default);
-            AddComponent<T6>(e, default);
-            AddComponent<T7>(e, default);
+            RecordDefaultConstruct<T1>(e);
+            RecordDefaultConstruct<T2>(e);
+            RecordDefaultConstruct<T3>(e);
+            RecordDefaultConstruct<T4>(e);
+            RecordDefaultConstruct<T5>(e);
+            RecordDefaultConstruct<T6>(e);
+            RecordDefaultConstruct<T7>(e);
             return e;
         }
 
         /// <summary>
-        /// Records a single entity with eight default-initialized components
+        /// Records a single entity with eight default-constructed components
         /// in the calling thread's sub-buffer.
         /// </summary>
         public EntityRef CreateEntityWith<T1, T2, T3, T4, T5, T6, T7, T8>()
@@ -338,20 +363,20 @@ public sealed partial class EntityCommandBuffer
             where T8 : unmanaged, IComponent
         {
             EntityRef e = CreateEntity();
-            AddComponent<T1>(e, default);
-            AddComponent<T2>(e, default);
-            AddComponent<T3>(e, default);
-            AddComponent<T4>(e, default);
-            AddComponent<T5>(e, default);
-            AddComponent<T6>(e, default);
-            AddComponent<T7>(e, default);
-            AddComponent<T8>(e, default);
+            RecordDefaultConstruct<T1>(e);
+            RecordDefaultConstruct<T2>(e);
+            RecordDefaultConstruct<T3>(e);
+            RecordDefaultConstruct<T4>(e);
+            RecordDefaultConstruct<T5>(e);
+            RecordDefaultConstruct<T6>(e);
+            RecordDefaultConstruct<T7>(e);
+            RecordDefaultConstruct<T8>(e);
             return e;
         }
 
         /// <summary>
         /// Records <paramref name="length"/> entities into the calling
-        /// thread's sub-buffer, each with one default-initialized
+        /// thread's sub-buffer, each with one default-constructed
         /// component. The created entities' refs are written into
         /// <paramref name="output"/> in creation order; the index values
         /// are local to this worker slot and are remapped into the
@@ -366,14 +391,14 @@ public sealed partial class EntityCommandBuffer
             for (int i = 0; i < length; i++)
             {
                 EntityRef e = CreateEntity();
-                AddComponent<T1>(e, default);
+                RecordDefaultConstruct<T1>(e);
                 output[i] = e;
             }
         }
 
         /// <summary>
         /// Records <paramref name="length"/> entities into the calling
-        /// thread's sub-buffer, each with two default-initialized components.
+        /// thread's sub-buffer, each with two default-constructed components.
         /// See <see cref="CreateEntitiesWith{T1}(int, Span{EntityRef})"/>
         /// for the <paramref name="output"/> contract.
         /// </summary>
@@ -385,15 +410,15 @@ public sealed partial class EntityCommandBuffer
             for (int i = 0; i < length; i++)
             {
                 EntityRef e = CreateEntity();
-                AddComponent<T1>(e, default);
-                AddComponent<T2>(e, default);
+                RecordDefaultConstruct<T1>(e);
+                RecordDefaultConstruct<T2>(e);
                 output[i] = e;
             }
         }
 
         /// <summary>
         /// Records <paramref name="length"/> entities into the calling
-        /// thread's sub-buffer, each with three default-initialized components.
+        /// thread's sub-buffer, each with three default-constructed components.
         /// See <see cref="CreateEntitiesWith{T1}(int, Span{EntityRef})"/>
         /// for the <paramref name="output"/> contract.
         /// </summary>
@@ -406,16 +431,16 @@ public sealed partial class EntityCommandBuffer
             for (int i = 0; i < length; i++)
             {
                 EntityRef e = CreateEntity();
-                AddComponent<T1>(e, default);
-                AddComponent<T2>(e, default);
-                AddComponent<T3>(e, default);
+                RecordDefaultConstruct<T1>(e);
+                RecordDefaultConstruct<T2>(e);
+                RecordDefaultConstruct<T3>(e);
                 output[i] = e;
             }
         }
 
         /// <summary>
         /// Records <paramref name="length"/> entities into the calling
-        /// thread's sub-buffer, each with four default-initialized components.
+        /// thread's sub-buffer, each with four default-constructed components.
         /// See <see cref="CreateEntitiesWith{T1}(int, Span{EntityRef})"/>
         /// for the <paramref name="output"/> contract.
         /// </summary>
@@ -429,17 +454,17 @@ public sealed partial class EntityCommandBuffer
             for (int i = 0; i < length; i++)
             {
                 EntityRef e = CreateEntity();
-                AddComponent<T1>(e, default);
-                AddComponent<T2>(e, default);
-                AddComponent<T3>(e, default);
-                AddComponent<T4>(e, default);
+                RecordDefaultConstruct<T1>(e);
+                RecordDefaultConstruct<T2>(e);
+                RecordDefaultConstruct<T3>(e);
+                RecordDefaultConstruct<T4>(e);
                 output[i] = e;
             }
         }
 
         /// <summary>
         /// Records <paramref name="length"/> entities into the calling
-        /// thread's sub-buffer, each with five default-initialized components.
+        /// thread's sub-buffer, each with five default-constructed components.
         /// See <see cref="CreateEntitiesWith{T1}(int, Span{EntityRef})"/>
         /// for the <paramref name="output"/> contract.
         /// </summary>
@@ -454,18 +479,18 @@ public sealed partial class EntityCommandBuffer
             for (int i = 0; i < length; i++)
             {
                 EntityRef e = CreateEntity();
-                AddComponent<T1>(e, default);
-                AddComponent<T2>(e, default);
-                AddComponent<T3>(e, default);
-                AddComponent<T4>(e, default);
-                AddComponent<T5>(e, default);
+                RecordDefaultConstruct<T1>(e);
+                RecordDefaultConstruct<T2>(e);
+                RecordDefaultConstruct<T3>(e);
+                RecordDefaultConstruct<T4>(e);
+                RecordDefaultConstruct<T5>(e);
                 output[i] = e;
             }
         }
 
         /// <summary>
         /// Records <paramref name="length"/> entities into the calling
-        /// thread's sub-buffer, each with six default-initialized components.
+        /// thread's sub-buffer, each with six default-constructed components.
         /// See <see cref="CreateEntitiesWith{T1}(int, Span{EntityRef})"/>
         /// for the <paramref name="output"/> contract.
         /// </summary>
@@ -481,19 +506,19 @@ public sealed partial class EntityCommandBuffer
             for (int i = 0; i < length; i++)
             {
                 EntityRef e = CreateEntity();
-                AddComponent<T1>(e, default);
-                AddComponent<T2>(e, default);
-                AddComponent<T3>(e, default);
-                AddComponent<T4>(e, default);
-                AddComponent<T5>(e, default);
-                AddComponent<T6>(e, default);
+                RecordDefaultConstruct<T1>(e);
+                RecordDefaultConstruct<T2>(e);
+                RecordDefaultConstruct<T3>(e);
+                RecordDefaultConstruct<T4>(e);
+                RecordDefaultConstruct<T5>(e);
+                RecordDefaultConstruct<T6>(e);
                 output[i] = e;
             }
         }
 
         /// <summary>
         /// Records <paramref name="length"/> entities into the calling
-        /// thread's sub-buffer, each with seven default-initialized components.
+        /// thread's sub-buffer, each with seven default-constructed components.
         /// See <see cref="CreateEntitiesWith{T1}(int, Span{EntityRef})"/>
         /// for the <paramref name="output"/> contract.
         /// </summary>
@@ -510,20 +535,20 @@ public sealed partial class EntityCommandBuffer
             for (int i = 0; i < length; i++)
             {
                 EntityRef e = CreateEntity();
-                AddComponent<T1>(e, default);
-                AddComponent<T2>(e, default);
-                AddComponent<T3>(e, default);
-                AddComponent<T4>(e, default);
-                AddComponent<T5>(e, default);
-                AddComponent<T6>(e, default);
-                AddComponent<T7>(e, default);
+                RecordDefaultConstruct<T1>(e);
+                RecordDefaultConstruct<T2>(e);
+                RecordDefaultConstruct<T3>(e);
+                RecordDefaultConstruct<T4>(e);
+                RecordDefaultConstruct<T5>(e);
+                RecordDefaultConstruct<T6>(e);
+                RecordDefaultConstruct<T7>(e);
                 output[i] = e;
             }
         }
 
         /// <summary>
         /// Records <paramref name="length"/> entities into the calling
-        /// thread's sub-buffer, each with eight default-initialized components.
+        /// thread's sub-buffer, each with eight default-constructed components.
         /// See <see cref="CreateEntitiesWith{T1}(int, Span{EntityRef})"/>
         /// for the <paramref name="output"/> contract.
         /// </summary>
@@ -541,14 +566,14 @@ public sealed partial class EntityCommandBuffer
             for (int i = 0; i < length; i++)
             {
                 EntityRef e = CreateEntity();
-                AddComponent<T1>(e, default);
-                AddComponent<T2>(e, default);
-                AddComponent<T3>(e, default);
-                AddComponent<T4>(e, default);
-                AddComponent<T5>(e, default);
-                AddComponent<T6>(e, default);
-                AddComponent<T7>(e, default);
-                AddComponent<T8>(e, default);
+                RecordDefaultConstruct<T1>(e);
+                RecordDefaultConstruct<T2>(e);
+                RecordDefaultConstruct<T3>(e);
+                RecordDefaultConstruct<T4>(e);
+                RecordDefaultConstruct<T5>(e);
+                RecordDefaultConstruct<T6>(e);
+                RecordDefaultConstruct<T7>(e);
+                RecordDefaultConstruct<T8>(e);
                 output[i] = e;
             }
         }

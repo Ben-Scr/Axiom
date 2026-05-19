@@ -399,7 +399,8 @@ namespace Index {
 		}
 
 		ImGuiUtils::CenterNextModal();
-		if (ImGui::BeginPopupModal("Save Layout As", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+		if (ImGui::BeginPopupModal("Save Layout As", nullptr,
+			ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings)) {
 			ImGui::TextUnformatted("Save current editor layout as preset:");
 			ImGui::Spacing();
 			ImGui::SetNextItemWidth(320);
@@ -438,7 +439,8 @@ namespace Index {
 		}
 
 		ImGuiUtils::CenterNextModal();
-		if (ImGui::BeginPopupModal("Delete Layout", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+		if (ImGui::BeginPopupModal("Delete Layout", nullptr,
+			ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings)) {
 			ImGui::Text("Delete layout preset '%s'?", m_PendingDeleteLayoutName.c_str());
 			ImGui::TextDisabled("This cannot be undone.");
 			ImGui::Spacing();

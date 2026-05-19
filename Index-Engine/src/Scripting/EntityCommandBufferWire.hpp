@@ -62,6 +62,27 @@ namespace Index {
 		// works without per-opcode branching — it rewrites the u32
 		// entityIndex blindly and copies the payload through.
 		Ecb_InstantiatePrefab = 3,
+
+		// Add a component using its C++ default constructor. The record
+		// carries NO payload — the native playback dispatches through
+		// `ComponentInfo::defaultEmplace`, which calls
+		// `registry.emplace<T>(handle)` so the C++ member-initializers fire
+		// (e.g. Transform2DComponent::Scale{1,1}, SpriteRendererComponent::
+		// Color{1,1,1,1}). This is what `EntityCommandBuffer.CreateEntityWith`
+		// emits — `default(T)` on the C# side is zero-init, so memcpy'ing
+		// it through Ecb_AddComponent would silently overwrite the engine
+		// defaults.
+		//
+		// Record layout:
+		//   u8  opcode      = 4
+		//   u32 entityIndex = ECB-local index of the target slot
+		//   u32 typeIdU32   = component to default-construct
+		//   u16 payloadSize = 0
+		//   (no payload bytes)
+		//
+		// The fixed 11-byte prefix matches every other opcode so the
+		// merge-and-remap walker stays opcode-agnostic.
+		Ecb_DefaultConstructComponent = 4,
 	};
 
 	// Sentinel "no name" in the entity table.

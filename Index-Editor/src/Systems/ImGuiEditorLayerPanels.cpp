@@ -1436,6 +1436,23 @@ namespace Index {
 					}
 				}
 
+				// First-open default: if the user hasn't explicitly chosen a
+				// profile, preselect the first Windows-platform profile on
+				// disk so Build targets the host platform without forcing a
+				// manual pick. Project creation seeds a "Windows" profile
+				// (IndexBuildProfile::WriteDefaultProfiles), so this normally
+				// resolves to that. If no Windows profile exists we leave the
+				// selection empty rather than silently target Linux.
+				if (project->ActiveBuildProfileName.empty()) {
+					for (const auto& p : diskProfiles) {
+						if (p.Platform == BuildPlatform::Windows) {
+							project->ActiveBuildProfileName = p.Name;
+							project->Save();
+							break;
+						}
+					}
+				}
+
 				ImGui::TextUnformatted("Active Profile:");
 				ImGui::SetNextItemWidth(-1);
 				const char* previewLabel = project->ActiveBuildProfileName.empty()
@@ -1972,12 +1989,17 @@ namespace Index {
 
 		// Render-backend restart modal. Stays in the Graphics helper so the
 		// function-static popup state remains scoped here.
+		// NoSavedSettings + CenterNextModal keeps the popup centered every
+		// time it appears — without NoSavedSettings, a stale Pos= entry in
+		// imgui.ini would override the Appearing-condition center and pin
+		// the dialog to whatever spot it was last seen at.
 		if (s_RenderBackendChangePopup) {
 			ImGui::OpenPopup("Restart Renderer?");
 			s_RenderBackendChangePopup = false;
 		}
 		ImGuiUtils::CenterNextModal();
-		if (ImGui::BeginPopupModal("Restart Renderer?", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+		if (ImGui::BeginPopupModal("Restart Renderer?", nullptr,
+			ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings)) {
 			ImGui::TextWrapped(
 				"Changing the rendering API from %s to %s requires the renderer to be reinitialized.",
 				RenderBackendLabel(project.ActiveRenderBackend),
@@ -2550,7 +2572,8 @@ namespace Index {
 			// WriteIndexEntityBitsConfigHeader in the root premake5.lua;
 			// the two paths converge on the same header content.
 			ImGuiUtils::CenterNextModal();
-			if (ImGui::BeginPopupModal("Rebuild Engine?", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+			if (ImGui::BeginPopupModal("Rebuild Engine?", nullptr,
+				ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings)) {
 				ImGui::TextWrapped(
 					"Rebuild the engine with entityBits = %d?\n\n"
 					"The editor will close and a console window will open showing the build "
@@ -2572,6 +2595,23 @@ namespace Index {
 					const std::filesystem::path editorExe = editorExeDir / "Index-Editor.exe";
 					const std::string config = IndexProject::GetActiveBuildConfiguration();
 					const std::string projectRootDir = project.RootDirectory;
+					const std::string userCsprojPath = project.CsprojPath;
+					// User-DLL must be scanned regardless of which project type is loaded
+					// (default Sandbox vs. user-created project). Codegen is decoupled from
+					// any csproj-side <Target> so it works the same for every project layout.
+					const std::string userAssemblyDllPath = project.GetUserAssemblyOutputPath();
+					const std::filesystem::path codegenCsprojPath =
+						engineRoot / "Index-ComponentCodegen" / "Index-ComponentCodegen.csproj";
+					const std::filesystem::path codegenToolDllPath =
+						engineRoot / "Index-ComponentCodegen" / "bin" / config / "net9.0"
+						/ "Index-ComponentCodegen.dll";
+					// Generated TU now lives in the per-project sidecar
+					// (Index-GameComponents.dll), not inside the engine
+					// DLL. The engine's CodegenSidecarLoader picks it up
+					// at runtime via LoadLibrary — see
+					// Index-Engine/src/Scene/CodegenSidecarLoader.cpp.
+					const std::filesystem::path generatedCppPath =
+						engineRoot / "Index-GameComponents" / "src" / "CodegenComponents.cpp";
 					const int newEntityBits = project.EntityBits;
 
 					// Editor PID for the spawned script's wait loop. The
@@ -2661,7 +2701,47 @@ namespace Index {
 							"goto wait_loop\r\n"
 							":wait_done\r\n"
 							"echo.\r\n"
-							"echo [1/2] Building solution (this is the long step)...\r\n"
+							"echo [1/4] Building user scripts (dotnet build)...\r\n"
+							"echo.\r\n"
+							"dotnet build \"" << userCsprojPath << "\""
+							" -c " << config <<
+							" --nologo -v q\r\n"
+							"if errorlevel 1 (\r\n"
+							"  echo.\r\n"
+							"  echo *** User script build FAILED. C# errors above. ***\r\n"
+							"  echo.\r\n"
+							"  pause\r\n"
+							"  exit /b 1\r\n"
+							")\r\n"
+							"echo.\r\n"
+							"echo [2/4] Building component codegen tool...\r\n"
+							"echo.\r\n"
+							"dotnet build \"" << codegenCsprojPath.string() << "\""
+							" -c " << config <<
+							" --nologo -v q\r\n"
+							"if errorlevel 1 (\r\n"
+							"  echo.\r\n"
+							"  echo *** Component codegen tool build FAILED. ***\r\n"
+							"  echo.\r\n"
+							"  pause\r\n"
+							"  exit /b 1\r\n"
+							")\r\n"
+							"echo.\r\n"
+							"echo [3/4] Regenerating C++ components from user assembly...\r\n"
+							"echo.\r\n"
+							"dotnet \"" << codegenToolDllPath.string() << "\""
+							" --input \"" << userAssemblyDllPath << "\""
+							" --output \"" << generatedCppPath.string() << "\""
+							" --verbose\r\n"
+							"if errorlevel 1 (\r\n"
+							"  echo.\r\n"
+							"  echo *** Codegen FAILED. Component shape errors above. ***\r\n"
+							"  echo.\r\n"
+							"  pause\r\n"
+							"  exit /b 1\r\n"
+							")\r\n"
+							"echo.\r\n"
+							"echo [4/4] Building solution (this is the long step)...\r\n"
 							"echo.\r\n"
 							"pushd \"" << engineRoot.string() << "\"\r\n"
 							"\"" << msbuildPath << "\" \"" << slnPath.string() << "\""
@@ -2676,7 +2756,7 @@ namespace Index {
 							")\r\n"
 							"popd\r\n"
 							"echo.\r\n"
-							"echo [2/2] Relaunching editor...\r\n"
+							"echo [Relaunching editor...]\r\n"
 							"echo.\r\n"
 							"start \"\" \"" << editorExe.string() << "\" --project=\"" << projectRootDir << "\"\r\n"
 							"endlocal\r\n"

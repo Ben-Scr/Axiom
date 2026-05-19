@@ -485,6 +485,40 @@ namespace Index {
 		Gizmo::SetLineWidth(previousLineWidth);
 	}
 
+	void ImGuiEditorLayer::TickParticlePreview(Scene& scene) {
+		// Editor-only preview path. In play mode the ParticleUpdateSystem
+		// owns the per-frame tick across every ParticleSystem2DComponent,
+		// so bailing here avoids a double-step on the selected entity.
+		if (Application::GetIsPlaying()) {
+			return;
+		}
+
+		// Mirror RenderEditorView's prefab-edit override so the preview
+		// targets the detached prefab scene when one is being edited and
+		// never leaks ticks back onto the main scene's components.
+		Scene* renderScene = IsInPrefabEditMode() ? m_PrefabEditScene.get() : &scene;
+		if (!renderScene) {
+			return;
+		}
+		if (m_SelectedEntity == entt::null
+			|| !renderScene->IsValid(m_SelectedEntity)
+			|| !renderScene->HasComponent<ParticleSystem2DComponent>(m_SelectedEntity))
+		{
+			return;
+		}
+
+		auto& particleSystem = renderScene->GetComponent<ParticleSystem2DComponent>(m_SelectedEntity);
+		if (!particleSystem.IsEmitting() && !particleSystem.IsSimulating()) {
+			return;
+		}
+
+		// Unscaled dt: editor preview ignores TimeScale so designers see
+		// the effect at its authored cadence regardless of debug slow-mo.
+		auto* app = Application::GetInstance();
+		const float dt = app ? app->GetTime().GetDeltaTimeUnscaled() : 0.0f;
+		particleSystem.PreviewUpdate(dt);
+	}
+
 	void ImGuiEditorLayer::RenderEditorView(Scene& scene) {
 		m_IsEditorViewActive = ImGui::Begin("Editor View");
 
@@ -575,18 +609,6 @@ namespace Index {
 					m_EditorCamera.Update(dt, m_IsEditorViewHovered, mouseDelta, scroll);
 				}
 
-				if (!Application::GetIsPlaying()
-					&& m_SelectedEntity != entt::null
-					&& renderScene->IsValid(m_SelectedEntity)
-					&& renderScene->HasComponent<ParticleSystem2DComponent>(m_SelectedEntity))
-				{
-					auto& particleSystem = renderScene->GetComponent<ParticleSystem2DComponent>(m_SelectedEntity);
-					if (particleSystem.IsEmitting() || particleSystem.IsSimulating()) {
-						const float dt = app ? app->GetTime().GetDeltaTimeUnscaled() : 0.0f;
-						particleSystem.PreviewUpdate(dt);
-					}
-				}
-
 				glm::mat4 vp = m_EditorCamera.GetViewProjectionMatrix();
 				AABB viewAABB = m_EditorCamera.GetViewportAABB();
 				Gizmo::SetViewportAABBOverride(viewAABB);
@@ -623,7 +645,10 @@ namespace Index {
 						ImGuiWindowFlags_NoMove |
 						ImGuiWindowFlags_NoSavedSettings |
 						ImGuiWindowFlags_NoDocking |
-						ImGuiWindowFlags_AlwaysAutoResize;
+						ImGuiWindowFlags_AlwaysAutoResize |
+						ImGuiWindowFlags_NoFocusOnAppearing |
+						ImGuiWindowFlags_NoBringToFrontOnFocus |
+						ImGuiWindowFlags_NoNav;
 					ImGui::SetNextWindowPos(
 						ImVec2(imageTopLeft.x + viewportSize.x - 12.0f, imageTopLeft.y + viewportSize.y - 12.0f),
 						ImGuiCond_Always,

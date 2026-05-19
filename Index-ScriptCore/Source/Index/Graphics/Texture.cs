@@ -3,6 +3,19 @@ using Index.Interop;
 
 namespace Index;
 
+// Sampler filter mode mirrored from `Index-Engine/src/Graphics/Filter.hpp`.
+// Underlying type MUST stay int — the native `enum class Filter` has no
+// explicit underlying type, so MSVC picks int (4 bytes), and the blittable
+// `NativeSpriteRenderer.FilterMode` / `NativeImage.FilterMode` layouts
+// depend on the 4-byte size matching.
+public enum TextureFilter
+{
+    Point = 0,
+    Bilinear = 1,
+    Trilinear = 2,
+    Anisotropic = 3,
+}
+
 // Engine-shipped fallback / primitive textures. Every entry here resolves
 // to a file under `<IndexAssets>/Textures/Default/` that the engine loads
 // at startup and keeps in TextureManager's reserved 0–8 slots — so e.g.

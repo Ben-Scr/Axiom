@@ -240,7 +240,17 @@ namespace Index {
 			// CreateBindGroup twice per texture. LastClearFrameCount tracks
 			// when we last invalidated the cache; the per-frame counter
 			// flips on Application::GetTime().GetFrameCount() rolling over.
-			std::unordered_map<uint64_t, wgpu::BindGroup> BindGroupsThisFrame;
+			//
+			// CachedBindGroup also stores the sampler/view the bind group
+			// was created against so a mid-frame filter change
+			// (Texture2D::SetFilter rebuilds the GPU sampler) invalidates
+			// the entry instead of replaying a stale bind group.
+			struct CachedBindGroup {
+				wgpu::BindGroup   Group;
+				wgpu::Sampler     Sampler;
+				wgpu::TextureView View;
+			};
+			std::unordered_map<uint64_t, CachedBindGroup> BindGroupsThisFrame;
 			uint64_t LastClearFrameCount = static_cast<uint64_t>(-1);
 			std::vector<WebGPUSpriteResources::SpriteInstance> EncodedScratch;
 		};
@@ -290,11 +300,18 @@ namespace Index {
 			if (!tex || !tex->IsValid()) return nullptr;
 			const uint64_t poolId = tex->GetHandle();
 
-			auto cacheIt = state.BindGroupsThisFrame.find(poolId);
-			if (cacheIt != state.BindGroupsThisFrame.end()) return cacheIt->second;
-
 			const auto lookup = WebGPUBackend::LookupTexture2D(poolId);
 			if (!lookup.Valid || !lookup.View || !lookup.Sampler) return nullptr;
+
+			auto cacheIt = state.BindGroupsThisFrame.find(poolId);
+			if (cacheIt != state.BindGroupsThisFrame.end()) {
+				const auto& cached = cacheIt->second;
+				if (cached.Sampler.Get() == lookup.Sampler.Get()
+					&& cached.View.Get() == lookup.View.Get()) {
+					return cached.Group;
+				}
+				state.BindGroupsThisFrame.erase(cacheIt);
+			}
 
 			wgpu::BindGroupEntry entries[3] = {};
 			entries[0].binding = 0;
@@ -314,7 +331,8 @@ namespace Index {
 
 			wgpu::BindGroup bg = device.CreateBindGroup(&desc);
 			if (!bg) return nullptr;
-			state.BindGroupsThisFrame.emplace(poolId, bg);
+			state.BindGroupsThisFrame.emplace(poolId,
+				GuiRendererWebGPUState::CachedBindGroup{ bg, lookup.Sampler, lookup.View });
 			return bg;
 		}
 

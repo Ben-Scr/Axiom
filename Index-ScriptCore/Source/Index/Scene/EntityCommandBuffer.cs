@@ -265,42 +265,70 @@ public sealed partial class EntityCommandBuffer : IDisposable
     // ── CreateEntityWith / CreateEntitiesWith ────────────────────────
     //
     // Bundle the common "CreateEntity + N×AddComponent(default)" pattern
-    // into one call. Components are recorded with default-initialized
-    // payloads — to set initial values per entity, follow up with
-    // `AddComponent(ref, value)` (which overwrites the prior record's
-    // payload at playback because emplaceFromBytes is last-write-wins
-    // per type on a given entity), or set them in-place via
-    // `GetCreatedEntity(i).GetRef<T>()` after Playback.
+    // into one call. Each component is recorded as a payload-free
+    // Ecb_DefaultConstructComponent op so the native playback calls
+    // `registry.emplace<T>(handle)` and the C++ default-member-initializers
+    // fire (Transform2D Scale = (1,1), SpriteRenderer Color = white). The
+    // managed-side `default(T)` is all-zero bytes and would silently
+    // overwrite those defaults if it traveled through the regular
+    // Ecb_AddComponent path.
+    //
+    // To set initial values per entity, follow CreateEntityWith with an
+    // `AddComponent(ref, value)` for the components you want to override
+    // (last-write-wins per type on a given entity), or set them in-place
+    // via `GetCreatedEntity(i).GetRef<T>()` after Playback.
     //
     // Native IComponent only — the ECB never records managed Component
     // subclasses (those go through `Entity.CreateWith` instead).
 
+    // Records an Ecb_DefaultConstructComponent op against `e` so the native
+    // playback default-constructs T from C++ (preserving engine defaults
+    // like Transform2D Scale = (1,1)). The wire record is 11 bytes — just
+    // the fixed prefix, no payload.
+    private void RecordDefaultConstruct<T>(EntityRef e) where T : unmanaged, IComponent
+    {
+        if (e.Index >= m_EntityCount)
+        {
+            throw new ArgumentException(
+                $"EntityRef index {e.Index} is out of range for this ECB (entityCount = {m_EntityCount}). " +
+                "Did you call CreateEntity on a different ECB?",
+                nameof(e));
+        }
+
+        EcbWire.WriteDefaultConstructRecord(
+            ref m_Commands,
+            ref m_CommandsLen,
+            ref m_CommandCount,
+            e.Index,
+            ComponentTypes<T>.NativeId);
+    }
+
     /// <summary>
-    /// Records a single entity with one default-initialized component.
+    /// Records a single entity with one default-constructed component.
     /// </summary>
     public EntityRef CreateEntityWith<T1>()
         where T1 : unmanaged, IComponent
     {
         EntityRef e = CreateEntity();
-        AddComponent<T1>(e, default);
+        RecordDefaultConstruct<T1>(e);
         return e;
     }
 
     /// <summary>
-    /// Records a single entity with two default-initialized components.
+    /// Records a single entity with two default-constructed components.
     /// </summary>
     public EntityRef CreateEntityWith<T1, T2>()
         where T1 : unmanaged, IComponent
         where T2 : unmanaged, IComponent
     {
         EntityRef e = CreateEntity();
-        AddComponent<T1>(e, default);
-        AddComponent<T2>(e, default);
+        RecordDefaultConstruct<T1>(e);
+        RecordDefaultConstruct<T2>(e);
         return e;
     }
 
     /// <summary>
-    /// Records a single entity with three default-initialized components.
+    /// Records a single entity with three default-constructed components.
     /// </summary>
     public EntityRef CreateEntityWith<T1, T2, T3>()
         where T1 : unmanaged, IComponent
@@ -308,14 +336,14 @@ public sealed partial class EntityCommandBuffer : IDisposable
         where T3 : unmanaged, IComponent
     {
         EntityRef e = CreateEntity();
-        AddComponent<T1>(e, default);
-        AddComponent<T2>(e, default);
-        AddComponent<T3>(e, default);
+        RecordDefaultConstruct<T1>(e);
+        RecordDefaultConstruct<T2>(e);
+        RecordDefaultConstruct<T3>(e);
         return e;
     }
 
     /// <summary>
-    /// Records a single entity with four default-initialized components.
+    /// Records a single entity with four default-constructed components.
     /// </summary>
     public EntityRef CreateEntityWith<T1, T2, T3, T4>()
         where T1 : unmanaged, IComponent
@@ -324,15 +352,15 @@ public sealed partial class EntityCommandBuffer : IDisposable
         where T4 : unmanaged, IComponent
     {
         EntityRef e = CreateEntity();
-        AddComponent<T1>(e, default);
-        AddComponent<T2>(e, default);
-        AddComponent<T3>(e, default);
-        AddComponent<T4>(e, default);
+        RecordDefaultConstruct<T1>(e);
+        RecordDefaultConstruct<T2>(e);
+        RecordDefaultConstruct<T3>(e);
+        RecordDefaultConstruct<T4>(e);
         return e;
     }
 
     /// <summary>
-    /// Records a single entity with five default-initialized components.
+    /// Records a single entity with five default-constructed components.
     /// </summary>
     public EntityRef CreateEntityWith<T1, T2, T3, T4, T5>()
         where T1 : unmanaged, IComponent
@@ -342,16 +370,16 @@ public sealed partial class EntityCommandBuffer : IDisposable
         where T5 : unmanaged, IComponent
     {
         EntityRef e = CreateEntity();
-        AddComponent<T1>(e, default);
-        AddComponent<T2>(e, default);
-        AddComponent<T3>(e, default);
-        AddComponent<T4>(e, default);
-        AddComponent<T5>(e, default);
+        RecordDefaultConstruct<T1>(e);
+        RecordDefaultConstruct<T2>(e);
+        RecordDefaultConstruct<T3>(e);
+        RecordDefaultConstruct<T4>(e);
+        RecordDefaultConstruct<T5>(e);
         return e;
     }
 
     /// <summary>
-    /// Records a single entity with six default-initialized components.
+    /// Records a single entity with six default-constructed components.
     /// </summary>
     public EntityRef CreateEntityWith<T1, T2, T3, T4, T5, T6>()
         where T1 : unmanaged, IComponent
@@ -362,17 +390,17 @@ public sealed partial class EntityCommandBuffer : IDisposable
         where T6 : unmanaged, IComponent
     {
         EntityRef e = CreateEntity();
-        AddComponent<T1>(e, default);
-        AddComponent<T2>(e, default);
-        AddComponent<T3>(e, default);
-        AddComponent<T4>(e, default);
-        AddComponent<T5>(e, default);
-        AddComponent<T6>(e, default);
+        RecordDefaultConstruct<T1>(e);
+        RecordDefaultConstruct<T2>(e);
+        RecordDefaultConstruct<T3>(e);
+        RecordDefaultConstruct<T4>(e);
+        RecordDefaultConstruct<T5>(e);
+        RecordDefaultConstruct<T6>(e);
         return e;
     }
 
     /// <summary>
-    /// Records a single entity with seven default-initialized components.
+    /// Records a single entity with seven default-constructed components.
     /// </summary>
     public EntityRef CreateEntityWith<T1, T2, T3, T4, T5, T6, T7>()
         where T1 : unmanaged, IComponent
@@ -384,18 +412,18 @@ public sealed partial class EntityCommandBuffer : IDisposable
         where T7 : unmanaged, IComponent
     {
         EntityRef e = CreateEntity();
-        AddComponent<T1>(e, default);
-        AddComponent<T2>(e, default);
-        AddComponent<T3>(e, default);
-        AddComponent<T4>(e, default);
-        AddComponent<T5>(e, default);
-        AddComponent<T6>(e, default);
-        AddComponent<T7>(e, default);
+        RecordDefaultConstruct<T1>(e);
+        RecordDefaultConstruct<T2>(e);
+        RecordDefaultConstruct<T3>(e);
+        RecordDefaultConstruct<T4>(e);
+        RecordDefaultConstruct<T5>(e);
+        RecordDefaultConstruct<T6>(e);
+        RecordDefaultConstruct<T7>(e);
         return e;
     }
 
     /// <summary>
-    /// Records a single entity with eight default-initialized components.
+    /// Records a single entity with eight default-constructed components.
     /// </summary>
     public EntityRef CreateEntityWith<T1, T2, T3, T4, T5, T6, T7, T8>()
         where T1 : unmanaged, IComponent
@@ -408,20 +436,20 @@ public sealed partial class EntityCommandBuffer : IDisposable
         where T8 : unmanaged, IComponent
     {
         EntityRef e = CreateEntity();
-        AddComponent<T1>(e, default);
-        AddComponent<T2>(e, default);
-        AddComponent<T3>(e, default);
-        AddComponent<T4>(e, default);
-        AddComponent<T5>(e, default);
-        AddComponent<T6>(e, default);
-        AddComponent<T7>(e, default);
-        AddComponent<T8>(e, default);
+        RecordDefaultConstruct<T1>(e);
+        RecordDefaultConstruct<T2>(e);
+        RecordDefaultConstruct<T3>(e);
+        RecordDefaultConstruct<T4>(e);
+        RecordDefaultConstruct<T5>(e);
+        RecordDefaultConstruct<T6>(e);
+        RecordDefaultConstruct<T7>(e);
+        RecordDefaultConstruct<T8>(e);
         return e;
     }
 
     /// <summary>
     /// Records <paramref name="length"/> entities, each with one
-    /// default-initialized component. The created entities' refs are
+    /// default-constructed component. The created entities' refs are
     /// written into <paramref name="output"/> in creation order, so
     /// <c>output[i].Index</c> is contiguous starting from the current
     /// entity count. <paramref name="output"/> must be at least
@@ -434,14 +462,14 @@ public sealed partial class EntityCommandBuffer : IDisposable
         for (int i = 0; i < length; i++)
         {
             EntityRef e = CreateEntity();
-            AddComponent<T1>(e, default);
+            RecordDefaultConstruct<T1>(e);
             output[i] = e;
         }
     }
 
     /// <summary>
     /// Records <paramref name="length"/> entities, each with two
-    /// default-initialized components. See <see cref="CreateEntitiesWith{T1}(int, Span{EntityRef})"/>
+    /// default-constructed components. See <see cref="CreateEntitiesWith{T1}(int, Span{EntityRef})"/>
     /// for the <paramref name="output"/> contract.
     /// </summary>
     public void CreateEntitiesWith<T1, T2>(int length, Span<EntityRef> output)
@@ -452,15 +480,15 @@ public sealed partial class EntityCommandBuffer : IDisposable
         for (int i = 0; i < length; i++)
         {
             EntityRef e = CreateEntity();
-            AddComponent<T1>(e, default);
-            AddComponent<T2>(e, default);
+            RecordDefaultConstruct<T1>(e);
+            RecordDefaultConstruct<T2>(e);
             output[i] = e;
         }
     }
 
     /// <summary>
     /// Records <paramref name="length"/> entities, each with three
-    /// default-initialized components. See <see cref="CreateEntitiesWith{T1}(int, Span{EntityRef})"/>
+    /// default-constructed components. See <see cref="CreateEntitiesWith{T1}(int, Span{EntityRef})"/>
     /// for the <paramref name="output"/> contract.
     /// </summary>
     public void CreateEntitiesWith<T1, T2, T3>(int length, Span<EntityRef> output)
@@ -472,16 +500,16 @@ public sealed partial class EntityCommandBuffer : IDisposable
         for (int i = 0; i < length; i++)
         {
             EntityRef e = CreateEntity();
-            AddComponent<T1>(e, default);
-            AddComponent<T2>(e, default);
-            AddComponent<T3>(e, default);
+            RecordDefaultConstruct<T1>(e);
+            RecordDefaultConstruct<T2>(e);
+            RecordDefaultConstruct<T3>(e);
             output[i] = e;
         }
     }
 
     /// <summary>
     /// Records <paramref name="length"/> entities, each with four
-    /// default-initialized components. See <see cref="CreateEntitiesWith{T1}(int, Span{EntityRef})"/>
+    /// default-constructed components. See <see cref="CreateEntitiesWith{T1}(int, Span{EntityRef})"/>
     /// for the <paramref name="output"/> contract.
     /// </summary>
     public void CreateEntitiesWith<T1, T2, T3, T4>(int length, Span<EntityRef> output)
@@ -494,17 +522,17 @@ public sealed partial class EntityCommandBuffer : IDisposable
         for (int i = 0; i < length; i++)
         {
             EntityRef e = CreateEntity();
-            AddComponent<T1>(e, default);
-            AddComponent<T2>(e, default);
-            AddComponent<T3>(e, default);
-            AddComponent<T4>(e, default);
+            RecordDefaultConstruct<T1>(e);
+            RecordDefaultConstruct<T2>(e);
+            RecordDefaultConstruct<T3>(e);
+            RecordDefaultConstruct<T4>(e);
             output[i] = e;
         }
     }
 
     /// <summary>
     /// Records <paramref name="length"/> entities, each with five
-    /// default-initialized components. See <see cref="CreateEntitiesWith{T1}(int, Span{EntityRef})"/>
+    /// default-constructed components. See <see cref="CreateEntitiesWith{T1}(int, Span{EntityRef})"/>
     /// for the <paramref name="output"/> contract.
     /// </summary>
     public void CreateEntitiesWith<T1, T2, T3, T4, T5>(int length, Span<EntityRef> output)
@@ -518,18 +546,18 @@ public sealed partial class EntityCommandBuffer : IDisposable
         for (int i = 0; i < length; i++)
         {
             EntityRef e = CreateEntity();
-            AddComponent<T1>(e, default);
-            AddComponent<T2>(e, default);
-            AddComponent<T3>(e, default);
-            AddComponent<T4>(e, default);
-            AddComponent<T5>(e, default);
+            RecordDefaultConstruct<T1>(e);
+            RecordDefaultConstruct<T2>(e);
+            RecordDefaultConstruct<T3>(e);
+            RecordDefaultConstruct<T4>(e);
+            RecordDefaultConstruct<T5>(e);
             output[i] = e;
         }
     }
 
     /// <summary>
     /// Records <paramref name="length"/> entities, each with six
-    /// default-initialized components. See <see cref="CreateEntitiesWith{T1}(int, Span{EntityRef})"/>
+    /// default-constructed components. See <see cref="CreateEntitiesWith{T1}(int, Span{EntityRef})"/>
     /// for the <paramref name="output"/> contract.
     /// </summary>
     public void CreateEntitiesWith<T1, T2, T3, T4, T5, T6>(int length, Span<EntityRef> output)
@@ -544,19 +572,19 @@ public sealed partial class EntityCommandBuffer : IDisposable
         for (int i = 0; i < length; i++)
         {
             EntityRef e = CreateEntity();
-            AddComponent<T1>(e, default);
-            AddComponent<T2>(e, default);
-            AddComponent<T3>(e, default);
-            AddComponent<T4>(e, default);
-            AddComponent<T5>(e, default);
-            AddComponent<T6>(e, default);
+            RecordDefaultConstruct<T1>(e);
+            RecordDefaultConstruct<T2>(e);
+            RecordDefaultConstruct<T3>(e);
+            RecordDefaultConstruct<T4>(e);
+            RecordDefaultConstruct<T5>(e);
+            RecordDefaultConstruct<T6>(e);
             output[i] = e;
         }
     }
 
     /// <summary>
     /// Records <paramref name="length"/> entities, each with seven
-    /// default-initialized components. See <see cref="CreateEntitiesWith{T1}(int, Span{EntityRef})"/>
+    /// default-constructed components. See <see cref="CreateEntitiesWith{T1}(int, Span{EntityRef})"/>
     /// for the <paramref name="output"/> contract.
     /// </summary>
     public void CreateEntitiesWith<T1, T2, T3, T4, T5, T6, T7>(int length, Span<EntityRef> output)
@@ -572,20 +600,20 @@ public sealed partial class EntityCommandBuffer : IDisposable
         for (int i = 0; i < length; i++)
         {
             EntityRef e = CreateEntity();
-            AddComponent<T1>(e, default);
-            AddComponent<T2>(e, default);
-            AddComponent<T3>(e, default);
-            AddComponent<T4>(e, default);
-            AddComponent<T5>(e, default);
-            AddComponent<T6>(e, default);
-            AddComponent<T7>(e, default);
+            RecordDefaultConstruct<T1>(e);
+            RecordDefaultConstruct<T2>(e);
+            RecordDefaultConstruct<T3>(e);
+            RecordDefaultConstruct<T4>(e);
+            RecordDefaultConstruct<T5>(e);
+            RecordDefaultConstruct<T6>(e);
+            RecordDefaultConstruct<T7>(e);
             output[i] = e;
         }
     }
 
     /// <summary>
     /// Records <paramref name="length"/> entities, each with eight
-    /// default-initialized components. See <see cref="CreateEntitiesWith{T1}(int, Span{EntityRef})"/>
+    /// default-constructed components. See <see cref="CreateEntitiesWith{T1}(int, Span{EntityRef})"/>
     /// for the <paramref name="output"/> contract.
     /// </summary>
     public void CreateEntitiesWith<T1, T2, T3, T4, T5, T6, T7, T8>(int length, Span<EntityRef> output)
@@ -602,14 +630,14 @@ public sealed partial class EntityCommandBuffer : IDisposable
         for (int i = 0; i < length; i++)
         {
             EntityRef e = CreateEntity();
-            AddComponent<T1>(e, default);
-            AddComponent<T2>(e, default);
-            AddComponent<T3>(e, default);
-            AddComponent<T4>(e, default);
-            AddComponent<T5>(e, default);
-            AddComponent<T6>(e, default);
-            AddComponent<T7>(e, default);
-            AddComponent<T8>(e, default);
+            RecordDefaultConstruct<T1>(e);
+            RecordDefaultConstruct<T2>(e);
+            RecordDefaultConstruct<T3>(e);
+            RecordDefaultConstruct<T4>(e);
+            RecordDefaultConstruct<T5>(e);
+            RecordDefaultConstruct<T6>(e);
+            RecordDefaultConstruct<T7>(e);
+            RecordDefaultConstruct<T8>(e);
             output[i] = e;
         }
     }
@@ -1042,6 +1070,12 @@ internal static class EcbWire
     // OP_SET_COMPONENT = 2 (reserved on the native side; no managed
     // emitter today — call sites add components via OP_ADD_COMPONENT).
     public const byte OP_INSTANTIATE_PREFAB = 3;
+    // Payload-free "attach this component, default-constructed from C++"
+    // record. Used by CreateEntityWith / CreateEntitiesWith so the engine's
+    // C++ member-initializers (Transform2D Scale = (1,1), SpriteRenderer
+    // Color = white) survive instead of being overwritten by C#'s zero-init
+    // `default(T)`. Native dispatch lives in ScriptBindingsEcb.cpp.
+    public const byte OP_DEFAULT_CONSTRUCT_COMPONENT = 4;
 
     // Sentinel "no name" matching kEcbNoName on the native side.
     public const uint NO_NAME = 0xFFFFFFFFu;
@@ -1082,6 +1116,36 @@ internal static class EcbWire
             {
                 Unsafe.CopyBlockUnaligned(w, payload, payloadSize);
             }
+        }
+
+        commandsLen += recordSize;
+        commandCount++;
+    }
+
+    // Appends one Ecb_DefaultConstructComponent record. No payload —
+    // the native side default-constructs T from the registered
+    // `defaultEmplace` callback. The fixed 11-byte prefix matches
+    // every other opcode, so the merge-and-remap walker
+    // (CopyAndRemapCommands below) handles it without an opcode branch.
+    public static unsafe void WriteDefaultConstructRecord(
+        ref byte[] commands,
+        ref int commandsLen,
+        ref int commandCount,
+        uint entityIndex,
+        uint typeId)
+    {
+        const int recordSize = COMMAND_PREFIX_BYTES;
+        EnsureCapacity(ref commands, commandsLen + recordSize);
+
+        fixed (byte* basePtr = commands)
+        {
+            byte* w = basePtr + commandsLen;
+            *w = OP_DEFAULT_CONSTRUCT_COMPONENT; w += 1;
+            Unsafe.CopyBlockUnaligned(w, &entityIndex, 4); w += 4;
+            Unsafe.CopyBlockUnaligned(w, &typeId, 4); w += 4;
+            // payloadSize = 0 — no bytes follow.
+            ushort payloadSize = 0;
+            Unsafe.CopyBlockUnaligned(w, &payloadSize, 2);
         }
 
         commandsLen += recordSize;

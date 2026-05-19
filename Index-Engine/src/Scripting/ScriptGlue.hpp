@@ -958,6 +958,14 @@ namespace Index {
 		// the resize. Drains queued work and joins existing workers, so
 		// safe to call at any time but may briefly stall the caller.
 		int (*JobSystem_Reconfigure)(int workerCount);
+
+		// ── SpriteRenderer filter (appended for binary compat) ──
+		// Mirrors the inspector setter — writes the component's FilterMode
+		// AND calls Texture2D::SetFilter on the bound texture so the
+		// sampler is regenerated. Filter ints map to enum class Filter
+		// {Point=0, Bilinear=1, Trilinear=2, Anisotropic=3}.
+		int  (*SpriteRenderer_GetFilter)(uint64_t entityID);
+		void (*SpriteRenderer_SetFilter)(uint64_t entityID, int filter);
 	};
 
 	/// Layout must match C# ManagedCallbacksStruct exactly.

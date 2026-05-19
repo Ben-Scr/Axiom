@@ -342,7 +342,8 @@ namespace Index {
 			m_ShowSaveConfirmDialog = false;
 		}
 		ImGuiUtils::CenterNextModal();
-		if (ImGui::BeginPopupModal("Save Changes?", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+		if (ImGui::BeginPopupModal("Save Changes?", nullptr,
+			ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings)) {
 			Scene* active = SceneManager::Get().GetActiveScene();
 			std::string activeName = active ? active->GetName() : "Scene";
 			ImGui::Text("Save changes to %s before opening?", activeName.c_str());
@@ -384,7 +385,8 @@ namespace Index {
 			m_ShowPrefabEditDiscardPrompt = false;
 		}
 		ImGuiUtils::CenterNextModal();
-		if (ImGui::BeginPopupModal("Discard Prefab Edits?", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+		if (ImGui::BeginPopupModal("Discard Prefab Edits?", nullptr,
+			ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings)) {
 			std::string editPrefabName = std::filesystem::path(m_PrefabEditPath).filename().string();
 			if (editPrefabName.empty()) editPrefabName = "the prefab";
 			ImGui::Text("Save changes to %s before closing?", editPrefabName.c_str());
@@ -414,7 +416,8 @@ namespace Index {
 			m_ShowPrefabSavePrompt = false;
 		}
 		ImGuiUtils::CenterNextModal();
-		if (ImGui::BeginPopupModal("Save Prefab Changes?", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+		if (ImGui::BeginPopupModal("Save Prefab Changes?", nullptr,
+			ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings)) {
 			std::string prefabName = std::filesystem::path(m_PrefabInspector.GetCurrentPath()).filename().string();
 			if (prefabName.empty()) prefabName = "the prefab";
 			ImGui::Text("Save changes to %s before switching?", prefabName.c_str());
@@ -460,7 +463,8 @@ namespace Index {
 			m_ShowQuitSaveDialog = false;
 		}
 		ImGuiUtils::CenterNextModal();
-		if (ImGui::BeginPopupModal("Save Before Quit?", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+		if (ImGui::BeginPopupModal("Save Before Quit?", nullptr,
+			ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings)) {
 			Scene* active = SceneManager::Get().GetActiveScene();
 			std::string activeName = active ? active->GetName() : "Scene";
 			ImGui::Text("Save changes to %s before closing?", activeName.c_str());
@@ -529,6 +533,12 @@ namespace Index {
 				TransformHierarchySystem::Propagate(s);
 				});
 		}
+		// Tick the editor-only particle preview before both viewports
+		// render. Decoupling the tick from RenderEditorView lets the
+		// simulation keep advancing when the user switches to the Game
+		// View tab — the in-viewport Play / Pause / Stop overlay (and
+		// entering play mode) are the only things that gate it.
+		TickParticlePreview(contextScene ? *contextScene : scene);
 		RenderEditorView(contextScene ? *contextScene : scene);
 		RenderGameView(scene);
 		RenderProjectPanel();

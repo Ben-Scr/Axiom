@@ -81,6 +81,12 @@ namespace Index {
                 // needs the component's custom serializer to survive an
                 // AttachInspector re-registration.
                 if (!info.writeBytes) info.writeBytes = existing->second.writeBytes;
+                // Same preservation for defaultEmplace — the ECB's
+                // Ecb_DefaultConstructComponent dispatch reads this callback,
+                // and a re-registration that drops it would break
+                // CreateEntityWith<T> for any component touched by
+                // AttachInspector.
+                if (!info.defaultEmplace) info.defaultEmplace = existing->second.defaultEmplace;
             }
 
             info.typeId = id;
@@ -114,63 +120,105 @@ namespace Index {
                 };
                 info.rawSize = sizeof(T);
 
-                // Auto-wire the ECB memcpy-from-bytes emplacer for EVERY
-                // non-empty registered component. The memcpy path is safe
-                // whenever the C# mirror's sizeof matches the native struct
-                // — and that's exactly what `ComponentTypes<T>` enforces at
-                // AppDomain load via `Entity_GetComponentSize`. A size
-                // mismatch throws before the user assembly finishes loading,
-                // so any payload that reaches this lambda is guaranteed to
-                // be the right length for T.
+                // Auto-wire the ECB memcpy-from-bytes emplacer for every
+                // non-empty, trivially-destructible component. The memcpy
+                // path is safe whenever (a) the C# mirror's sizeof matches
+                // the native struct — `ComponentTypes<T>` enforces this at
+                // AppDomain load via `Entity_GetComponentSize` — AND (b)
+                // memcpy'ing the bytes produces a value that destroys
+                // cleanly without aliasing some other owner's heap. The
+                // `is_trivially_destructible_v<T>` gate enforces (b).
                 //
-                // The earlier `is_trivially_copyable_v<T>` gate was too
-                // strict: it excluded perfectly memcpy-safe components like
-                // `SpriteRendererComponent` solely because they hold a
-                // `UUID` member, whose user-declared copy constructor flips
-                // `is_trivially_copyable` to false even though the
-                // underlying payload is just a uint64_t. The bug was a
-                // silent "AddComponent dropped" in ECB playback — see the
-                // floating-dancing-pretzel plan for the post-mortem.
+                // Why trivially-DESTRUCTIBLE and not trivially-COPYABLE:
+                // the earlier `is_trivially_copyable_v<T>` gate was too
+                // strict: it excluded perfectly memcpy-safe components
+                // like `SpriteRendererComponent` solely because they hold
+                // a `UUID` member, whose user-declared copy constructor
+                // flips `is_trivially_copyable` to false. UUID still has a
+                // trivial destructor (it's a uint64_t wrapper), so
+                // `is_trivially_destructible_v` correctly classifies
+                // SpriteRenderer-style components as memcpy-safe while
+                // still rejecting components that hold std::vector /
+                // std::string / std::unordered_map / smart pointers
+                // (whose destructors free heap that the memcpy'd copy
+                // would also try to free → double-free, UAF, cross-
+                // instance aliasing).
                 //
                 // Components whose C++ representation holds runtime state
-                // that genuinely cannot survive a byte-level overwrite —
-                // owning std::string / std::vector / smart pointers, scene-
-                // bound emitter handles, etc. — MUST register a custom
-                // `emplaceFromBytes` at registration time (same opt-in
-                // pattern `ParticleSystem2DComponent` uses for `copyTo`).
-                // The merge-preservation in the re-registration branch above
-                // (`if (!info.emplaceFromBytes) info.emplaceFromBytes =
-                // existing->second.emplaceFromBytes;`) keeps the custom
-                // emplacer alive across `AttachInspector` re-registration.
-                if (info.emplaceFromBytes == nullptr) {
-                    info.emplaceFromBytes = [](entt::registry& r, EntityHandle e,
-                                               const void* bytes, size_t size) {
-                        IDX_CORE_ASSERT(size == sizeof(T), IndexErrorCode::InvalidValue,
-                            "ComponentRegistry: emplaceFromBytes size mismatch for component");
-                        T value;
-                        std::memcpy(&value, bytes, sizeof(T));
-                        r.emplace_or_replace<T>(e, std::move(value));
-                    };
+                // that genuinely cannot survive a byte-level overwrite
+                // (owning std::vector / std::string / scene-bound emitter
+                // handles, etc.) get NO auto-wired emplaceFromBytes —
+                // both the ECB AddComponent path
+                // (Scripting/ScriptBindingsEcb.cpp:308) and the prefab
+                // bake path (Serialization/PrefabTemplateCache.cpp:144)
+                // refuse to dispatch when the callback is null, surfacing
+                // the failure at the call site instead of silently
+                // memcpy'ing a UAF into the entity. Authors who want
+                // these types on the ECB/prefab fast path register a
+                // custom `emplaceFromBytes` explicitly; the merge-
+                // preservation branch above keeps it alive across
+                // AttachInspector re-registration.
+                if constexpr (std::is_trivially_destructible_v<T>) {
+                    if (info.emplaceFromBytes == nullptr) {
+                        info.emplaceFromBytes = [](entt::registry& r, EntityHandle e,
+                                                   const void* bytes, size_t size) {
+                            IDX_CORE_ASSERT(size == sizeof(T), IndexErrorCode::InvalidValue,
+                                "ComponentRegistry: emplaceFromBytes size mismatch for component");
+                            T value;
+                            std::memcpy(&value, bytes, sizeof(T));
+                            r.emplace_or_replace<T>(e, std::move(value));
+                        };
+                    }
+                }
+
+                // Auto-wire the ECB default-construct emplacer for every
+                // non-empty, default-constructible registered component.
+                // CreateEntityWith<T...> on the managed ECB records a
+                // payload-free Ecb_DefaultConstructComponent op so the C++
+                // member-initializers stick instead of being overwritten by
+                // C#'s zero-init `default(T)`. Components that are NOT
+                // default-constructible (no engine built-in matches this
+                // today, but a package might define one) silently leave the
+                // callback null — the playback path then fails the command
+                // with kEcbErrorUnknownComponent, which is the correct
+                // surface for "this component can't be added without a
+                // value".
+                if (info.defaultEmplace == nullptr) {
+                    if constexpr (std::is_default_constructible_v<T>) {
+                        info.defaultEmplace = [](entt::registry& r, EntityHandle e) {
+                            r.emplace<T>(e);
+                        };
+                    }
                 }
 
                 // Symmetric writeBytes auto-wire — appends a memcpy of the
                 // EnTT storage to `out` so the PrefabTemplateCache can bake
                 // a prefab once and replay it from raw bytes thereafter.
-                // Same opt-out rule as emplaceFromBytes: components that
-                // hold non-memcpy-safe state register a custom writeBytes
-                // explicitly, and the merge-preservation in the
-                // re-registration branch above keeps it alive across
-                // AttachInspector re-registration.
-                if (info.writeBytes == nullptr) {
-                    info.writeBytes = [](const entt::registry& r, EntityHandle e,
-                                          std::vector<uint8_t>& out) -> bool {
-                        const T* comp = r.try_get<T>(e);
-                        if (comp == nullptr) return false;
-                        const size_t oldSize = out.size();
-                        out.resize(oldSize + sizeof(T));
-                        std::memcpy(out.data() + oldSize, comp, sizeof(T));
-                        return true;
-                    };
+                // Same trivially-destructible gate as emplaceFromBytes for
+                // the same reason: capturing the bytes of a std::vector
+                // bakes its data pointer into the template, and every
+                // hydrated instance then aliases the bake source's heap.
+                //
+                // When the gate refuses, the prefab bake path
+                // (Serialization/PrefabTemplateCache.cpp:144) sees
+                // `writeBytes == nullptr` and marks the entire template
+                // unbakeable, falling back to the slow per-property
+                // deserialize path for that prefab. The slow path is
+                // safe because it constructs each component through its
+                // proper constructor + property setters, owning fresh
+                // heap allocations per instance.
+                if constexpr (std::is_trivially_destructible_v<T>) {
+                    if (info.writeBytes == nullptr) {
+                        info.writeBytes = [](const entt::registry& r, EntityHandle e,
+                                              std::vector<uint8_t>& out) -> bool {
+                            const T* comp = r.try_get<T>(e);
+                            if (comp == nullptr) return false;
+                            const size_t oldSize = out.size();
+                            out.resize(oldSize + sizeof(T));
+                            std::memcpy(out.data() + oldSize, comp, sizeof(T));
+                            return true;
+                        };
+                    }
                 }
             }
 

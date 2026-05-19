@@ -848,6 +848,14 @@ internal unsafe struct NativeBindingsStruct
     // C++ struct exactly; do not reorder.
     public delegate* unmanaged<int> Application_GetProcessorCount;
     public delegate* unmanaged<int, int> JobSystem_Reconfigure;
+
+    // ── SpriteRenderer filter (appended for binary compat) ──
+    // Mirror of ScriptGlue.hpp NativeBindings tail. Filter ints map to
+    // the TextureFilter enum {Point=0, Bilinear=1, Trilinear=2,
+    // Anisotropic=3}. Setting on the native side rebuilds the sampler
+    // for the bound texture so the change takes effect this frame.
+    public delegate* unmanaged<ulong, int> SpriteRenderer_GetFilter;
+    public delegate* unmanaged<ulong, int, void> SpriteRenderer_SetFilter;
 }
 
 internal static unsafe class NativeCallbacks

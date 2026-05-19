@@ -965,7 +965,11 @@ namespace Index {
 			return entt::null;
 		}
 
-		const std::string name = GetStringMember(entityValue, "name", "Entity");
+		// Empty default — missing/blank "name" must NOT manifest as a real
+		// NameComponent on load. Scene::CreateEntity(name) already skips
+		// AddComponent<NameComponent> when name.empty(), so this preserves
+		// "unnamed" through the round-trip.
+		const std::string name = GetStringMember(entityValue, "name", "");
 		const EntityHandle entity = scene.CreateEntity(name).GetHandle();
 
 		// Scene::CreateEntity unconditionally seeds Transform2D for the
@@ -1036,17 +1040,25 @@ namespace Index {
 			spriteRenderer.Color.a = GetFloatMember(*spriteValue, "a", 1.0f);
 			spriteRenderer.SortingOrder = static_cast<short>(GetIntMember(*spriteValue, "sortOrder", 0));
 			spriteRenderer.SortingLayer = static_cast<uint8_t>(GetIntMember(*spriteValue, "sortLayer", 0));
-			const Filter filter = static_cast<Filter>(GetIntMember(*spriteValue, "filter", static_cast<int>(Filter::Point)));
+			// Prefer the new per-component "filterMode" key; fall back to
+			// legacy "filter" (previously sourced from the texture's live
+			// sampler state) so older scenes still load with the same
+			// filter they were saved with.
+			spriteRenderer.FilterMode = static_cast<Filter>(GetIntMember(*spriteValue, "filterMode",
+				GetIntMember(*spriteValue, "filter", static_cast<int>(spriteRenderer.FilterMode))));
 			const Wrap wrapU = static_cast<Wrap>(GetIntMember(*spriteValue, "wrapU", static_cast<int>(Wrap::Clamp)));
 			const Wrap wrapV = static_cast<Wrap>(GetIntMember(*spriteValue, "wrapV", static_cast<int>(Wrap::Clamp)));
 			spriteRenderer.TextureHandle = LoadTextureFromValue(
 				*spriteValue,
 				"textureAsset",
 				"texture",
-				filter,
+				spriteRenderer.FilterMode,
 				wrapU,
 				wrapV,
 				&spriteRenderer.TextureAssetId);
+			if (auto* tex = TextureManager::GetTexture(spriteRenderer.TextureHandle); tex) {
+				tex->SetFilter(spriteRenderer.FilterMode);
+			}
 		}
 
 		if (const Value* textValue = GetObjectMember(entityValue, "TextRenderer")) {
@@ -1607,17 +1619,21 @@ namespace Index {
 			spriteRenderer.Color.a = GetFloatMember(componentValue, "a", 1.0f);
 			spriteRenderer.SortingOrder = static_cast<short>(GetIntMember(componentValue, "sortOrder", 0));
 			spriteRenderer.SortingLayer = static_cast<uint8_t>(GetIntMember(componentValue, "sortLayer", 0));
-			const Filter filter = static_cast<Filter>(GetIntMember(componentValue, "filter", static_cast<int>(Filter::Point)));
+			spriteRenderer.FilterMode = static_cast<Filter>(GetIntMember(componentValue, "filterMode",
+				GetIntMember(componentValue, "filter", static_cast<int>(spriteRenderer.FilterMode))));
 			const Wrap wrapU = static_cast<Wrap>(GetIntMember(componentValue, "wrapU", static_cast<int>(Wrap::Clamp)));
 			const Wrap wrapV = static_cast<Wrap>(GetIntMember(componentValue, "wrapV", static_cast<int>(Wrap::Clamp)));
 			spriteRenderer.TextureHandle = LoadTextureFromValue(
 				componentValue,
 				"textureAsset",
 				"texture",
-				filter,
+				spriteRenderer.FilterMode,
 				wrapU,
 				wrapV,
 				&spriteRenderer.TextureAssetId);
+			if (auto* tex = TextureManager::GetTexture(spriteRenderer.TextureHandle); tex) {
+				tex->SetFilter(spriteRenderer.FilterMode);
+			}
 			return true;
 		}
 
@@ -2067,6 +2083,12 @@ namespace Index {
 			if (!SaveEntityToFile(scene, entity, prefabPath)) {
 				return false;
 			}
+			// Drop the baked template so the next InstantiatePrefab rebakes
+			// from the freshly-written file. The editor's FileWatcher also
+			// invalidates on .prefab edits, but doing it inline here closes
+			// the disk-write-to-watcher-fire TOCTOU window and keeps the
+			// behavior consistent in non-editor builds (CI tooling, etc.).
+			PrefabTemplateCache::Get().Invalidate(prefabGuid);
 			AssetRegistry::MarkDirty();
 			AssetRegistry::Sync();
 			scene.MarkDirty();

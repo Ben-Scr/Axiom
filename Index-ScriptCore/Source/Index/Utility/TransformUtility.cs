@@ -7,36 +7,33 @@ public static class TransformUtility
     private const float HalfCircleDegrees = 180.0f;
 
     /// <summary>
-    /// Calculates the rotation angle (in degrees) for the right axis at <paramref name="origin"/> to face <paramref name="target"/> in 2D space.
+    /// Calculates the rotation angle (in degrees) for <paramref name="origin"/>'s up axis
+    /// (its visual forward in 2D) to face <paramref name="target"/>.
     /// </summary>
     /// <param name="origin">The position of the entity that should rotate.</param>
     /// <param name="target">The position to rotate towards.</param>
-    /// <returns>The rotation angle in degrees.</returns>
+    /// <returns>The rotation angle in degrees. Assign to Transform2D.Rotation.</returns>
     public static float LookAt2D(Vector2 origin, Vector2 target)
     {
         return LookAt2DRadians(origin, target) * Mathf.Rad2Deg;
     }
 
     /// <summary>
-    /// Calculates the rotation angle (in degrees) for the right axis at <paramref name="origin"/> to face <paramref name="target"/> in 2D space.
-    /// This overload interpolates from 0 degrees. Use the Transform2D overload to interpolate from the current rotation.
+    /// Calculates the rotation angle (in degrees) for <paramref name="origin"/>'s up axis
+    /// to face <paramref name="target"/>, interpolated from 0 degrees.
+    /// Use the Transform2D overload to interpolate from the current rotation.
     /// </summary>
-    /// <param name="origin">The position of the entity that should rotate.</param>
-    /// <param name="target">The position to rotate towards.</param>
-    /// <param name="lerp">Interpolation factor between 0 and 1.</param>
-    /// <returns>The interpolated rotation angle in degrees.</returns>
     public static float LookAt2D(Vector2 origin, Vector2 target, float lerp)
     {
         return LerpAngleDegrees(0.0f, LookAt2D(origin, target), lerp);
     }
 
     /// <summary>
-    /// Calculates the rotation angle (in degrees) for <paramref name="origin"/>'s right axis to face <paramref name="target"/>.
+    /// Calculates the rotation angle (in degrees) for <paramref name="origin"/>'s up axis
+    /// to face <paramref name="target"/>, interpolated from the current rotation.
     /// </summary>
-    /// <param name="origin">The transform that should rotate.</param>
-    /// <param name="target">The position to rotate towards.</param>
-    /// <param name="lerp">Interpolation factor between 0 (keep current rotation) and 1 (instant rotation).</param>
-    /// <returns>The interpolated rotation angle in degrees. Assign this to Transform2D.RotationDegrees.</returns>
+    /// <param name="lerp">Interpolation factor between 0 (keep current rotation) and 1 (instant).</param>
+    /// <returns>The interpolated rotation angle in degrees. Assign to Transform2D.Rotation.</returns>
     public static float LookAt2D(Transform2D origin, Vector2 target, float lerp = 1.0f)
     {
         if (origin == null) throw new ArgumentNullException(nameof(origin));
@@ -48,7 +45,7 @@ public static class TransformUtility
     }
 
     /// <summary>
-    /// Calculates the rotation angle (in radians) for the right axis at <paramref name="origin"/> to face <paramref name="target"/> in 2D space.
+    /// Calculates the rotation angle (in radians) for <paramref name="origin"/>'s up axis to face <paramref name="target"/>.
     /// </summary>
     public static float LookAt2DRadians(Vector2 origin, Vector2 target)
     {
@@ -56,8 +53,8 @@ public static class TransformUtility
     }
 
     /// <summary>
-    /// Calculates the rotation angle (in radians) for the right axis at <paramref name="origin"/> to face <paramref name="target"/> in 2D space.
-    /// This overload interpolates from 0 radians. Use the Transform2D overload to interpolate from the current rotation.
+    /// Calculates the rotation angle (in radians) for <paramref name="origin"/>'s up axis
+    /// to face <paramref name="target"/>, interpolated from 0 radians.
     /// </summary>
     public static float LookAt2DRadians(Vector2 origin, Vector2 target, float lerp)
     {
@@ -65,76 +62,66 @@ public static class TransformUtility
     }
 
     /// <summary>
-    /// Calculates the rotation angle (in radians) for <paramref name="origin"/>'s right axis to face <paramref name="target"/>.
+    /// Calculates the rotation angle (in radians) for <paramref name="origin"/>'s up axis
+    /// to face <paramref name="target"/>, interpolated from the current rotation.
     /// </summary>
     public static float LookAt2DRadians(Transform2D origin, Vector2 target, float lerp = 1.0f)
     {
         if (origin == null) throw new ArgumentNullException(nameof(origin));
 
         if (!TryLookAt2DRadians(origin.Position, target, out float targetRotation))
-            return origin.Rotation;
+            return origin.Rotation * Mathf.Deg2Rad;
 
-        return LerpAngleRadians(origin.Rotation, targetRotation, lerp);
+        return LerpAngleRadians(origin.Rotation * Mathf.Deg2Rad, targetRotation, lerp);
     }
 
     /// <summary>
-    /// Calculates the rotation angle (in degrees) for the up axis at <paramref name="origin"/> to face <paramref name="target"/> in 2D space.
+    /// Calculates the rotation angle (in degrees) for <paramref name="origin"/>'s right axis to face <paramref name="target"/>.
+    /// Use this only when your sprite art is authored facing right; prefer <see cref="LookAt2D(Vector2, Vector2)"/> otherwise.
     /// </summary>
-    public static float LookAtUp2D(Vector2 origin, Vector2 target)
+    public static float LookAtRight2D(Vector2 origin, Vector2 target)
     {
-        return LookAtUp2DRadians(origin, target) * Mathf.Rad2Deg;
+        return LookAtRight2DRadians(origin, target) * Mathf.Rad2Deg;
     }
 
     /// <summary>
-    /// Calculates the rotation angle (in degrees) for <paramref name="origin"/>'s up axis to face <paramref name="target"/>.
+    /// Calculates the rotation angle (in degrees) for <paramref name="origin"/>'s right axis to face <paramref name="target"/>,
+    /// interpolated from the current rotation.
     /// </summary>
-    public static float LookAtUp2D(Transform2D origin, Vector2 target, float lerp = 1.0f)
+    public static float LookAtRight2D(Transform2D origin, Vector2 target, float lerp = 1.0f)
     {
         if (origin == null) throw new ArgumentNullException(nameof(origin));
 
-        if (!TryLookAtUp2DRadians(origin.Position, target, out float targetRotation))
+        if (!TryLookAtRight2DRadians(origin.Position, target, out float targetRotation))
             return origin.RotationDegrees;
 
         return LerpAngleDegrees(origin.RotationDegrees, targetRotation * Mathf.Rad2Deg, lerp);
     }
 
     /// <summary>
-    /// Calculates the rotation angle (in radians) for the up axis at <paramref name="origin"/> to face <paramref name="target"/> in 2D space.
+    /// Calculates the rotation angle (in radians) for <paramref name="origin"/>'s right axis to face <paramref name="target"/>.
     /// </summary>
-    public static float LookAtUp2DRadians(Vector2 origin, Vector2 target)
+    public static float LookAtRight2DRadians(Vector2 origin, Vector2 target)
     {
-        return TryLookAtUp2DRadians(origin, target, out float rotation) ? rotation : 0.0f;
+        return TryLookAtRight2DRadians(origin, target, out float rotation) ? rotation : 0.0f;
     }
 
     /// <summary>
-    /// Calculates the rotation angle (in radians) for <paramref name="origin"/>'s up axis to face <paramref name="target"/>.
+    /// Rotates <paramref name="origin"/> so its up axis (visual forward) faces <paramref name="target"/>.
     /// </summary>
-    public static float LookAtUp2DRadians(Transform2D origin, Vector2 target, float lerp = 1.0f)
+    public static void Face2D(Transform2D origin, Vector2 target, float lerp = 1.0f)
     {
         if (origin == null) throw new ArgumentNullException(nameof(origin));
-
-        if (!TryLookAtUp2DRadians(origin.Position, target, out float targetRotation))
-            return origin.Rotation;
-
-        return LerpAngleRadians(origin.Rotation, targetRotation, lerp);
+        origin.RotationDegrees = LookAt2D(origin, target, lerp);
     }
 
     /// <summary>
     /// Rotates <paramref name="origin"/> so its right axis faces <paramref name="target"/>.
     /// </summary>
-    public static void Face2D(Transform2D origin, Vector2 target, float lerp = 1.0f)
+    public static void FaceRight2D(Transform2D origin, Vector2 target, float lerp = 1.0f)
     {
         if (origin == null) throw new ArgumentNullException(nameof(origin));
-        origin.Rotation = LookAt2DRadians(origin, target, lerp);
-    }
-
-    /// <summary>
-    /// Rotates <paramref name="origin"/> so its up axis faces <paramref name="target"/>.
-    /// </summary>
-    public static void FaceUp2D(Transform2D origin, Vector2 target, float lerp = 1.0f)
-    {
-        if (origin == null) throw new ArgumentNullException(nameof(origin));
-        origin.Rotation = LookAtUp2DRadians(origin, target, lerp);
+        origin.RotationDegrees = LookAtRight2D(origin, target, lerp);
     }
 
     /// <summary>
@@ -238,6 +225,8 @@ public static class TransformUtility
         return LookAt2DRadians(origin.XY, target.XY);
     }
 
+    // Origin's Up axis (-sin θ, cos θ) faces (dx, dy) when sin θ = -dx/|d|, cos θ = dy/|d|
+    // i.e. θ = atan2(-dx, dy).
     private static bool TryLookAt2DRadians(Vector2 origin, Vector2 target, out float rotation)
     {
         Vector2 direction = target - origin;
@@ -247,11 +236,12 @@ public static class TransformUtility
             return false;
         }
 
-        rotation = Mathf.Atan2(direction.Y, direction.X);
+        rotation = Mathf.Atan2(-direction.X, direction.Y);
         return true;
     }
 
-    private static bool TryLookAtUp2DRadians(Vector2 origin, Vector2 target, out float rotation)
+    // Origin's Right axis (cos θ, sin θ) faces (dx, dy) when θ = atan2(dy, dx).
+    private static bool TryLookAtRight2DRadians(Vector2 origin, Vector2 target, out float rotation)
     {
         Vector2 direction = target - origin;
         if (direction.LengthSquared() <= Mathf.Epsilon * Mathf.Epsilon)
@@ -260,7 +250,7 @@ public static class TransformUtility
             return false;
         }
 
-        rotation = Mathf.Atan2(-direction.X, direction.Y);
+        rotation = Mathf.Atan2(direction.Y, direction.X);
         return true;
     }
 

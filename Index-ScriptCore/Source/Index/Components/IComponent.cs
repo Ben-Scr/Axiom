@@ -31,4 +31,17 @@ public sealed class NativeComponentAttribute : Attribute
     }
 
     public string Name { get; }
+
+    // Codegen opt-in. Default `false` keeps the existing mirror semantics
+    // (this struct names an existing native component). Set `true` to have
+    // Index-ComponentCodegen emit the matching C++ struct + registration
+    // call at build time, so a single C# file is the only thing the user
+    // needs to author for a new ECS component. See plans/ja-mach-einen-plan-modular-clock.md.
+    public bool Generate { get; set; } = false;
+
+    // Inspector Add-Component menu placement when Generate=true. Ignored
+    // when Generate=false (the mirrored native component already has its
+    // own category from the C++ registration).
+    public string Category { get; set; }    = "Component";  // "Component" or "Tag"
+    public string Subcategory { get; set; } = "Custom";
 }

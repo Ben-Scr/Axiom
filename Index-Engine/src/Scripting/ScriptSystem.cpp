@@ -1209,6 +1209,14 @@ namespace Index {
 		const std::string defineConstantsArg =
 			"-p:DefineConstants=" + IndexProject::BuildManagedDefineConstants("INDEX_EDITOR");
 		m_RebuildTask = LaunchTask([sandboxProjectPath, buildConfig, defineConstantsArg]() {
+			// IndexCodegenEnabled=false suppresses the GenerateNativeComponents
+			// MSBuild target in Index-Sandbox.csproj. Hot-reload on a saved .cs
+			// file must NEVER rewrite Index-Engine/src/Generated/CodegenComponents.cpp
+			// — the running engine has the old C++ layout, while a regenerated
+			// file would silently encode the new C# layout, and the next
+			// ComponentTypes<T> static ctor would throw on the sizeof mismatch.
+			// Component-shape changes go through the editor's "Rebuild Engine"
+			// flow instead, which passes IndexCodegenEnabled=true explicitly.
 			return Process::Run({
 				"dotnet",
 				"build",
@@ -1216,6 +1224,7 @@ namespace Index {
 				"-c", buildConfig,
 				"--nologo",
 				"-v", "q",
+				"-p:IndexCodegenEnabled=false",
 				defineConstantsArg
 			});
 		});

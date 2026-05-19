@@ -5,6 +5,7 @@
 #include "Core/Application.hpp"
 #include <Core/Version.hpp>
 #include <Core/Log.hpp>
+#include "Localization/Localization.hpp"
 #include "Serialization/Path.hpp"
 #include "Serialization/Directory.hpp"
 #include "Serialization/File.hpp"
@@ -229,6 +230,7 @@ namespace Index {
 
 	void LauncherLayer::OnPreRender(Application& app) {
 		(void)app;
+		Localization::Poll();
 		PollCreateProjectTask();
 		RenderLauncherPanel();
 	}
@@ -437,7 +439,7 @@ namespace Index {
 
 		ImGui::Begin("##Launcher", nullptr, flags);
 
-		ImGui::TextUnformatted("Index Engine");
+		ImGui::TextUnformatted(IDX_TR("launcher.title").c_str());
 		ImGui::SameLine();
 		ImGui::TextDisabled("%s", IDX_VERSION);
 		ImGui::Separator();
@@ -497,15 +499,17 @@ namespace Index {
 				| ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoDocking;
 
 			if (ImGui::Begin("##LauncherOpenStatus", nullptr, overlayFlags)) {
-				ImGui::TextUnformatted("Opening project");
+				ImGui::TextUnformatted(IDX_TR("launcher.progress.opening_project").c_str());
 				ImGui::TextDisabled("%s", m_OpeningProjectName.c_str());
 				ImGui::Separator();
 				if (taskRunning) {
-					ImGui::TextUnformatted(taskStage.empty() ? "Working..." : taskStage.c_str());
+					ImGui::TextUnformatted(taskStage.empty()
+						? IDX_TR("launcher.progress.working").c_str()
+						: taskStage.c_str());
 					ImGui::ProgressBar(taskProgress, ImVec2(260, 0), "");
 				}
 				else {
-					ImGui::TextUnformatted("Launching editor...");
+					ImGui::TextUnformatted(IDX_TR("launcher.progress.launching_editor").c_str());
 					float elapsed = std::chrono::duration<float>(
 						std::chrono::steady_clock::now() - m_OpenStartTime).count();
 					ImGui::ProgressBar(fmodf(elapsed * 0.3f, 1.0f), ImVec2(260, 0), "");
@@ -533,13 +537,17 @@ namespace Index {
 		const float listColW = panelWidth - rightColWidth - 10.0f;
 
 		ImGui::BeginGroup();
+		const std::string sortLabelText = IDX_TR("launcher.sort.label");
 		const float comboW = listColW - refreshW - reverseW
 			- ImGui::GetStyle().ItemSpacing.x * 2.0f
-			- ImGui::CalcTextSize("Sort:").x - ImGui::GetStyle().ItemSpacing.x;
-		ImGui::TextUnformatted("Sort:");
+			- ImGui::CalcTextSize(sortLabelText.c_str()).x - ImGui::GetStyle().ItemSpacing.x;
+		ImGui::TextUnformatted(sortLabelText.c_str());
 		ImGui::SameLine();
 		ImGui::SetNextItemWidth(comboW);
-		const char* k_SortLabels[] = { "Last Opened", "Name", "Created" };
+		const std::string sortLastOpened = IDX_TR("launcher.sort.mode.last_opened");
+		const std::string sortName = IDX_TR("launcher.sort.mode.name");
+		const std::string sortCreated = IDX_TR("launcher.sort.mode.created");
+		const char* k_SortLabels[] = { sortLastOpened.c_str(), sortName.c_str(), sortCreated.c_str() };
 		int sortMode = static_cast<int>(m_SortMode);
 		if (ImGui::Combo("##LauncherSort", &sortMode, k_SortLabels, IM_ARRAYSIZE(k_SortLabels))) {
 			m_SortMode = static_cast<SortMode>(sortMode);
@@ -552,14 +560,16 @@ namespace Index {
 			SaveLauncherSettings();
 		}
 		if (ImGui::IsItemHovered()) {
-			ImGui::SetTooltip(m_SortReverse ? "Sort ascending" : "Sort descending");
+			ImGui::SetTooltip("%s", m_SortReverse
+				? IDX_TR("launcher.sort.tooltip.ascending").c_str()
+				: IDX_TR("launcher.sort.tooltip.descending").c_str());
 		}
 		ImGui::SameLine();
 		if (ImGui::Button("R", ImVec2(refreshW, strip_h))) {
 			RefreshProjectsList();
 		}
 		if (ImGui::IsItemHovered()) {
-			ImGui::SetTooltip("Refresh project list");
+			ImGui::SetTooltip("%s", IDX_TR("launcher.sort.tooltip.refresh").c_str());
 		}
 		ImGui::EndGroup();
 
@@ -573,7 +583,7 @@ namespace Index {
 		// Right column: actions (L4: removed selection-dependent buttons)
 		ImGui::BeginChild("##Actions", ImVec2(rightColWidth, 0));
 
-		if (ImGui::Button("Create New Project", ImVec2(-1, 0))) {
+		if (ImGui::Button(IDX_TR("launcher.action.create_new_project").c_str(), ImVec2(-1, 0))) {
 			m_OpenCreatePopup = true;
 			m_CreateError.clear();
 			m_IsCreating = false;
@@ -589,13 +599,13 @@ namespace Index {
 
 		ImGui::Spacing();
 
-		if (ImGui::Button("Add Existing Project", ImVec2(-1, 0))) {
+		if (ImGui::Button(IDX_TR("launcher.action.add_existing_project").c_str(), ImVec2(-1, 0))) {
 			BrowseForExistingProject();
 		}
 
 		ImGui::Spacing();
 
-		if (ImGui::Button("Settings", ImVec2(-1, 0))) {
+		if (ImGui::Button(IDX_TR("launcher.action.settings").c_str(), ImVec2(-1, 0))) {
 			m_OpenSettingsPopup = true;
 		}
 
@@ -631,8 +641,8 @@ namespace Index {
 		const auto sortedProjects = GetSortedProjectsView();
 
 		if (sortedProjects.empty()) {
-			ImGui::TextDisabled("No projects yet");
-			ImGui::TextDisabled("Create a new project or add an existing one.");
+			ImGui::TextDisabled("%s", IDX_TR("launcher.list.empty.title").c_str());
+			ImGui::TextDisabled("%s", IDX_TR("launcher.list.empty.subtitle").c_str());
 			return;
 		}
 
@@ -656,23 +666,23 @@ namespace Index {
 
 			// Right-click context menu per item
 			if (ImGui::BeginPopupContextItem("##RowCtx")) {
-				if (ImGui::MenuItem("Info")) {
+				if (ImGui::MenuItem(IDX_TR("launcher.context.info").c_str())) {
 					m_PendingInfoProject = entry;
 					m_OpenInfoPopup = true;
 				}
 
 				ImGui::Separator();
 
-				if (ImGui::MenuItem("Open in Explorer")) {
+				if (ImGui::MenuItem(IDX_TR("launcher.context.open_in_explorer").c_str())) {
 					OpenProjectInExplorer(entry);
 				}
 
-				if (ImGui::MenuItem("Remove from List")) {
+				if (ImGui::MenuItem(IDX_TR("launcher.context.remove_from_list").c_str())) {
 					removePath = entry.Path;
 				}
 
 				ImGui::Separator();
-				if (ImGui::MenuItem("Delete Project...")) {
+				if (ImGui::MenuItem(IDX_TR("launcher.context.delete_project").c_str())) {
 					RequestProjectDelete(entry);
 				}
 				ImGui::EndPopup();
@@ -697,7 +707,8 @@ namespace Index {
 
 			// Draw size with a placeholder while the background scan is running.
 			ImGui::SetCursorScreenPos(ImVec2(cursorPos.x + 8, cursorPos.y + 44));
-			ImGui::TextDisabled("Size: %s", sizeStr.c_str());
+			const std::string sizeRowText = Localization::Format("launcher.list.size_prefix", sizeStr);
+			ImGui::TextDisabled("%s", sizeRowText.c_str());
 
 			// Draw relative time in upper-right (offset left to leave room for button)
 			if (!timeStr.empty()) {
@@ -712,7 +723,7 @@ namespace Index {
 			ImGui::SetCursorScreenPos(ImVec2(
 				cursorPos.x + rowWidth - buttonWidth - 4,
 				cursorPos.y + (rowHeight - ImGui::GetFrameHeight()) * 0.5f));
-			if (ImGui::Button("Open", ImVec2(buttonWidth, 0))) {
+			if (ImGui::Button(IDX_TR("launcher.list.open").c_str(), ImVec2(buttonWidth, 0))) {
 				Timer timer;
 				OpenProject(entry);
 				IDX_INFO_TAG("Project", "Opening Took: " + StringHelper::ToString(timer));
@@ -792,12 +803,17 @@ namespace Index {
 	}
 
 	void LauncherLayer::RenderDeleteProjectPopups() {
+		// Stable IDs (everything after `###`) so the translated title can
+		// vary without losing the popup's identity across frames.
+		constexpr const char* k_DeleteId = "###LauncherDeleteProject";
+		constexpr const char* k_DeleteFinalId = "###LauncherDeleteProjectFinal";
+
 		if (m_OpenDeleteConfirmPopup) {
-			ImGui::OpenPopup("Delete Project?");
+			ImGui::OpenPopup(k_DeleteId);
 			m_OpenDeleteConfirmPopup = false;
 		}
 		if (m_OpenDeleteFinalConfirmPopup) {
-			ImGui::OpenPopup("Permanently Delete Project?");
+			ImGui::OpenPopup(k_DeleteFinalId);
 			m_OpenDeleteFinalConfirmPopup = false;
 		}
 
@@ -805,7 +821,8 @@ namespace Index {
 		ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
 		ImGui::SetNextWindowSize(ImVec2(480, 0), ImGuiCond_Appearing);
 
-		if (ImGui::BeginPopupModal("Delete Project?", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+		const std::string deleteTitle = IDX_TR("launcher.delete.title") + k_DeleteId;
+		if (ImGui::BeginPopupModal(deleteTitle.c_str(), nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
 			if (!m_PendingDeleteProject.has_value()) {
 				ImGui::CloseCurrentPopup();
 				ImGui::EndPopup();
@@ -813,22 +830,24 @@ namespace Index {
 			}
 
 			const LauncherProjectEntry& entry = *m_PendingDeleteProject;
-			ImGui::TextWrapped("Delete project '%s'?", entry.Name.c_str());
+			const std::string msg = Localization::Format("launcher.delete.message", entry.Name);
+			ImGui::TextWrapped("%s", msg.c_str());
 			ImGui::Spacing();
-			ImGui::TextWrapped("This will permanently delete the project folder from disk and remove it from the launcher list.");
+			ImGui::TextWrapped("%s", IDX_TR("launcher.delete.body").c_str());
 			ImGui::Spacing();
-			ImGui::TextWrapped("Folder: %s", entry.Path.c_str());
+			const std::string folder = Localization::Format("launcher.delete.folder_label", entry.Path);
+			ImGui::TextWrapped("%s", folder.c_str());
 			ImGui::Spacing();
 			ImGui::Separator();
 			ImGui::Spacing();
 
-			if (ImGui::Button("Continue", ImVec2(140, 0))) {
+			if (ImGui::Button(IDX_TR("launcher.delete.continue").c_str(), ImVec2(140, 0))) {
 				m_OpenDeleteFinalConfirmPopup = true;
 				ImGui::CloseCurrentPopup();
 			}
 
 			ImGui::SameLine();
-			if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+			if (ImGui::Button(IDX_TR("launcher.delete.cancel").c_str(), ImVec2(120, 0))) {
 				m_PendingDeleteProject.reset();
 				ImGui::CloseCurrentPopup();
 			}
@@ -839,7 +858,8 @@ namespace Index {
 		ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
 		ImGui::SetNextWindowSize(ImVec2(520, 0), ImGuiCond_Appearing);
 
-		if (ImGui::BeginPopupModal("Permanently Delete Project?", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+		const std::string deleteFinalTitle = IDX_TR("launcher.delete_final.title") + k_DeleteFinalId;
+		if (ImGui::BeginPopupModal(deleteFinalTitle.c_str(), nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
 			if (!m_PendingDeleteProject.has_value()) {
 				ImGui::CloseCurrentPopup();
 				ImGui::EndPopup();
@@ -847,11 +867,13 @@ namespace Index {
 			}
 
 			const LauncherProjectEntry& entry = *m_PendingDeleteProject;
-			ImGui::TextWrapped("Final confirmation: permanently delete '%s'?", entry.Name.c_str());
+			const std::string msg = Localization::Format("launcher.delete_final.message", entry.Name);
+			ImGui::TextWrapped("%s", msg.c_str());
 			ImGui::Spacing();
-			ImGui::TextWrapped("This action cannot be undone. The folder below will be deleted from disk.");
+			ImGui::TextWrapped("%s", IDX_TR("launcher.delete_final.body").c_str());
 			ImGui::Spacing();
-			ImGui::TextWrapped("Folder: %s", entry.Path.c_str());
+			const std::string folder = Localization::Format("launcher.delete.folder_label", entry.Path);
+			ImGui::TextWrapped("%s", folder.c_str());
 
 			if (!m_DeleteError.empty()) {
 				ImGui::Spacing();
@@ -865,7 +887,7 @@ namespace Index {
 			ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.65f, 0.12f, 0.12f, 1.0f));
 			ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.85f, 0.18f, 0.18f, 1.0f));
 			ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.55f, 0.08f, 0.08f, 1.0f));
-			const bool deleteClicked = ImGui::Button("Permanently Delete", ImVec2(180, 0));
+			const bool deleteClicked = ImGui::Button(IDX_TR("launcher.delete_final.confirm").c_str(), ImVec2(180, 0));
 			ImGui::PopStyleColor(3);
 
 			if (deleteClicked && DeleteProjectFromDisk(entry)) {
@@ -874,7 +896,7 @@ namespace Index {
 			}
 
 			ImGui::SameLine();
-			if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+			if (ImGui::Button(IDX_TR("launcher.delete.cancel").c_str(), ImVec2(120, 0))) {
 				m_PendingDeleteProject.reset();
 				m_DeleteError.clear();
 				ImGui::CloseCurrentPopup();
@@ -887,8 +909,10 @@ namespace Index {
 	// ── Create Project Popup ────────────────────────────────────────
 
 	void LauncherLayer::RenderCreateProjectPopup() {
+		constexpr const char* k_CreateId = "###LauncherCreateProject";
+
 		if (m_OpenCreatePopup) {
-			ImGui::OpenPopup("Create New Project");
+			ImGui::OpenPopup(k_CreateId);
 			m_OpenCreatePopup = false;
 		}
 
@@ -896,7 +920,8 @@ namespace Index {
 		ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
 		ImGui::SetNextWindowSize(ImVec2(450, 0), ImGuiCond_Appearing);
 
-		if (ImGui::BeginPopupModal("Create New Project", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+		const std::string createTitle = IDX_TR("launcher.create.title") + k_CreateId;
+		if (ImGui::BeginPopupModal(createTitle.c_str(), nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
 			float createProgress = 0.0f;
 			std::string createStage;
 			bool createTaskRunning = false;
@@ -919,18 +944,19 @@ namespace Index {
 				return;
 			}
 
-			ImGui::Text("Project Name:");
+			ImGui::TextUnformatted(IDX_TR("launcher.create.project_name").c_str());
 			ImGui::SetNextItemWidth(-1);
 			ImGui::InputText("##ProjName", m_NewProjectName, sizeof(m_NewProjectName));
 
 			ImGui::Spacing();
-			ImGui::Text("Location:");
+			ImGui::TextUnformatted(IDX_TR("launcher.create.location").c_str());
 			ImGui::SetNextItemWidth(-1);
 			ImGui::InputText("##ProjLocation", m_NewProjectLocation, sizeof(m_NewProjectLocation));
 
 			ImGui::Spacing();
 			std::string preview = Path::Combine(m_NewProjectLocation, m_NewProjectName);
-			ImGui::TextDisabled("Path: %s", preview.c_str());
+			const std::string previewText = Localization::Format("launcher.create.path_preview", preview);
+			ImGui::TextDisabled("%s", previewText.c_str());
 
 			if (!m_CreateError.empty()) {
 				ImGui::Spacing();
@@ -939,7 +965,9 @@ namespace Index {
 
 			if (m_IsCreating || createTaskRunning) {
 				ImGui::Spacing();
-				ImGui::TextDisabled("%s", createStage.empty() ? "Creating project..." : createStage.c_str());
+				ImGui::TextDisabled("%s", createStage.empty()
+					? IDX_TR("launcher.create.default_stage").c_str()
+					: createStage.c_str());
 				ImGui::ProgressBar(createProgress, ImVec2(-1, 0));
 			}
 
@@ -950,7 +978,7 @@ namespace Index {
 			bool canCreate = IndexProject::IsValidProjectName(m_NewProjectName) && !m_IsCreating;
 			if (!canCreate) ImGui::BeginDisabled();
 
-			if (ImGui::Button("Create", ImVec2(120, 0))) {
+			if (ImGui::Button(IDX_TR("launcher.create.create_button").c_str(), ImVec2(120, 0))) {
 				Timer timer;
 				StartCreateProjectAsync(std::string(m_NewProjectName), std::string(m_NewProjectLocation));
 				IDX_INFO_TAG("Project", "Queued async project creation in {}", StringHelper::ToString(timer));
@@ -962,7 +990,9 @@ namespace Index {
 			if (m_IsCreating) {
 				ImGui::BeginDisabled();
 			}
-			if (ImGui::Button(m_IsCreating ? "Working..." : "Cancel", ImVec2(120, 0))) {
+			if (ImGui::Button(m_IsCreating
+				? IDX_TR("launcher.create.working").c_str()
+				: IDX_TR("launcher.create.cancel").c_str(), ImVec2(120, 0))) {
 				ImGui::CloseCurrentPopup();
 			}
 			if (m_IsCreating) {
@@ -995,7 +1025,7 @@ namespace Index {
 					DWORD exitCode = 0;
 					if (GetExitCodeProcess(hProc, &exitCode) && exitCode == STILL_ACTIVE) {
 						CloseHandle(hProc);
-						m_OpenError = "Project already open";
+						m_OpenError = IDX_TR("launcher.error.project_already_open");
 						return;
 					}
 					CloseHandle(hProc);
@@ -1444,8 +1474,10 @@ namespace Index {
 	}
 
 	void LauncherLayer::RenderSettingsPopup() {
+		constexpr const char* k_SettingsId = "###LauncherSettings";
+
 		if (m_OpenSettingsPopup) {
-			ImGui::OpenPopup("Launcher Settings");
+			ImGui::OpenPopup(k_SettingsId);
 			m_OpenSettingsPopup = false;
 		}
 
@@ -1454,7 +1486,8 @@ namespace Index {
 			ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
 		}
 		ImGui::SetNextWindowSize(ImVec2(560, 0), ImGuiCond_Appearing);
-		if (!ImGui::BeginPopupModal("Launcher Settings", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+		const std::string settingsTitle = IDX_TR("launcher.settings.title") + k_SettingsId;
+		if (!ImGui::BeginPopupModal(settingsTitle.c_str(), nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
 			return;
 		}
 
@@ -1468,16 +1501,16 @@ namespace Index {
 			? IndexProject::GetDefaultProjectsDir()
 			: m_DefaultProjectsLocation;
 
-		ImGui::TextUnformatted("Default projects location");
-		ImGui::TextDisabled("Used when creating a new project.");
+		ImGui::TextUnformatted(IDX_TR("launcher.settings.default_location").c_str());
+		ImGui::TextDisabled("%s", IDX_TR("launcher.settings.default_location_subtitle").c_str());
 
 		// Surface the current value as a small read-only line so the user
 		// can compare what's saved vs. what they're typing — particularly
 		// useful when the input is the engine fallback (no explicit
 		// override) so it's clear they haven't customised anything yet.
-		ImGui::TextDisabled("Current: %s%s",
-			effectiveDefault.c_str(),
-			m_DefaultProjectsLocation.empty() ? "  (engine default)" : "");
+		const std::string currentLine = Localization::Format("launcher.settings.current", effectiveDefault)
+			+ (m_DefaultProjectsLocation.empty() ? IDX_TR("launcher.settings.engine_default_suffix") : std::string{});
+		ImGui::TextDisabled("%s", currentLine.c_str());
 		ImGui::Spacing();
 
 		// Editable buffer kept on the popup itself — sized for typical
@@ -1492,7 +1525,7 @@ namespace Index {
 		ImGui::SetNextItemWidth(-110.0f);
 		ImGui::InputText("##DefaultLocation", s_LocationBuffer, sizeof(s_LocationBuffer));
 		ImGui::SameLine();
-		if (ImGui::Button("Browse...", ImVec2(100, 0))) {
+		if (ImGui::Button(IDX_TR("launcher.settings.browse").c_str(), ImVec2(100, 0))) {
 			BrowseForDefaultProjectsLocation();
 			std::snprintf(s_LocationBuffer, sizeof(s_LocationBuffer), "%s",
 				m_DefaultProjectsLocation.c_str());
@@ -1502,7 +1535,64 @@ namespace Index {
 		ImGui::Separator();
 		ImGui::Spacing();
 
-		if (ImGui::Button("Save", ImVec2(100, 0))) {
+		// Language selector. Persists immediately on selection — separate
+		// from the Save/Cancel buttons below which only commit the
+		// default-projects-location override. Hot reload is supported by
+		// the Localization service: switching here re-translates every
+		// IDX_TR() lookup next frame, including this popup's own labels.
+		// Entries that aren't installed yet are decorated with a status
+		// suffix; picking one kicks off an async download whose progress
+		// shows inline below the combo (see Localization::Poll()).
+		ImGui::TextUnformatted(IDX_TR("launcher.settings.language").c_str());
+		const auto& languages = Localization::GetAvailableLanguages();
+		const std::string& currentCode = Localization::GetCurrentLanguage();
+		const std::string notInstalledSuffix = IDX_TR("launcher.settings.language.not_installed_suffix");
+		int activeIdx = 0;
+		for (size_t i = 0; i < languages.size(); ++i) {
+			if (languages[i].Code == currentCode) {
+				activeIdx = static_cast<int>(i);
+				break;
+			}
+		}
+		const char* previewName = languages.empty() ? "" : languages[activeIdx].DisplayName.c_str();
+		ImGui::SetNextItemWidth(-1.0f);
+		if (ImGui::BeginCombo("##LauncherLanguageCombo", previewName)) {
+			for (size_t i = 0; i < languages.size(); ++i) {
+				const bool selected = (static_cast<int>(i) == activeIdx);
+				std::string label = languages[i].DisplayName;
+				if (languages[i].Status != Localization::LanguageStatus::Installed) {
+					label += notInstalledSuffix;
+				}
+				if (ImGui::Selectable(label.c_str(), selected)) {
+					Localization::SetLanguage(languages[i].Code);
+				}
+				if (selected) ImGui::SetItemDefaultFocus();
+			}
+			ImGui::EndCombo();
+		}
+
+		if (const auto download = Localization::GetActiveDownload()) {
+			ImGui::Spacing();
+			if (download->Failed) {
+				const std::string msg = Localization::Format("launcher.settings.language.download_failed", download->Error);
+				ImGui::TextColored(ImVec4(1, 0.3f, 0.3f, 1), "%s", msg.c_str());
+			}
+			else if (download->RestartRequired) {
+				ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.35f, 1.0f), "%s",
+					IDX_TR("launcher.settings.language.restart_required").c_str());
+			}
+			else {
+				const std::string msg = Localization::Format("launcher.settings.language.downloading", download->Code);
+				ImGui::TextDisabled("%s", msg.c_str());
+				ImGui::ProgressBar(download->Progress, ImVec2(-1.0f, 0));
+			}
+		}
+
+		ImGui::Spacing();
+		ImGui::Separator();
+		ImGui::Spacing();
+
+		if (ImGui::Button(IDX_TR("launcher.settings.save").c_str(), ImVec2(100, 0))) {
 			// If the user left the field at the engine default verbatim,
 			// don't persist it as an override — the empty-string sentinel
 			// keeps the "follows engine default" behaviour even if the
@@ -1518,7 +1608,7 @@ namespace Index {
 			ImGui::CloseCurrentPopup();
 		}
 		ImGui::SameLine();
-		if (ImGui::Button("Cancel", ImVec2(100, 0))) {
+		if (ImGui::Button(IDX_TR("launcher.settings.cancel").c_str(), ImVec2(100, 0))) {
 			ImGui::CloseCurrentPopup();
 		}
 
@@ -1544,8 +1634,10 @@ namespace Index {
 	}
 
 	void LauncherLayer::RenderProjectInfoPopup() {
+		constexpr const char* k_InfoId = "###LauncherProjectInfo";
+
 		if (m_OpenInfoPopup) {
-			ImGui::OpenPopup("Project Info");
+			ImGui::OpenPopup(k_InfoId);
 			m_OpenInfoPopup = false;
 		}
 
@@ -1554,7 +1646,8 @@ namespace Index {
 			ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
 		}
 		ImGui::SetNextWindowSize(ImVec2(560, 0), ImGuiCond_Appearing);
-		if (!ImGui::BeginPopupModal("Project Info", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+		const std::string infoTitle = IDX_TR("launcher.info.title") + k_InfoId;
+		if (!ImGui::BeginPopupModal(infoTitle.c_str(), nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
 			return;
 		}
 
@@ -1578,10 +1671,15 @@ namespace Index {
 				auto project = IndexProject::Load(entry.Path);
 				version = project.EngineVersion;
 			}
-			if (version.empty()) version = "unknown";
+			// Cache an empty sentinel rather than the translated "unknown"
+			// string — that way hot-reloading the language picks up the new
+			// translation on next frame without invalidating the cache.
 			versionIt = m_EngineVersionCache.emplace(entry.Path, std::move(version)).first;
 		}
-		const std::string& engineVersion = versionIt->second;
+		const std::string& engineVersionCached = versionIt->second;
+		const std::string engineVersion = engineVersionCached.empty()
+			? IDX_TR("launcher.info.unknown")
+			: engineVersionCached;
 
 		// Lazily look up the creation/modification timestamp of the project
 		// directory. Reuses m_CreatedAtCache so this shares state with the
@@ -1631,7 +1729,7 @@ namespace Index {
 			// "Open in Explorer" path. Sized so the button always fits.
 			ImGui::TableNextRow();
 			ImGui::TableSetColumnIndex(0);
-			ImGui::TextUnformatted("Path");
+			ImGui::TextUnformatted(IDX_TR("launcher.info.path").c_str());
 			ImGui::TableSetColumnIndex(1);
 			{
 				static char s_PathBuffer[1024];
@@ -1641,12 +1739,12 @@ namespace Index {
 				ImGui::InputText("##InfoPath", s_PathBuffer, sizeof(s_PathBuffer),
 					ImGuiInputTextFlags_ReadOnly);
 				ImGui::SameLine();
-				if (ImGui::Button("Open", ImVec2(buttonWidth, 0))) {
+				if (ImGui::Button(IDX_TR("launcher.info.open").c_str(), ImVec2(buttonWidth, 0))) {
 					OpenProjectInExplorer(entry);
 				}
 			}
 
-			labelValueRow("Created", createdStr.c_str());
+			labelValueRow(IDX_TR("launcher.info.created").c_str(), createdStr.c_str());
 
 			// Last opened: show the relative form ("3h ago") plus the raw ISO
 			// timestamp in parens so power users can see the exact moment.
@@ -1658,11 +1756,11 @@ namespace Index {
 					lastOpenedCombined = entry.LastOpened;
 				}
 			}
-			labelValueRow("Last Opened",
-				lastOpenedCombined.empty() ? "never" : lastOpenedCombined.c_str());
+			labelValueRow(IDX_TR("launcher.info.last_opened").c_str(),
+				lastOpenedCombined.empty() ? IDX_TR("launcher.info.never").c_str() : lastOpenedCombined.c_str());
 
-			labelValueRow("Size", sizeStr.c_str());
-			labelValueRow("Engine Version", engineVersion.c_str());
+			labelValueRow(IDX_TR("launcher.info.size").c_str(), sizeStr.c_str());
+			labelValueRow(IDX_TR("launcher.info.engine_version").c_str(), engineVersion.c_str());
 
 			ImGui::EndTable();
 		}
@@ -1671,7 +1769,7 @@ namespace Index {
 		ImGui::Separator();
 		ImGui::Spacing();
 
-		if (ImGui::Button("Close", ImVec2(100, 0))) {
+		if (ImGui::Button(IDX_TR("launcher.info.close").c_str(), ImVec2(100, 0))) {
 			m_PendingInfoProject.reset();
 			ImGui::CloseCurrentPopup();
 		}

@@ -1,0 +1,85 @@
+{
+  "meta": {
+    "code": "ja",
+    "displayName": "Japanese (日本語)",
+    "fallback": "en",
+    "schemaVersion": 1
+  },
+  "strings": {
+    "launcher.title": "Index Engine",
+
+    "launcher.progress.opening_project": "プロジェクトを開いています",
+    "launcher.progress.working": "処理中...",
+    "launcher.progress.launching_editor": "エディタを起動中...",
+
+    "launcher.sort.label": "並べ替え:",
+    "launcher.sort.mode.last_opened": "最終使用",
+    "launcher.sort.mode.name": "名前",
+    "launcher.sort.mode.created": "作成日",
+    "launcher.sort.tooltip.ascending": "昇順で並べ替え",
+    "launcher.sort.tooltip.descending": "降順で並べ替え",
+    "launcher.sort.tooltip.refresh": "プロジェクト一覧を更新",
+
+    "launcher.action.create_new_project": "新規プロジェクトを作成",
+    "launcher.action.add_existing_project": "既存のプロジェクトを追加",
+    "launcher.action.settings": "設定",
+
+    "launcher.list.empty.title": "プロジェクトがありません",
+    "launcher.list.empty.subtitle": "新規プロジェクトを作成するか、既存のプロジェクトを追加してください。",
+    "launcher.list.size_prefix": "サイズ: {0}",
+    "launcher.list.open": "開く",
+
+    "launcher.context.info": "情報",
+    "launcher.context.open_in_explorer": "エクスプローラーで開く",
+    "launcher.context.remove_from_list": "リストから削除",
+    "launcher.context.delete_project": "プロジェクトを削除...",
+
+    "launcher.delete.title": "プロジェクトを削除しますか?",
+    "launcher.delete.message": "プロジェクト '{0}' を削除しますか?",
+    "launcher.delete.body": "プロジェクトフォルダはディスクから完全に削除され、ランチャーの一覧からも削除されます。",
+    "launcher.delete.folder_label": "フォルダ: {0}",
+    "launcher.delete.continue": "続行",
+    "launcher.delete.cancel": "キャンセル",
+
+    "launcher.delete_final.title": "プロジェクトを完全に削除しますか?",
+    "launcher.delete_final.message": "最終確認: '{0}' を完全に削除しますか?",
+    "launcher.delete_final.body": "この操作は取り消せません。下記のフォルダはディスクから削除されます。",
+    "launcher.delete_final.confirm": "完全に削除",
+
+    "launcher.create.title": "新規プロジェクトを作成",
+    "launcher.create.project_name": "プロジェクト名:",
+    "launcher.create.location": "場所:",
+    "launcher.create.path_preview": "パス: {0}",
+    "launcher.create.default_stage": "プロジェクトを作成中...",
+    "launcher.create.create_button": "作成",
+    "launcher.create.working": "処理中...",
+    "launcher.create.cancel": "キャンセル",
+
+    "launcher.settings.title": "ランチャー設定",
+    "launcher.settings.default_location": "デフォルトのプロジェクト保存場所",
+    "launcher.settings.default_location_subtitle": "新規プロジェクト作成時に使用されます。",
+    "launcher.settings.current": "現在: {0}",
+    "launcher.settings.engine_default_suffix": "  (エンジン標準)",
+    "launcher.settings.language": "言語",
+    "launcher.settings.language.not_installed_suffix": " (未インストール)",
+    "launcher.settings.language.downloading": "{0} をダウンロード中…",
+    "launcher.settings.language.download_failed": "ダウンロードに失敗しました: {0}",
+    "launcher.settings.language.restart_required": "CJK文字を表示するにはランチャーを再起動してください。",
+    "launcher.settings.browse": "参照...",
+    "launcher.settings.save": "保存",
+    "launcher.settings.cancel": "キャンセル",
+
+    "launcher.error.project_already_open": "プロジェクトは既に開いています",
+
+    "launcher.info.title": "プロジェクト情報",
+    "launcher.info.path": "パス",
+    "launcher.info.created": "作成日",
+    "launcher.info.last_opened": "最終使用",
+    "launcher.info.size": "サイズ",
+    "launcher.info.engine_version": "エンジンバージョン",
+    "launcher.info.never": "なし",
+    "launcher.info.unknown": "不明",
+    "launcher.info.open": "開く",
+    "launcher.info.close": "閉じる"
+  }
+}

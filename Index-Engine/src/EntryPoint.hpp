@@ -10,6 +10,7 @@
 
 #include "Core/Base.hpp"
 #include "Core/Application.hpp"
+#include "Localization/Localization.hpp"
 
 #include <memory>
 #include <string>
@@ -113,6 +114,8 @@ namespace Index {
 				ShutdownCore();
 			}
 		} shutdownGuard;
+
+		Localization::Initialize();
 
 #ifdef IDX_PLATFORM_WINDOWS
 		Detail::CommandLineStorage& commandLineStorage = Detail::GetCommandLineStorage();

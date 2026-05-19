@@ -1388,17 +1388,22 @@ namespace Index {
 		}
 
 		{
+			// Empty FirstName encodes "no NameComponent" — the inspector's
+			// InputText renders an "Entity" placeholder hint for that case,
+			// instead of pre-filling the buffer with a literal "Entity"
+			// (which the user could accidentally commit, creating a stray
+			// NameComponent on the entity).
 			Entity& first = entities[0];
 			m_InspectorCache.FirstName = first.HasComponent<NameComponent>()
 				? first.GetComponent<NameComponent>().Name
-				: std::string("Entity");
+				: std::string{};
 			m_InspectorCache.NameUniform = true;
 			const std::string_view firstView = m_InspectorCache.FirstName;
 			for (std::size_t i = 1; i < entities.size(); ++i) {
 				Entity& e = entities[i];
 				const std::string_view name = e.HasComponent<NameComponent>()
 					? std::string_view(e.GetComponent<NameComponent>().Name)
-					: std::string_view("Entity");
+					: std::string_view{};
 				if (name != firstView) { m_InspectorCache.NameUniform = false; break; }
 			}
 		}
@@ -1650,7 +1655,18 @@ namespace Index {
 		Entity entity = scene.GetEntity(m_SelectedEntity);
 		m_RenamingEntity = m_SelectedEntity;
 		m_EntityRenameFrameCounter = 0;
-		std::snprintf(m_EntityRenameBuffer, sizeof(m_EntityRenameBuffer), "%s", entity.GetName().c_str());
+		// Pre-fill only when the entity actually has a name. Entity::GetName()
+		// synthesises "Unnamed Entity (<id>)" for nameless entities — committing
+		// that placeholder verbatim would mint a real NameComponent with that
+		// text. Empty buffer lets the user type fresh and lets the empty-commit
+		// branch in the rename handler leave the entity nameless.
+		if (entity.HasComponent<NameComponent>()) {
+			std::snprintf(m_EntityRenameBuffer, sizeof(m_EntityRenameBuffer), "%s",
+				entity.GetComponent<NameComponent>().Name.c_str());
+		}
+		else {
+			m_EntityRenameBuffer[0] = '\0';
+		}
 	}
 
 	void ImGuiEditorLayer::UnpackSelectedPrefabs(Scene& scene) {
@@ -3557,18 +3573,26 @@ namespace Index {
 			ImGui::TextDisabled("(%zu)", selectedEntities.size());
 		}
 
-		// Editable Name. With multi-select, mixed names display "—" via the
-		// hint and edits propagate to all entities (creating NameComponent
-		// when missing; removing NameComponent for an empty name).
+		// Editable Name. The buffer is pre-filled with the actual name when
+		// the selection is uniform AND named — otherwise the buffer stays
+		// empty and a hint signals the state to the user without becoming
+		// committable text:
+		//   • uniform, no NameComponent → buffer empty, hint "Entity"
+		//   • uniform, named            → buffer holds the name, no hint
+		//   • mixed selection           → buffer empty, hint "-"
+		// This avoids the old bug where pressing Enter on an unnamed
+		// entity (where the buffer was pre-filled with the literal text
+		// "Entity") created a real NameComponent("Entity").
 		const bool nameUniform = m_InspectorCache.NameUniform;
 		char nameBuf[256]{};
-		if (nameUniform) {
+		if (nameUniform && !m_InspectorCache.FirstName.empty()) {
 			std::snprintf(nameBuf, sizeof(nameBuf), "%s", m_InspectorCache.FirstName.c_str());
 		}
+		const char* nameHint = nameUniform ? "Entity" : "-";
 		ImGui::SetNextItemWidth(-1);
-		const bool nameSubmitted = nameUniform
-			? ImGui::InputText("##EntityName", nameBuf, sizeof(nameBuf), ImGuiInputTextFlags_EnterReturnsTrue)
-			: ImGui::InputTextWithHint("##EntityName", "-", nameBuf, sizeof(nameBuf), ImGuiInputTextFlags_EnterReturnsTrue);
+		const bool nameSubmitted = ImGui::InputTextWithHint(
+			"##EntityName", nameHint, nameBuf, sizeof(nameBuf),
+			ImGuiInputTextFlags_EnterReturnsTrue);
 		if (nameSubmitted) {
 			std::string newName(nameBuf);
 			for (Entity& e : selectedEntities) {

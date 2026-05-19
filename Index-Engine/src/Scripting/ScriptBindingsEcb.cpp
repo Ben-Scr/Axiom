@@ -323,6 +323,24 @@ namespace Index {
 				info->emplaceFromBytes(scene->GetRegistry(), handles[entityIndex],
 					payload, payloadSize);
 			}
+			else if (opcode == Ecb_DefaultConstructComponent) {
+				// Payload-free record — typeId selects the component, and the
+				// auto-wired `defaultEmplace` runs `registry.emplace<T>(handle)`
+				// so the C++ member-initializers fire. Failure here is the
+				// same surface as Ecb_AddComponent: unknown typeId OR a
+				// component that opted out of default-construction (no
+				// auto-wired callback because it isn't default-constructible).
+				const ComponentInfo* info = componentRegistry.GetByTypeId(typeId);
+				if (info == nullptr || info->defaultEmplace == nullptr) {
+					IDX_CORE_WARN_TAG("Ecb",
+						"DefaultConstructComponent for typeId {} cannot proceed: no "
+						"registered component or component is not default-constructible "
+						"(use the value or patch overload of AddComponent instead).",
+						typeId);
+					return kEcbErrorUnknownComponent;
+				}
+				info->defaultEmplace(scene->GetRegistry(), handles[entityIndex]);
+			}
 			else if (opcode == Ecb_InstantiatePrefab) {
 				// prefabSpawns is built in command-stream order by the
 				// pre-scan; the cursor advances in lockstep, so a simple

@@ -1,6 +1,8 @@
 #include "pch.hpp"
 #include "Scene/BuiltInComponentRegistration.hpp"
 
+#include "Scene/CodegenSidecarLoader.hpp"
+#include "Scene/ComponentRegistrationHelpers.hpp"
 #include "Assets/AssetRegistry.hpp"
 #include "Audio/AudioManager.hpp"
 #include "Components/Forward.hpp"
@@ -120,18 +122,10 @@ namespace Index {
 			});
 		}
 
-		template<typename T>
-		void RegisterComponent(SceneManager& sceneManager, const std::string& displayName,
-			ComponentCategory category = ComponentCategory::Component,
-			const std::string& subcategory = "",
-			const std::string& serializedName = "",
-			std::vector<PropertyDescriptor> properties = {})
-		{
-			ComponentInfo info{ displayName, subcategory, category };
-			info.serializedName = serializedName;
-			info.properties = std::move(properties);
-			sceneManager.RegisterComponentType<T>(info);
-		}
+		// RegisterComponent<T>, DeclareConflict<A,B>, DeclareDependency<TDependent,TDependency>
+		// moved to Scene/ComponentRegistrationHelpers.hpp so the generated
+		// Generated/CodegenComponents.cpp (user-defined C# components) can call
+		// them via the same templates as the hand-written engine registrations.
 
 		// Save/load an InspectorEventList alongside its host component.
 		// Used by every UI widget that owns one or more event lists
@@ -174,40 +168,6 @@ namespace Index {
 					outList.Bindings.push_back(std::move(b));
 				}
 			}
-		}
-
-		template<typename A, typename B>
-		void DeclareConflict(SceneManager& sceneManager) {
-			const std::type_index aId(typeid(A));
-			const std::type_index bId(typeid(B));
-			sceneManager.GetComponentRegistry().ForEachComponentInfo(
-				[&](const std::type_index& id, ComponentInfo& info) {
-					if (id == aId) {
-						bool present = false;
-						for (const auto& c : info.conflictsWith) if (c == bId) { present = true; break; }
-						if (!present) info.conflictsWith.push_back(bId);
-					}
-					else if (id == bId) {
-						bool present = false;
-						for (const auto& c : info.conflictsWith) if (c == aId) { present = true; break; }
-						if (!present) info.conflictsWith.push_back(aId);
-					}
-				});
-		}
-
-		// TDependent.dependsOn += TDependency. Directed (NOT symmetric):
-		// the inverse declaration would mean "TDependency pulls in
-		// TDependent on add," which is virtually never what we want.
-		template<typename TDependent, typename TDependency>
-		void DeclareDependency(SceneManager& sceneManager) {
-			const std::type_index dependentId(typeid(TDependent));
-			const std::type_index dependencyId(typeid(TDependency));
-			sceneManager.GetComponentRegistry().ForEachComponentInfo(
-				[&](const std::type_index& id, ComponentInfo& info) {
-					if (id != dependentId) return;
-					for (const auto& c : info.dependsOn) if (c == dependencyId) return;
-					info.dependsOn.push_back(dependencyId);
-				});
 		}
 
 		// onAdd hook for UI widgets with a NormalColor field. When the user
@@ -318,6 +278,10 @@ namespace Index {
 	}
 
 	void RegisterBuiltInComponents(SceneManager& sceneManager) {
+		using Index::Codegen::RegisterComponent;
+		using Index::Codegen::DeclareConflict;
+		using Index::Codegen::DeclareDependency;
+
 		// ── General ─────────────────────────────────────────────────
 
 		// The inspector edits the authored Local* values (Unity-style).
@@ -390,6 +354,18 @@ namespace Index {
 					[](SpriteRendererComponent& s, TextureHandle h, UUID assetId) {
 						s.TextureHandle = h;
 						s.TextureAssetId = assetId;
+						if (auto* tex = TextureManager::GetTexture(h); tex) {
+							tex->SetFilter(s.FilterMode);
+						}
+					}),
+				Properties::MakeWith<Filter>("FilterMode", "Filter Mode",
+					[](const Entity& e) { return e.GetComponent<SpriteRendererComponent>().FilterMode; },
+					[](Entity& e, Filter v) {
+						auto& sprite = e.GetComponent<SpriteRendererComponent>();
+						sprite.FilterMode = v;
+						if (auto* tex = TextureManager::GetTexture(sprite.TextureHandle); tex) {
+							tex->SetFilter(v);
+						}
 					}),
 			});
 
@@ -2497,6 +2473,15 @@ namespace Index {
 		RegisterComponent<DisabledTag>(sceneManager, "Disabled", ComponentCategory::Tag);
 		RegisterComponent<InheritedDisabledTag>(sceneManager, "Inherited Disabled", ComponentCategory::Tag);
 		RegisterComponent<DeadlyTag>(sceneManager, "Deadly", ComponentCategory::Tag);
+
+		// User-defined C# components mirrored into C++ by IndexComponentCodegen.
+		// The generated TU lives in the Index-GameComponents sidecar project
+		// (src/CodegenComponents.cpp) and compiles into Index-GameComponents.dll.
+		// The engine has no static link dependency on user components —
+		// LoadCodegenComponents finds the sidecar next to the consumer exe and
+		// calls its exported registration function. Missing sidecar is fine and
+		// behaves like the old no-op stub. See CodegenSidecarLoader.cpp.
+		LoadCodegenComponents(sceneManager);
 
 		// Debug-only sanity check: every conflictsWith edge must be symmetric.
 		// DeclareConflict<A, B> already adds both directions, but a manual

@@ -499,6 +499,8 @@ internal static unsafe class InternalCalls
     internal static void SpriteRenderer_SetSortingOrder(ulong id, int order) => NativeCallbacks.Bindings.SpriteRenderer_SetSortingOrder(id, order);
     internal static int SpriteRenderer_GetSortingLayer(ulong id) => NativeCallbacks.Bindings.SpriteRenderer_GetSortingLayer(id);
     internal static void SpriteRenderer_SetSortingLayer(ulong id, int layer) => NativeCallbacks.Bindings.SpriteRenderer_SetSortingLayer(id, layer);
+    internal static int SpriteRenderer_GetFilter(ulong id) => NativeCallbacks.Bindings.SpriteRenderer_GetFilter(id);
+    internal static void SpriteRenderer_SetFilter(ulong id, int filter) => NativeCallbacks.Bindings.SpriteRenderer_SetFilter(id, filter);
 
     // ── TextRenderer ────────────────────────────────────────────────
 

@@ -194,6 +194,12 @@ public class SpriteRenderer : Component
         get => InternalCalls.SpriteRenderer_GetSortingLayer(RequireComponent<SpriteRenderer>());
         set => InternalCalls.SpriteRenderer_SetSortingLayer(RequireComponent<SpriteRenderer>(), value);
     }
+
+    public TextureFilter FilterMode
+    {
+        get => (TextureFilter)InternalCalls.SpriteRenderer_GetFilter(RequireComponent<SpriteRenderer>());
+        set => InternalCalls.SpriteRenderer_SetFilter(RequireComponent<SpriteRenderer>(), (int)value);
+    }
 }
 
 

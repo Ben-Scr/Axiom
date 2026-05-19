@@ -1,0 +1,85 @@
+{
+  "meta": {
+    "code": "de",
+    "displayName": "Deutsch",
+    "fallback": "en",
+    "schemaVersion": 1
+  },
+  "strings": {
+    "launcher.title": "Index Engine",
+
+    "launcher.progress.opening_project": "Projekt wird geöffnet",
+    "launcher.progress.working": "Wird ausgeführt...",
+    "launcher.progress.launching_editor": "Editor wird gestartet...",
+
+    "launcher.sort.label": "Sortieren:",
+    "launcher.sort.mode.last_opened": "Zuletzt geöffnet",
+    "launcher.sort.mode.name": "Name",
+    "launcher.sort.mode.created": "Erstellt",
+    "launcher.sort.tooltip.ascending": "Aufsteigend sortieren",
+    "launcher.sort.tooltip.descending": "Absteigend sortieren",
+    "launcher.sort.tooltip.refresh": "Projektliste aktualisieren",
+
+    "launcher.action.create_new_project": "Neues Projekt erstellen",
+    "launcher.action.add_existing_project": "Vorhandenes Projekt hinzufügen",
+    "launcher.action.settings": "Einstellungen",
+
+    "launcher.list.empty.title": "Noch keine Projekte",
+    "launcher.list.empty.subtitle": "Erstellen Sie ein neues Projekt oder fügen Sie ein bestehendes hinzu.",
+    "launcher.list.size_prefix": "Größe: {0}",
+    "launcher.list.open": "Öffnen",
+
+    "launcher.context.info": "Info",
+    "launcher.context.open_in_explorer": "Im Explorer öffnen",
+    "launcher.context.remove_from_list": "Aus Liste entfernen",
+    "launcher.context.delete_project": "Projekt löschen...",
+
+    "launcher.delete.title": "Projekt löschen?",
+    "launcher.delete.message": "Projekt '{0}' löschen?",
+    "launcher.delete.body": "Dadurch wird der Projektordner dauerhaft von der Festplatte entfernt und aus der Launcher-Liste gelöscht.",
+    "launcher.delete.folder_label": "Ordner: {0}",
+    "launcher.delete.continue": "Weiter",
+    "launcher.delete.cancel": "Abbrechen",
+
+    "launcher.delete_final.title": "Projekt endgültig löschen?",
+    "launcher.delete_final.message": "Letzte Bestätigung: '{0}' endgültig löschen?",
+    "launcher.delete_final.body": "Diese Aktion kann nicht rückgängig gemacht werden. Der unten angezeigte Ordner wird von der Festplatte gelöscht.",
+    "launcher.delete_final.confirm": "Endgültig löschen",
+
+    "launcher.create.title": "Neues Projekt erstellen",
+    "launcher.create.project_name": "Projektname:",
+    "launcher.create.location": "Speicherort:",
+    "launcher.create.path_preview": "Pfad: {0}",
+    "launcher.create.default_stage": "Projekt wird erstellt...",
+    "launcher.create.create_button": "Erstellen",
+    "launcher.create.working": "Wird ausgeführt...",
+    "launcher.create.cancel": "Abbrechen",
+
+    "launcher.settings.title": "Launcher-Einstellungen",
+    "launcher.settings.default_location": "Standard-Projektspeicherort",
+    "launcher.settings.default_location_subtitle": "Wird beim Erstellen eines neuen Projekts verwendet.",
+    "launcher.settings.current": "Aktuell: {0}",
+    "launcher.settings.engine_default_suffix": "  (Engine-Standard)",
+    "launcher.settings.language": "Sprache",
+    "launcher.settings.language.not_installed_suffix": " (nicht installiert)",
+    "launcher.settings.language.downloading": "Lade {0}…",
+    "launcher.settings.language.download_failed": "Download fehlgeschlagen: {0}",
+    "launcher.settings.language.restart_required": "Starten Sie den Launcher neu, um CJK-Zeichen anzuzeigen.",
+    "launcher.settings.browse": "Durchsuchen...",
+    "launcher.settings.save": "Speichern",
+    "launcher.settings.cancel": "Abbrechen",
+
+    "launcher.error.project_already_open": "Projekt bereits geöffnet",
+
+    "launcher.info.title": "Projektinformationen",
+    "launcher.info.path": "Pfad",
+    "launcher.info.created": "Erstellt",
+    "launcher.info.last_opened": "Zuletzt geöffnet",
+    "launcher.info.size": "Größe",
+    "launcher.info.engine_version": "Engine-Version",
+    "launcher.info.never": "nie",
+    "launcher.info.unknown": "unbekannt",
+    "launcher.info.open": "Öffnen",
+    "launcher.info.close": "Schließen"
+  }
+}

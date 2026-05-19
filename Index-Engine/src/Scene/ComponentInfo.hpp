@@ -97,6 +97,16 @@ namespace Index {
 		void (*emplaceFromBytes)(entt::registry& registry, EntityHandle entity,
 			const void* bytes, size_t size) = nullptr;
 
+		// Default-construct emplacer. Calls `registry.emplace<T>(entity)`, firing the
+		// C++ default-member-initializers (e.g. Transform2DComponent::Scale{1,1},
+		// SpriteRendererComponent::Color{1,1,1,1}). Auto-wired by
+		// ComponentRegistry::Register for any non-empty, default-constructible T.
+		// Used by the ECB's Ecb_DefaultConstructComponent opcode so
+		// `CreateEntityWith<T...>` attaches components with engine defaults — the
+		// managed-side `default(T)` is all-zero bytes and would silently clobber
+		// those defaults if routed through emplaceFromBytes instead.
+		void (*defaultEmplace)(entt::registry& registry, EntityHandle entity) = nullptr;
+
 		// Symmetric counterpart to emplaceFromBytes — serializes the live
 		// component instance to a contiguous byte buffer that emplaceFromBytes
 		// can later consume. Used by the PrefabTemplateCache to bake a prefab

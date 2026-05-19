@@ -917,11 +917,14 @@ namespace Index {
 			auto& registry = scene.GetRegistry();
 			Value entityValue = Value::MakeObject();
 
-			std::string name = "Entity";
+			// Only emit "name" when the entity actually has a NameComponent.
+			// Writing a placeholder string here was sticky: a round-trip
+			// (reload, duplicate, prefab) would deserialize the placeholder
+			// back into a real NameComponent, so an unnamed entity gained
+			// a name as a side effect of every save.
 			if (registry.all_of<NameComponent>(entity)) {
-				name = registry.get<NameComponent>(entity).Name;
+				entityValue.AddMember("name", Value(registry.get<NameComponent>(entity).Name));
 			}
-			entityValue.AddMember("name", Value(name));
 
 			if (registry.all_of<UUIDComponent>(entity)) {
 				entityValue.AddMember(
@@ -995,6 +998,7 @@ namespace Index {
 				spriteValue.AddMember("a", Value(spriteRenderer.Color.a));
 				spriteValue.AddMember("sortOrder", Value(static_cast<int>(spriteRenderer.SortingOrder)));
 				spriteValue.AddMember("sortLayer", Value(static_cast<int>(spriteRenderer.SortingLayer)));
+				spriteValue.AddMember("filterMode", Value(static_cast<int>(spriteRenderer.FilterMode)));
 
 				uint64_t textureAssetId = static_cast<uint64_t>(spriteRenderer.TextureAssetId);
 				if (textureAssetId == 0) {
@@ -1008,7 +1012,6 @@ namespace Index {
 					spriteValue.AddMember("textureAsset", Value(std::to_string(textureAssetId)));
 					Texture2D* texture = TextureManager::GetTexture(spriteRenderer.TextureHandle);
 					if (texture) {
-						spriteValue.AddMember("filter", Value(static_cast<int>(texture->GetFilter())));
 						spriteValue.AddMember("wrapU", Value(static_cast<int>(texture->GetWrapU())));
 						spriteValue.AddMember("wrapV", Value(static_cast<int>(texture->GetWrapV())));
 					}

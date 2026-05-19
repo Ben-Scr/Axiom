@@ -1,0 +1,85 @@
+{
+  "meta": {
+    "code": "en",
+    "displayName": "English",
+    "fallback": "en",
+    "schemaVersion": 1
+  },
+  "strings": {
+    "launcher.title": "Index Engine",
+
+    "launcher.progress.opening_project": "Opening project",
+    "launcher.progress.working": "Working...",
+    "launcher.progress.launching_editor": "Launching editor...",
+
+    "launcher.sort.label": "Sort:",
+    "launcher.sort.mode.last_opened": "Last Opened",
+    "launcher.sort.mode.name": "Name",
+    "launcher.sort.mode.created": "Created",
+    "launcher.sort.tooltip.ascending": "Sort ascending",
+    "launcher.sort.tooltip.descending": "Sort descending",
+    "launcher.sort.tooltip.refresh": "Refresh project list",
+
+    "launcher.action.create_new_project": "Create New Project",
+    "launcher.action.add_existing_project": "Add Existing Project",
+    "launcher.action.settings": "Settings",
+
+    "launcher.list.empty.title": "No projects yet",
+    "launcher.list.empty.subtitle": "Create a new project or add an existing one.",
+    "launcher.list.size_prefix": "Size: {0}",
+    "launcher.list.open": "Open",
+
+    "launcher.context.info": "Info",
+    "launcher.context.open_in_explorer": "Open in Explorer",
+    "launcher.context.remove_from_list": "Remove from List",
+    "launcher.context.delete_project": "Delete Project...",
+
+    "launcher.delete.title": "Delete Project?",
+    "launcher.delete.message": "Delete project '{0}'?",
+    "launcher.delete.body": "This will permanently delete the project folder from disk and remove it from the launcher list.",
+    "launcher.delete.folder_label": "Folder: {0}",
+    "launcher.delete.continue": "Continue",
+    "launcher.delete.cancel": "Cancel",
+
+    "launcher.delete_final.title": "Permanently Delete Project?",
+    "launcher.delete_final.message": "Final confirmation: permanently delete '{0}'?",
+    "launcher.delete_final.body": "This action cannot be undone. The folder below will be deleted from disk.",
+    "launcher.delete_final.confirm": "Permanently Delete",
+
+    "launcher.create.title": "Create New Project",
+    "launcher.create.project_name": "Project Name:",
+    "launcher.create.location": "Location:",
+    "launcher.create.path_preview": "Path: {0}",
+    "launcher.create.default_stage": "Creating project...",
+    "launcher.create.create_button": "Create",
+    "launcher.create.working": "Working...",
+    "launcher.create.cancel": "Cancel",
+
+    "launcher.settings.title": "Launcher Settings",
+    "launcher.settings.default_location": "Default projects location",
+    "launcher.settings.default_location_subtitle": "Used when creating a new project.",
+    "launcher.settings.current": "Current: {0}",
+    "launcher.settings.engine_default_suffix": "  (engine default)",
+    "launcher.settings.language": "Language",
+    "launcher.settings.language.not_installed_suffix": " (not installed)",
+    "launcher.settings.language.downloading": "Downloading {0}…",
+    "launcher.settings.language.download_failed": "Download failed: {0}",
+    "launcher.settings.language.restart_required": "Restart the launcher to render CJK characters.",
+    "launcher.settings.browse": "Browse...",
+    "launcher.settings.save": "Save",
+    "launcher.settings.cancel": "Cancel",
+
+    "launcher.error.project_already_open": "Project already open",
+
+    "launcher.info.title": "Project Info",
+    "launcher.info.path": "Path",
+    "launcher.info.created": "Created",
+    "launcher.info.last_opened": "Last Opened",
+    "launcher.info.size": "Size",
+    "launcher.info.engine_version": "Engine Version",
+    "launcher.info.never": "never",
+    "launcher.info.unknown": "unknown",
+    "launcher.info.open": "Open",
+    "launcher.info.close": "Close"
+  }
+}

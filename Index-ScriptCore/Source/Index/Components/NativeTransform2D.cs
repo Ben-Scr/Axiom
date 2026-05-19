@@ -24,8 +24,11 @@ public struct NativeTransform2D : IComponent
     // triggers the field initializers below. WARNING: C# language rule —
     // `default(NativeTransform2D)` and uninitialized struct declarations
     // (e.g. `NativeTransform2D t;`) still produce a zero-init value where
-    // Scale = (0,0) and m_Dirty = false. Callers using EntityCommandBuffer
-    // should prefer `new NativeTransform2D { ... }` to keep the defaults.
+    // Scale = (0,0) and m_Dirty = false. This trap is real for any direct
+    // `ecb.AddComponent<NativeTransform2D>(e, default)` call. The
+    // `ecb.CreateEntityWith<NativeTransform2D, ...>()` family is safe — it
+    // records a payload-free Ecb_DefaultConstructComponent op so the C++
+    // member-initializers fire on the native side.
     public NativeTransform2D() { }
 
     private Vector2 m_Position;

@@ -138,6 +138,22 @@ internal static class ComponentTypes<T> where T : unmanaged, IComponent
         string? name = ComponentTypes.ResolveNativeName(typeof(T), managedSize, out int nativeSize);
         if (name == null)
         {
+            // Distinguish "user marked Generate=true but engine wasn't rebuilt"
+            // (the common case after adding a fresh C# component) from "I forgot
+            // [NativeComponent]" — the fix is wildly different and the
+            // generic message at the bottom is misleading for codegen users.
+            object[] attrs = typeof(T).GetCustomAttributes(typeof(NativeComponentAttribute), inherit: false);
+            NativeComponentAttribute? attr = attrs.Length > 0 ? (NativeComponentAttribute)attrs[0] : null;
+            if (attr is { Generate: true })
+            {
+                throw new InvalidOperationException(
+                    $"Component '{typeof(T).Name}' is marked [NativeComponent(\"{attr.Name}\", Generate = true)] " +
+                    "but the matching C++ side hasn't been generated yet. " +
+                    "Click 'Rebuild Engine' in the editor (or run `dotnet build " +
+                    "Index-Sandbox.csproj -p:IndexCodegenEnabled=true` and rebuild Index.sln) " +
+                    "so Index-ComponentCodegen emits the C++ struct + registration into " +
+                    "Index-Engine/src/Generated/CodegenComponents.cpp.");
+            }
             throw new InvalidOperationException(
                 $"Component '{typeof(T).Name}' is not registered for the ECS ref-API. " +
                 "Register the native component with the engine, or add [NativeComponent(\"Native Name\")] " +
