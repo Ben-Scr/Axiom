@@ -102,9 +102,10 @@ namespace Index {
 				{
 					"Rendering",
 					{
-						{ "Batches",   "Batches Count",   "" },
-						{ "Triangles", "Triangles Count", "" },
-						{ "Vertices",  "Vertices Count",  "" },
+						{ "Batches",          "Batches Count",          "" },
+						{ "Triangles",        "Triangles Count",        "" },
+						{ "Vertices",         "Vertices Count",         "" },
+						{ "Rendered Sprites", "Rendered Sprites Count", "" },
 					}
 				},
 				{
@@ -134,6 +135,10 @@ namespace Index {
 						{ "Renderer2D.End",      "Renderer2D End",      "ms" },
 						{ "GuiRenderer.End",     "GuiRenderer End",     "ms" },
 						{ "GizmoRenderer.End",   "GizmoRenderer End",   "ms" },
+						{ "Renderer2D.Collect",  "  R2D: Collect",      "ms" },
+						{ "Renderer2D.Sort",     "  R2D: Sort",         "ms" },
+						{ "Renderer2D.Upload",   "  R2D: Upload",       "ms" },
+						{ "Renderer2D.Submit",   "  R2D: Submit",       "ms" },
 						{ "Layer.OnPostRender",  "Layers PostRender",   "ms" },
 						{ "SwapBuffers",         "Swap Buffers",        "ms" },
 					}

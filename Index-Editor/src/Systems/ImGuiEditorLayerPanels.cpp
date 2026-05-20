@@ -803,6 +803,125 @@ namespace Index {
 			if (level == Log::Level::Warn) return ImVec4(1.0f, 0.78f, 0.22f, 1.0f);
 			return ImVec4(1.0f, 0.32f, 0.32f, 1.0f);
 		}
+
+		// ── Project Settings search index ─────────────────────────────
+		// Drives the search bar at the top of the Project Settings
+		// window. The panel renders settings as hardcoded inline ImGui
+		// calls grouped under CollapsingHeader sections, so there's no
+		// data model to scan automatically — instead, every
+		// CollapsingHeader has an entry here listing its category,
+		// section label, and a curated keyword string (field names,
+		// synonyms, abbreviations) the search matches against.
+		//
+		// EVERY ImGui::CollapsingHeader call inside a RenderSettings_*
+		// helper MUST have a matching entry below — SectionVisible()
+		// returns false for any (category, section) pair not listed,
+		// which means missing entries are silently hidden whenever the
+		// search bar has any text in it.
+		struct SettingsIndexEntry {
+			ImGuiEditorLayer::SettingsCategory Category;
+			const char* Section;   // EXACTLY as passed to ImGui::CollapsingHeader.
+			const char* Keywords;  // Space-separated extra terms (lowercase).
+		};
+
+		constexpr SettingsIndexEntry k_SettingsIndex[] = {
+			// Display (RenderSettings_Display)
+			{ ImGuiEditorLayer::SettingsCategory::Display,  "Window",          "width height fullscreen resizable resolution window size" },
+			{ ImGuiEditorLayer::SettingsCategory::Display,  "UI Scaling",      "ui scaling reference resolution canvas scaler match width height layout" },
+
+			// Graphics (RenderSettings_Graphics)
+			{ ImGuiEditorLayer::SettingsCategory::Graphics, "Render Backend",  "render backend rendering api dawn webgpu vulkan d3d11 d3d12 opengl metal auto" },
+			{ ImGuiEditorLayer::SettingsCategory::Graphics, "Post-Processing", "post processing post-processing pp bloom postfx effects pipeline kill switch" },
+			{ ImGuiEditorLayer::SettingsCategory::Graphics, "Default Font",    "default font typeface text font asset" },
+
+			// Branding (RenderSettings_Branding)
+			{ ImGuiEditorLayer::SettingsCategory::Branding, "Splash Screen",   "splash screen logo intro startup fade duration enable image background color text preview" },
+			{ ImGuiEditorLayer::SettingsCategory::Branding, "App Icon",        "app icon application exe executable window taskbar shipped game" },
+			{ ImGuiEditorLayer::SettingsCategory::Branding, "Cursors",         "cursor mouse pointer ui hover default" },
+
+			// Build (RenderSettings_Build)
+			{ ImGuiEditorLayer::SettingsCategory::Build,    "Executable",      "executable exe name output binary" },
+			{ ImGuiEditorLayer::SettingsCategory::Build,    "Diagnostics",     "diagnostics runtime stats logs overlay fps f6 f7 debug" },
+			{ ImGuiEditorLayer::SettingsCategory::Build,    "ECS Entity Bits", "ecs entity bits entt entities versions rebuild engine 16 20 22 24 28" },
+
+			// Editor (RenderSettings_Editor)
+			{ ImGuiEditorLayer::SettingsCategory::Editor,   "Asset Browser",   "asset browser duplicate suffix asset naming" },
+			{ ImGuiEditorLayer::SettingsCategory::Editor,   "Entities",        "entities entity naming suffix unique duplicate" },
+			{ ImGuiEditorLayer::SettingsCategory::Editor,   "Serialization",   "serialization serialize format json binary scene prefab assets" },
+			{ ImGuiEditorLayer::SettingsCategory::Editor,   "Scripting",       "scripting scripts recompile auto build play mode dotnet csharp c#" },
+
+			// Systems (RenderSettings_Systems)
+			{ ImGuiEditorLayer::SettingsCategory::Systems,  "Global Systems",  "global systems gamesystem script registration project scope" },
+		};
+
+		constexpr const char* k_SettingsCategoryNamesLower[] = {
+			"display", "graphics", "branding", "build", "editor", "systems",
+		};
+		static_assert(IM_ARRAYSIZE(k_SettingsCategoryNamesLower)
+			== static_cast<int>(ImGuiEditorLayer::SettingsCategory::Systems) + 1,
+			"k_SettingsCategoryNamesLower out of sync with SettingsCategory enum");
+
+		bool SettingsContains(const char* haystackLower, const std::string& needleLower) {
+			if (needleLower.empty()) return true;
+			if (!haystackLower) return false;
+			return std::string_view(haystackLower).find(needleLower) != std::string_view::npos;
+		}
+
+		bool SettingsEntryMatches(const std::string& filterLower,
+			const SettingsIndexEntry& entry, const char* categoryNameLower)
+		{
+			if (filterLower.empty()) return true;
+			if (SettingsContains(categoryNameLower, filterLower)) return true;
+
+			// Section name is authored in title case in the index (it
+			// has to match the literal CollapsingHeader label exactly),
+			// so lowercase it on the fly. Two settings entries with the
+			// same section incur a redundant transform, but with 17
+			// total entries the cost is negligible.
+			std::string sectionLower(entry.Section ? entry.Section : "");
+			std::transform(sectionLower.begin(), sectionLower.end(), sectionLower.begin(),
+				[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+			if (sectionLower.find(filterLower) != std::string::npos) return true;
+
+			return SettingsContains(entry.Keywords, filterLower);
+		}
+
+		bool CategoryHasMatches(ImGuiEditorLayer::SettingsCategory cat,
+			const std::string& filterLower)
+		{
+			if (filterLower.empty()) return true;
+			const int idx = static_cast<int>(cat);
+			const char* categoryNameLower =
+				(idx >= 0 && idx < IM_ARRAYSIZE(k_SettingsCategoryNamesLower))
+					? k_SettingsCategoryNamesLower[idx]
+					: "";
+			for (const SettingsIndexEntry& entry : k_SettingsIndex) {
+				if (entry.Category != cat) continue;
+				if (SettingsEntryMatches(filterLower, entry, categoryNameLower)) return true;
+			}
+			return false;
+		}
+
+		bool SectionVisible(ImGuiEditorLayer::SettingsCategory cat,
+			const char* section, const std::string& filterLower)
+		{
+			if (filterLower.empty()) return true;
+			const int idx = static_cast<int>(cat);
+			const char* categoryNameLower =
+				(idx >= 0 && idx < IM_ARRAYSIZE(k_SettingsCategoryNamesLower))
+					? k_SettingsCategoryNamesLower[idx]
+					: "";
+			for (const SettingsIndexEntry& entry : k_SettingsIndex) {
+				if (entry.Category != cat) continue;
+				if (std::strcmp(entry.Section, section) != 0) continue;
+				return SettingsEntryMatches(filterLower, entry, categoryNameLower);
+			}
+			// Section not in the index — fail closed so a missing entry
+			// is loudly visible (the section disappears the moment the
+			// user types anything) rather than silently bypassing the
+			// filter.
+			return false;
+		}
 	}
 
 	void ImGuiEditorLayer::RenderLogPanel() {
@@ -1789,15 +1908,58 @@ namespace Index {
 			== static_cast<int>(SettingsCategory::Systems) + 1,
 			"k_CategoryLabels out of sync with SettingsCategory enum");
 
+		// Full-width search bar above the sidebar+content split.
+		// Filters both the sidebar (categories with zero matches drop
+		// off the list) and each category's content (CollapsingHeaders
+		// whose section/keywords don't match are hidden). Empty buffer
+		// means "no filter" — everything renders as before.
+		ImGui::SetNextItemWidth(-1);
+		ImGui::InputTextWithHint("##SettingsSearch", "Search settings...",
+			m_ProjectSettingsSearchBuffer, sizeof(m_ProjectSettingsSearchBuffer));
+
+		std::string filterLower(m_ProjectSettingsSearchBuffer);
+		std::transform(filterLower.begin(), filterLower.end(), filterLower.begin(),
+			[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+		const bool filterActive = !filterLower.empty();
+
+		// Auto-switch when the current category has no matches but
+		// another does. Walks the enum in declaration order so the
+		// user lands on the first category that has a hit (Display →
+		// Graphics → Branding → ... → Systems). If nothing matches
+		// at all, leaves the selection alone — the content pane's
+		// empty-state line below covers that case.
+		if (filterActive && !CategoryHasMatches(m_SelectedSettingsCategory, filterLower)) {
+			for (int i = 0; i < IM_ARRAYSIZE(k_CategoryLabels); ++i) {
+				auto cat = static_cast<SettingsCategory>(i);
+				if (CategoryHasMatches(cat, filterLower)) {
+					m_SelectedSettingsCategory = cat;
+					break;
+				}
+			}
+		}
+
+		ImGui::Separator();
+
 		const float listColumnWidth = ImGui::GetContentRegionAvail().x * 0.22f;
 		const float listW = std::max(160.0f, listColumnWidth);
 
+		// Gate each sidebar Selectable on CategoryHasMatches so
+		// categories with zero matches drop off the list when a filter
+		// is active. anyVisible doubles as the trigger for the empty-
+		// state messages below.
+		bool anyVisible = false;
 		ImGui::BeginChild("##SettingsNav", ImVec2(listW, 0), /*border*/ true);
 		for (int i = 0; i < IM_ARRAYSIZE(k_CategoryLabels); ++i) {
+			auto cat = static_cast<SettingsCategory>(i);
+			if (filterActive && !CategoryHasMatches(cat, filterLower)) continue;
+			anyVisible = true;
 			const bool selected = static_cast<int>(m_SelectedSettingsCategory) == i;
 			if (ImGui::Selectable(k_CategoryLabels[i], selected)) {
-				m_SelectedSettingsCategory = static_cast<SettingsCategory>(i);
+				m_SelectedSettingsCategory = cat;
 			}
+		}
+		if (filterActive && !anyVisible) {
+			ImGui::TextDisabled("No matches");
 		}
 		ImGui::EndChild();
 
@@ -1807,15 +1969,20 @@ namespace Index {
 		bool globalSystemsChanged = false;
 
 		ImGui::BeginChild("##SettingsContent", ImVec2(0, 0));
-		switch (m_SelectedSettingsCategory) {
-			case SettingsCategory::Display:  RenderSettings_Display(*project, changed);  break;
-			case SettingsCategory::Graphics: RenderSettings_Graphics(*project, changed); break;
-			case SettingsCategory::Branding: RenderSettings_Branding(*project, changed); break;
-			case SettingsCategory::Build:    RenderSettings_Build(*project, changed);    break;
-			case SettingsCategory::Editor:   RenderSettings_Editor(*project, changed);   break;
-			case SettingsCategory::Systems:
-				RenderSettings_Systems(*project, changed, globalSystemsChanged);
-				break;
+		if (filterActive && !anyVisible) {
+			ImGui::TextDisabled("No settings match \"%s\"", m_ProjectSettingsSearchBuffer);
+		}
+		else {
+			switch (m_SelectedSettingsCategory) {
+				case SettingsCategory::Display:  RenderSettings_Display(*project, changed, filterLower);  break;
+				case SettingsCategory::Graphics: RenderSettings_Graphics(*project, changed, filterLower); break;
+				case SettingsCategory::Branding: RenderSettings_Branding(*project, changed, filterLower); break;
+				case SettingsCategory::Build:    RenderSettings_Build(*project, changed, filterLower);    break;
+				case SettingsCategory::Editor:   RenderSettings_Editor(*project, changed, filterLower);   break;
+				case SettingsCategory::Systems:
+					RenderSettings_Systems(*project, changed, globalSystemsChanged, filterLower);
+					break;
+			}
 		}
 		ImGui::EndChild();
 
@@ -1848,17 +2015,22 @@ namespace Index {
 	// Window dims drive the runtime's window creation; UI scaling
 	// configures UILayoutSystem's reference-to-current ratio so UI authored
 	// at one resolution renders proportionally at any window size.
-	void ImGuiEditorLayer::RenderSettings_Display(IndexProject& project, bool& changed) {
-		if (ImGui::CollapsingHeader("Window", ImGuiTreeNodeFlags_DefaultOpen)) {
-			ImGui::Indent(8);
-			changed |= ImGui::InputInt("Width", &project.BuildWidth);
-			changed |= ImGui::InputInt("Height", &project.BuildHeight);
-			if (project.BuildWidth < 320) project.BuildWidth = 320;
-			if (project.BuildHeight < 240) project.BuildHeight = 240;
-			ImGui::Spacing();
-			changed |= ImGui::Checkbox("Fullscreen", &project.BuildFullscreen);
-			changed |= ImGui::Checkbox("Resizable", &project.BuildResizable);
-			ImGui::Unindent(8);
+	void ImGuiEditorLayer::RenderSettings_Display(IndexProject& project, bool& changed,
+		const std::string& filterLower)
+	{
+		if (SectionVisible(SettingsCategory::Display, "Window", filterLower)) {
+			if (!filterLower.empty()) ImGui::SetNextItemOpen(true);
+			if (ImGui::CollapsingHeader("Window", ImGuiTreeNodeFlags_DefaultOpen)) {
+				ImGui::Indent(8);
+				changed |= ImGui::InputInt("Width", &project.BuildWidth);
+				changed |= ImGui::InputInt("Height", &project.BuildHeight);
+				if (project.BuildWidth < 320) project.BuildWidth = 320;
+				if (project.BuildHeight < 240) project.BuildHeight = 240;
+				ImGui::Spacing();
+				changed |= ImGui::Checkbox("Fullscreen", &project.BuildFullscreen);
+				changed |= ImGui::Checkbox("Resizable", &project.BuildResizable);
+				ImGui::Unindent(8);
+			}
 		}
 
 		// UI scaling — Canvas-Scaler-style. Reference resolution defines
@@ -1868,23 +2040,26 @@ namespace Index {
 		// proportionally on any window size. Defaults are pre-seeded to
 		// match the build resolution so a freshly-created project's
 		// Game View previews 1:1 unless the user opts in.
-		if (ImGui::CollapsingHeader("UI Scaling", ImGuiTreeNodeFlags_DefaultOpen)) {
-			ImGui::Indent(8);
-			changed |= ImGui::InputInt("Reference Width##UIRef", &project.UIReferenceWidth);
-			changed |= ImGui::InputInt("Reference Height##UIRef", &project.UIReferenceHeight);
-			if (project.UIReferenceWidth  < 1) project.UIReferenceWidth  = 1;
-			if (project.UIReferenceHeight < 1) project.UIReferenceHeight = 1;
-			changed |= ImGui::SliderFloat("Match Width / Height", &project.UIScaleMatch, 0.0f, 1.0f, "%.2f");
-			if (ImGui::IsItemHovered()) {
-				ImGui::SetTooltip(
-					"0 = scale UI by window WIDTH only.\n"
-					"1 = scale UI by window HEIGHT only.\n"
-					"0.5 = balanced (geometric mean).\n"
-					"\n"
-					"Move toward 1 if your UI hugs the top/bottom edges,\n"
-					"toward 0 if it hugs the left/right edges.");
+		if (SectionVisible(SettingsCategory::Display, "UI Scaling", filterLower)) {
+			if (!filterLower.empty()) ImGui::SetNextItemOpen(true);
+			if (ImGui::CollapsingHeader("UI Scaling", ImGuiTreeNodeFlags_DefaultOpen)) {
+				ImGui::Indent(8);
+				changed |= ImGui::InputInt("Reference Width##UIRef", &project.UIReferenceWidth);
+				changed |= ImGui::InputInt("Reference Height##UIRef", &project.UIReferenceHeight);
+				if (project.UIReferenceWidth  < 1) project.UIReferenceWidth  = 1;
+				if (project.UIReferenceHeight < 1) project.UIReferenceHeight = 1;
+				changed |= ImGui::SliderFloat("Match Width / Height", &project.UIScaleMatch, 0.0f, 1.0f, "%.2f");
+				if (ImGui::IsItemHovered()) {
+					ImGui::SetTooltip(
+						"0 = scale UI by window WIDTH only.\n"
+						"1 = scale UI by window HEIGHT only.\n"
+						"0.5 = balanced (geometric mean).\n"
+						"\n"
+						"Move toward 1 if your UI hugs the top/bottom edges,\n"
+						"toward 0 if it hugs the left/right edges.");
+				}
+				ImGui::Unindent(8);
 			}
-			ImGui::Unindent(8);
 		}
 	}
 
@@ -1892,12 +2067,16 @@ namespace Index {
 	// font. The render backend lives here (rather than under Editor) even
 	// though changing it affects the editor too, because the same value
 	// is what ships in the built game.
-	void ImGuiEditorLayer::RenderSettings_Graphics(IndexProject& project, bool& changed) {
+	void ImGuiEditorLayer::RenderSettings_Graphics(IndexProject& project, bool& changed,
+		const std::string& filterLower)
+	{
 		// Static state for the render-backend restart modal. Function-static
 		// is safe — only one Graphics tab can be visible at once.
 		static bool s_RenderBackendChangePopup = false;
 		static IndexProject::RenderBackend s_PendingRenderBackend = IndexProject::RenderBackend::Auto;
 
+		if (SectionVisible(SettingsCategory::Graphics, "Render Backend", filterLower)) {
+		if (!filterLower.empty()) ImGui::SetNextItemOpen(true);
 		if (ImGui::CollapsingHeader("Render Backend", ImGuiTreeNodeFlags_DefaultOpen)) {
 			ImGui::Indent(8);
 
@@ -1942,7 +2121,10 @@ namespace Index {
 
 			ImGui::Unindent(8);
 		}
+		}  // end SectionVisible("Render Backend")
 
+		if (SectionVisible(SettingsCategory::Graphics, "Post-Processing", filterLower)) {
+		if (!filterLower.empty()) ImGui::SetNextItemOpen(true);
 		if (ImGui::CollapsingHeader("Post-Processing", ImGuiTreeNodeFlags_DefaultOpen)) {
 			ImGui::Indent(8);
 			changed |= ImGui::Checkbox("Enable Post-Processing", &project.EnablePostProcessing);
@@ -1956,7 +2138,10 @@ namespace Index {
 			}
 			ImGui::Unindent(8);
 		}
+		}  // end SectionVisible("Post-Processing")
 
+		if (SectionVisible(SettingsCategory::Graphics, "Default Font", filterLower)) {
+		if (!filterLower.empty()) ImGui::SetNextItemOpen(true);
 		if (ImGui::CollapsingHeader("Default Font", ImGuiTreeNodeFlags_DefaultOpen)) {
 			ImGui::Indent(8);
 			constexpr const char* k_DefaultFontPickerKey = "ProjectSettings.DefaultFont";
@@ -1990,9 +2175,15 @@ namespace Index {
 
 			ImGui::Unindent(8);
 		}
+		}  // end SectionVisible("Default Font")
 
 		// Render-backend restart modal. Stays in the Graphics helper so the
-		// function-static popup state remains scoped here.
+		// function-static popup state remains scoped here. The popup-drawing
+		// block runs unconditionally — safe even if the Render Backend
+		// section is hidden by the search filter; the popup only ever
+		// opens via the combo INSIDE that section, so the only way to see
+		// the modal while the section is hidden is to type the filter AFTER
+		// opening the modal.
 		// NoSavedSettings + CenterNextModal keeps the popup centered every
 		// time it appears — without NoSavedSettings, a stale Pos= entry in
 		// imgui.ini would override the Appearing-condition center and pin
@@ -2033,7 +2224,11 @@ namespace Index {
 	// visual identity. App icon embeds into the runtime .exe at build time;
 	// cursors apply live to the editor window so changes are visible
 	// immediately rather than after a relaunch.
-	void ImGuiEditorLayer::RenderSettings_Branding(IndexProject& project, bool& changed) {
+	void ImGuiEditorLayer::RenderSettings_Branding(IndexProject& project, bool& changed,
+		const std::string& filterLower)
+	{
+		if (SectionVisible(SettingsCategory::Branding, "Splash Screen", filterLower)) {
+		if (!filterLower.empty()) ImGui::SetNextItemOpen(true);
 		if (ImGui::CollapsingHeader("Splash Screen", ImGuiTreeNodeFlags_DefaultOpen)) {
 			ImGui::Indent(8);
 			constexpr const char* k_SplashPickerKey = "ProjectSettings.SplashImage";
@@ -2219,7 +2414,10 @@ namespace Index {
 			}
 			ImGui::Unindent(8);
 		}
+		}  // end SectionVisible("Splash Screen")
 
+		if (SectionVisible(SettingsCategory::Branding, "App Icon", filterLower)) {
+		if (!filterLower.empty()) ImGui::SetNextItemOpen(true);
 		if (ImGui::CollapsingHeader("App Icon", ImGuiTreeNodeFlags_DefaultOpen)) {
 			ImGui::Indent(8);
 
@@ -2335,7 +2533,10 @@ namespace Index {
 
 			ImGui::Unindent(8);
 		}
+		}  // end SectionVisible("App Icon")
 
+		if (SectionVisible(SettingsCategory::Branding, "Cursors", filterLower)) {
+		if (!filterLower.empty()) ImGui::SetNextItemOpen(true);
 		if (ImGui::CollapsingHeader("Cursors", ImGuiTreeNodeFlags_DefaultOpen)) {
 			ImGui::Indent(8);
 
@@ -2447,13 +2648,18 @@ namespace Index {
 
 			ImGui::Unindent(8);
 		}
+		}  // end SectionVisible("Cursors")
 	}
 
 	// Build — Executable Name + Runtime Diagnostics + ECS Entity Bits.
 	// EntityBits lives here (rather than its own engine-internals category)
 	// because it's a compile-time / build-time setting: changing it requires
 	// rebuilding the engine, which the "Rebuild Engine" button automates.
-	void ImGuiEditorLayer::RenderSettings_Build(IndexProject& project, bool& changed) {
+	void ImGuiEditorLayer::RenderSettings_Build(IndexProject& project, bool& changed,
+		const std::string& filterLower)
+	{
+		if (SectionVisible(SettingsCategory::Build, "Executable", filterLower)) {
+		if (!filterLower.empty()) ImGui::SetNextItemOpen(true);
 		if (ImGui::CollapsingHeader("Executable", ImGuiTreeNodeFlags_DefaultOpen)) {
 			ImGui::Indent(8);
 			ImGui::TextUnformatted("Output Name:");
@@ -2470,13 +2676,17 @@ namespace Index {
 				project.Name.c_str());
 			ImGui::Unindent(8);
 		}
+		}  // end SectionVisible("Executable")
 
+		if (SectionVisible(SettingsCategory::Build, "Diagnostics", filterLower)) {
+		if (!filterLower.empty()) ImGui::SetNextItemOpen(true);
 		if (ImGui::CollapsingHeader("Diagnostics", ImGuiTreeNodeFlags_DefaultOpen)) {
 			ImGui::Indent(8);
 			changed |= ImGui::Checkbox("Show runtime stats overlay (F6)", &project.ShowRuntimeStats);
 			changed |= ImGui::Checkbox("Show runtime log overlay (F7)", &project.ShowRuntimeLogs);
 			ImGui::Unindent(8);
 		}
+		}  // end SectionVisible("Diagnostics")
 
 		// EnTT entity ID bit-split. Compile-time only — premake reads
 		// the saved value from index-project.json and bakes
@@ -2485,6 +2695,8 @@ namespace Index {
 		// and rebuilding the engine before it takes effect. The cap
 		// trades against EnTT's per-slot version count, which is what
 		// detects stale handles to recycled entity IDs.
+		if (SectionVisible(SettingsCategory::Build, "ECS Entity Bits", filterLower)) {
+		if (!filterLower.empty()) ImGui::SetNextItemOpen(true);
 		if (ImGui::CollapsingHeader("ECS Entity Bits", ImGuiTreeNodeFlags_DefaultOpen)) {
 			ImGui::Indent(8);
 			ImGui::TextUnformatted("Entity ID bits:");
@@ -2770,17 +2982,22 @@ namespace Index {
 
 			ImGui::Unindent(8);
 		}
+		}  // end SectionVisible("ECS Entity Bits")
 	}
 
 	// Editor — editor-only workflow toggles. Asset Browser duplicate
 	// suffix, entity-name suffix, asset serialization format, and the
 	// script auto-recompile pair. None of these affect the shipped game's
 	// runtime — they shape how the editor edits this project.
-	void ImGuiEditorLayer::RenderSettings_Editor(IndexProject& project, bool& changed) {
+	void ImGuiEditorLayer::RenderSettings_Editor(IndexProject& project, bool& changed,
+		const std::string& filterLower)
+	{
 		// "Show file extensions" and the Auto-Save section moved to
 		// Edit -> Preferences (user-scoped now). Asset duplicate-suffix
 		// stays here — it's about the asset files we author into this
 		// project, not editor chrome.
+		if (SectionVisible(SettingsCategory::Editor, "Asset Browser", filterLower)) {
+		if (!filterLower.empty()) ImGui::SetNextItemOpen(true);
 		if (ImGui::CollapsingHeader("Asset Browser", ImGuiTreeNodeFlags_DefaultOpen)) {
 			ImGui::Indent(8);
 			constexpr const char* k_AssetSuffixLabels[] = {
@@ -2801,7 +3018,10 @@ namespace Index {
 			}
 			ImGui::Unindent(8);
 		}
+		}  // end SectionVisible("Asset Browser")
 
+		if (SectionVisible(SettingsCategory::Editor, "Entities", filterLower)) {
+		if (!filterLower.empty()) ImGui::SetNextItemOpen(true);
 		if (ImGui::CollapsingHeader("Entities", ImGuiTreeNodeFlags_DefaultOpen)) {
 			ImGui::Indent(8);
 			changed |= ImGui::Checkbox("Ensure unique editor-created names", &project.EditorEnsureUniqueEntityNames);
@@ -2831,7 +3051,10 @@ namespace Index {
 			}
 			ImGui::Unindent(8);
 		}
+		}  // end SectionVisible("Entities")
 
+		if (SectionVisible(SettingsCategory::Editor, "Serialization", filterLower)) {
+		if (!filterLower.empty()) ImGui::SetNextItemOpen(true);
 		if (ImGui::CollapsingHeader("Serialization", ImGuiTreeNodeFlags_DefaultOpen)) {
 			ImGui::Indent(8);
 			constexpr const char* k_FormatLabels[] = { "JSON", "Binary" };
@@ -2869,7 +3092,10 @@ namespace Index {
 			}
 			ImGui::Unindent(8);
 		}
+		}  // end SectionVisible("Serialization")
 
+		if (SectionVisible(SettingsCategory::Editor, "Scripting", filterLower)) {
+		if (!filterLower.empty()) ImGui::SetNextItemOpen(true);
 		if (ImGui::CollapsingHeader("Scripting", ImGuiTreeNodeFlags_DefaultOpen)) {
 			ImGui::Indent(8);
 			changed |= ImGui::Checkbox("Auto-recompile on file changes", &project.AutoRecompileScripts);
@@ -2894,6 +3120,7 @@ namespace Index {
 			}
 			ImGui::Unindent(8);
 		}
+		}  // end SectionVisible("Scripting")
 	}
 
 	// Systems — managed (C#) GameSystems registered at the project scope
@@ -2902,7 +3129,11 @@ namespace Index {
 	// play-mode session uses the new set without a restart. The caller is
 	// responsible for the shutdown/reinit handshake when outGlobalSystemsChanged
 	// flips to true.
-	void ImGuiEditorLayer::RenderSettings_Systems(IndexProject& project, bool& changed, bool& outGlobalSystemsChanged) {
+	void ImGuiEditorLayer::RenderSettings_Systems(IndexProject& project, bool& changed,
+		bool& outGlobalSystemsChanged, const std::string& filterLower)
+	{
+		if (SectionVisible(SettingsCategory::Systems, "Global Systems", filterLower)) {
+		if (!filterLower.empty()) ImGui::SetNextItemOpen(true);
 		if (ImGui::CollapsingHeader("Global Systems", ImGuiTreeNodeFlags_DefaultOpen)) {
 			ImGui::Indent(8);
 			ImGui::SetNextItemWidth(-1);
@@ -2963,6 +3194,7 @@ namespace Index {
 
 			ImGui::Unindent(8);
 		}
+		}  // end SectionVisible("Global Systems")
 	}
 
 	// Splash preview — replays the runtime's splash timeline as a

@@ -447,6 +447,7 @@ namespace Index {
             info.serializedNameHash = serializedHash;
             info.isDynamic         = true;
             info.rawSize           = size;
+            info.dynamicStorage    = storagePtr;
             // typeId stays at typeid(void) — dynamics share this sentinel
             // because std::type_index can't be synthesized. Callers that
             // care about identity use typeIdU32 / serializedNameHash.

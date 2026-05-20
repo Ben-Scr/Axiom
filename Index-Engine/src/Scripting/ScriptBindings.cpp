@@ -59,8 +59,11 @@
 #include "Graphics/Text/FontManager.hpp"
 #include "Graphics/Gizmo.hpp"
 #include "Physics/Physics2D.hpp"
+#include "Jobs/ParallelFor.hpp"
+#include "Profiling/Profiler.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -1214,8 +1217,9 @@ namespace Index {
 	// the size / contains / value / iteration surface we need without
 	// depending on the component's concrete type at this call site.
 	struct ResolvedQueryPool {
-		const ComponentInfo* Info = nullptr;
-		entt::sparse_set*    Storage = nullptr;
+		const ComponentInfo*     Info = nullptr;
+		entt::sparse_set*        Storage = nullptr;     // EnTT-backed (built-in components)
+		DynamicComponentStorage* DynStorage = nullptr;  // dynamic (user-authored C# components)
 		bool RequiresValue = true;  // write/readonly pools must yield pointers
 	};
 
@@ -1240,88 +1244,26 @@ namespace Index {
 				// here exactly as the prior ParseQueryViewPools did.
 				if (requireValue && !info->getRaw) return false;
 				if (!info->has) return false;
-				// storage(id) returns nullptr in two cases:
-				//   1. No entity has ever held this component (storage pool
-				//      not yet instantiated). The fast path treats this as
-				//      "0 rows for required pools" / "matches everything for
-				//      without pools".
-				//   2. The component is dynamic (registered via
-				//      RegisterDynamic): it lives outside EnTT in a
-				//      DynamicComponentStorage and has no entt::sparse_set
-				//      backing. For this case the caller falls back to the
-				//      legacy `info->has` / `info->getRaw` slow path so the
-				//      query still produces correct rows — same perf as the
-				//      prior implementation, no regression.
+				// Resolve the pool's storage backend. Built-in components live
+				// in EnTT's typed sparse_set (registry.storage(hash)); dynamic
+				// components live in a side DynamicComponentStorage owned by
+				// the ComponentRegistry. Exactly one of Storage / DynStorage
+				// is non-null for a populated pool — both null means the pool
+				// has never had any entity (storage not yet instantiated for
+				// built-ins, or info->dynamicStorage genuinely null which
+				// shouldn't happen for valid dynamic registrations). The
+				// dispatcher treats both-null as "zero rows for required
+				// pools / trivially satisfied for without pools".
 				entt::sparse_set* storage =
 					info->storageHash != 0 ? registry.storage(info->storageHash) : nullptr;
-				out.push_back({ info, storage, requireValue });
+				DynamicComponentStorage* dynStorage =
+					(storage == nullptr) ? info->dynamicStorage : nullptr;
+				out.push_back({ info, storage, dynStorage, requireValue });
 			}
 			if (end == str.size()) break;
 			start = end + 1;
 		}
 		return true;
-	}
-
-	// Fallback / slow path: when any required pool can't be served by EnTT
-	// (dynamic components live in DynamicComponentStorage, not in
-	// entt::registry), iterate the registry once and use the std::function-
-	// based has/getRaw callbacks. Same correctness as the pre-rewrite
-	// implementation; only kicks in for the niche dynamic-component-in-
-	// IJobQuery case.
-	static int OpenQueryViewSlowPath(
-		Scene& scene,
-		entt::registry& registry,
-		const std::vector<ResolvedQueryPool>& writePools,
-		const std::vector<ResolvedQueryPool>& roPools,
-		const std::vector<ResolvedQueryPool>& withPools,
-		const std::vector<ResolvedQueryPool>& withoutPools,
-		int enableFilter,
-		void** outPointers,
-		int maxRows)
-	{
-		const size_t writeCount = writePools.size();
-		const size_t roCount = roPools.size();
-		const size_t poolCount = writeCount + roCount;
-
-		int rowIndex = 0;
-		auto view = registry.view<entt::entity>();
-		for (auto handle : view) {
-			if (!registry.valid(handle)) continue;
-			if (enableFilter == 1 && registry.all_of<DisabledTag>(handle)) continue;
-			if (enableFilter == 2 && !registry.all_of<DisabledTag>(handle)) continue;
-
-			Entity entity = scene.GetEntity(handle);
-
-			bool match = true;
-			for (const auto& pool : writePools) {
-				if (!pool.Info->has(entity)) { match = false; break; }
-			}
-			if (!match) continue;
-			for (const auto& pool : roPools) {
-				if (!pool.Info->has(entity)) { match = false; break; }
-			}
-			if (!match) continue;
-			for (const auto& pool : withPools) {
-				if (!pool.Info->has(entity)) { match = false; break; }
-			}
-			if (!match) continue;
-			for (const auto& pool : withoutPools) {
-				if (pool.Info->has(entity)) { match = false; break; }
-			}
-			if (!match) continue;
-
-			if (outPointers && rowIndex < maxRows) {
-				void** rowBase = outPointers + (static_cast<size_t>(rowIndex) * poolCount);
-				for (size_t i = 0; i < writeCount; ++i) {
-					rowBase[i] = writePools[i].Info->getRaw(entity);
-				}
-				for (size_t i = 0; i < roCount; ++i) {
-					rowBase[writeCount + i] = roPools[i].Info->getRaw(entity);
-				}
-			}
-			rowIndex++;
-		}
-		return rowIndex;
 	}
 
 	// Opens an EnTT-style view across the named pools and fills `outPointers`
@@ -1332,12 +1274,17 @@ namespace Index {
 	//
 	// Iteration strategy: among the AND-set (writes + readonlys + must-haves)
 	// we pick the smallest pool as the driver and iterate ONLY that pool's
-	// sparse_set. Every other AND-pool is collapsed to an inline
-	// sparse_set::contains() check, and write/readonly pointer fills use
-	// sparse_set::value() — both inline, both touching only the packed and
-	// sparse arrays of one component pool. This replaces a registry-wide
-	// view<entt::entity>() walk that visited every entity in the scene and
-	// burned one std::function call per (entity × pool) on the has-check.
+	// packed entity array. Every other AND-pool is collapsed to an inline
+	// `contains()` check, and write/readonly pointer fills use a direct
+	// value-fetch — both touching only the packed and sparse arrays of one
+	// component pool.
+	//
+	// Dynamic components (registered via RegisterDynamic, e.g. user-authored
+	// C# native structs like UserData) are first-class here: their backing
+	// DynamicComponentStorage exposes the same packed Entities() + paged
+	// sparse layout as entt::sparse_set, so a query mixing built-in and
+	// dynamic components iterates exactly the same shape — no per-row
+	// std::function dispatch, no registry-wide entity walk.
 	//
 	// Result: snapshot cost scales with `min(pool sizes)` instead of total
 	// registry size — order-of-magnitude speedup whenever the rarest required
@@ -1357,6 +1304,8 @@ namespace Index {
 			Scene* scene = ResolveLoadedSceneForQuery(sceneName);
 			if (!scene || !scene->IsLoaded()) return 0;
 			auto& registry = scene->GetRegistry();
+
+			INDEX_PROFILE_SCOPE("Scene.OpenQueryView");
 
 			std::vector<ResolvedQueryPool> writePools, roPools, withPools, withoutPools;
 			if (!ResolveQueryPools(registry, writeNames,    writePools,   /*requireValue=*/true))  return 0;
@@ -1381,42 +1330,30 @@ namespace Index {
 				return writePools[0].Info->fillRawPointers(registry, outPointers, maxRows, enableFilter);
 			}
 
-			// If ANY required or without pool can't be served by an EnTT
-			// sparse_set (null Storage), fall back to the std::function-based
-			// slow path. This preserves correctness for dynamic components,
-			// which live outside EnTT in DynamicComponentStorage — null
-			// Storage there means "use info->has / info->getRaw instead",
-			// NOT "zero rows". For built-in components the storage exists
-			// once any entity has ever held the component; the only way
-			// Storage stays null is if the entire pool was never touched,
-			// which IS legitimately "zero rows" — but we also can't
-			// distinguish those two cases here, so the slow path is the
-			// safe choice (and it's identical to the pre-rewrite behavior).
-			auto anyNullStorage = [](const std::vector<ResolvedQueryPool>& pools) {
-				for (const auto& p : pools) { if (!p.Storage) return true; }
-				return false;
+			// Pool-size accessor — unified for both EnTT and dynamic backings.
+			// Returns 0 when both Storage and DynStorage are null, which
+			// matches "pool never had any entity" and lets the empty-required
+			// short-circuit treat it as zero rows.
+			auto poolSize = [](const ResolvedQueryPool& p) -> size_t {
+				if (p.Storage)    return p.Storage->size();
+				if (p.DynStorage) return p.DynStorage->Size();
+				return 0;
 			};
-			if (anyNullStorage(writePools) || anyNullStorage(roPools)
-				|| anyNullStorage(withPools) || anyNullStorage(withoutPools)) {
-				return OpenQueryViewSlowPath(*scene, registry, writePools, roPools,
-					withPools, withoutPools, enableFilter, outPointers, maxRows);
-			}
 
-			// All required pools have EnTT storage. Empty-required short-
-			// circuit: if any required pool's storage is empty, no entity
-			// can match.
-			for (const auto& p : writePools) { if (p.Storage->empty()) return 0; }
-			for (const auto& p : roPools)    { if (p.Storage->empty()) return 0; }
-			for (const auto& p : withPools)  { if (p.Storage->empty()) return 0; }
+			// Empty-required short-circuit: any AND-pool with zero entities
+			// means no entity in the scene satisfies the query.
+			for (const auto& p : writePools) { if (poolSize(p) == 0) return 0; }
+			for (const auto& p : roPools)    { if (poolSize(p) == 0) return 0; }
+			for (const auto& p : withPools)  { if (poolSize(p) == 0) return 0; }
 
 			// Pick the driver: smallest pool across writes ∪ readonlys ∪ must-haves.
-			// The store-pointer is stable across the rest of this call (we don't
-			// touch the pool vectors after this point).
+			// The pointer is stable across the rest of this call (we don't touch
+			// the pool vectors after this point).
 			const ResolvedQueryPool* driver = nullptr;
 			size_t driverSize = std::numeric_limits<size_t>::max();
 			auto considerPool = [&](const std::vector<ResolvedQueryPool>& pools) {
 				for (const auto& p : pools) {
-					const size_t s = p.Storage->size();
+					const size_t s = poolSize(p);
 					if (s < driverSize) { driver = &p; driverSize = s; }
 				}
 			};
@@ -1427,8 +1364,10 @@ namespace Index {
 			// guaranteed non-null here. Belt-and-braces:
 			if (!driver) return 0;
 
-			// Cache the DisabledTag storage pointer once. Null when no entity has
-			// ever been disabled — that's equivalent to "everyone is enabled".
+			// Cache the DisabledTag storage pointer once. DisabledTag is always
+			// EnTT-backed (built-in tag), so we only consult Storage here.
+			// Null when no entity has ever been disabled — equivalent to
+			// "everyone is enabled".
 			const entt::sparse_set* disabledStorage = nullptr;
 			if (enableFilter != 0) {
 				disabledStorage = registry.storage(entt::type_hash<DisabledTag>::value());
@@ -1436,70 +1375,210 @@ namespace Index {
 				if (enableFilter == 2 && (!disabledStorage || disabledStorage->empty())) return 0;
 			}
 
-			// Hoist sparse_set pointers into stack arrays so the inner loop touches
-			// raw pointers, not std::vector iterators. SmallVector-ish: the vast
-			// majority of IJobQuery shapes have ≤ 4 pools per category. Empirical
-			// upper bound is 8 (the IJobQuery interface caps at 8 components).
+			// Hoist non-driver pools into stack arrays. Each entry carries the
+			// concrete storage pointer it'll be probed against — exactly one of
+			// ss / ds is non-null per entry. SmallVector-ish: IJobQuery caps at
+			// 8 components per category.
+			struct OtherPool {
+				entt::sparse_set*        ss = nullptr;
+				DynamicComponentStorage* ds = nullptr;
+			};
 			constexpr size_t kMaxPoolsPerCategory = 8;
-			entt::sparse_set* otherWriteStorages[kMaxPoolsPerCategory];   size_t otherWriteCount = 0;
-			entt::sparse_set* otherRoStorages[kMaxPoolsPerCategory];      size_t otherRoCount = 0;
-			entt::sparse_set* otherWithStorages[kMaxPoolsPerCategory];    size_t otherWithCount = 0;
-			entt::sparse_set* withoutStorages[kMaxPoolsPerCategory];      size_t withoutCountResolved = 0;
-			for (const auto& p : writePools) { if (&p != driver) otherWriteStorages[otherWriteCount++] = p.Storage; }
-			for (const auto& p : roPools)    { if (&p != driver) otherRoStorages[otherRoCount++] = p.Storage; }
-			for (const auto& p : withPools)  { if (&p != driver) otherWithStorages[otherWithCount++] = p.Storage; }
+			OtherPool otherWrite[kMaxPoolsPerCategory];   size_t otherWriteCount = 0;
+			OtherPool otherRo[kMaxPoolsPerCategory];      size_t otherRoCount = 0;
+			OtherPool otherWith[kMaxPoolsPerCategory];    size_t otherWithCount = 0;
+			OtherPool withoutP[kMaxPoolsPerCategory];     size_t withoutCountResolved = 0;
+			for (const auto& p : writePools) { if (&p != driver) otherWrite[otherWriteCount++] = { p.Storage, p.DynStorage }; }
+			for (const auto& p : roPools)    { if (&p != driver) otherRo[otherRoCount++]       = { p.Storage, p.DynStorage }; }
+			for (const auto& p : withPools)  { if (&p != driver) otherWith[otherWithCount++]   = { p.Storage, p.DynStorage }; }
 			for (const auto& p : withoutPools) {
-				// Null storage = component pool never created = nobody has it →
+				// Both null = component pool never created = nobody has it →
 				// the without-filter is trivially satisfied for every entity.
-				// Drop the entry entirely so the inner loop's contains() check
-				// doesn't have to branch on null.
-				if (p.Storage) withoutStorages[withoutCountResolved++] = p.Storage;
+				// Drop the entry so the inner loop's contains() doesn't branch.
+				if (p.Storage || p.DynStorage) {
+					withoutP[withoutCountResolved++] = { p.Storage, p.DynStorage };
+				}
 			}
 
-			// Iterate the driver's packed array in dense order — cache-friendly,
-			// and every entity here is by construction in at least the driver pool.
-			int rowIndex = 0;
-			for (const EntityHandle handle : *driver->Storage) {
+			// Inline membership test. The ss-vs-ds branch is loop-invariant per
+			// pool (the pool's identity doesn't change across iterations), so
+			// the branch predictor pins it after the first row. EnTT's
+			// sparse_set::contains and DynamicComponentStorage::Contains both
+			// run the same versioned XOR check on the paged sparse array —
+			// they're symmetric in cost.
+			auto poolContains = [](const OtherPool& op, EntityHandle h) -> bool {
+				return op.ss ? op.ss->contains(h) : op.ds->Contains(h);
+			};
+
+			// Full filter predicate: enable filter + every AND-pool (write/ro/with) +
+			// negated without pools. Called per candidate driver entity. Read-only,
+			// safe for concurrent invocation by worker threads.
+			auto matchesAllFilters = [&](EntityHandle h) -> bool {
 				if (enableFilter == 1) {
-					if (disabledStorage && disabledStorage->contains(handle)) continue;
+					if (disabledStorage && disabledStorage->contains(h)) return false;
 				} else if (enableFilter == 2) {
-					// disabledStorage non-null guaranteed by the early-out above
-					if (!disabledStorage->contains(handle)) continue;
+					// disabledStorage non-null guaranteed by the early-out above.
+					if (!disabledStorage->contains(h)) return false;
 				}
+				for (size_t i = 0; i < otherWriteCount; ++i) if (!poolContains(otherWrite[i], h)) return false;
+				for (size_t i = 0; i < otherRoCount;    ++i) if (!poolContains(otherRo[i],    h)) return false;
+				for (size_t i = 0; i < otherWithCount;  ++i) if (!poolContains(otherWith[i],  h)) return false;
+				for (size_t i = 0; i < withoutCountResolved; ++i) if (poolContains(withoutP[i], h)) return false;
+				return true;
+			};
 
-				bool match = true;
-				for (size_t i = 0; i < otherWriteCount; ++i) {
-					if (!otherWriteStorages[i]->contains(handle)) { match = false; break; }
+			// Per-row pointer fill: writes go first, then readonlys, matching the
+			// IL invoker's slot layout (IJobQuery.cs:237-254). Read-only on the
+			// pools; safe under concurrent invocation as long as no structural
+			// changes occur — the IJobQuery contract (IJobQuery.cs:52-57) guarantees
+			// that for the duration of the snapshot.
+			auto fillRow = [&](void** rowBase, EntityHandle h) {
+				for (size_t j = 0; j < writeCount; ++j) {
+					rowBase[j] = writePools[j].Storage
+						? writePools[j].Storage->value(h)
+						: writePools[j].DynStorage->Get(h);
 				}
-				if (!match) continue;
-				for (size_t i = 0; i < otherRoCount; ++i) {
-					if (!otherRoStorages[i]->contains(handle)) { match = false; break; }
+				for (size_t j = 0; j < roCount; ++j) {
+					rowBase[writeCount + j] = roPools[j].Storage
+						? roPools[j].Storage->value(h)
+						: roPools[j].DynStorage->Get(h);
 				}
-				if (!match) continue;
-				for (size_t i = 0; i < otherWithCount; ++i) {
-					if (!otherWithStorages[i]->contains(handle)) { match = false; break; }
-				}
-				if (!match) continue;
-				for (size_t i = 0; i < withoutCountResolved; ++i) {
-					if (withoutStorages[i]->contains(handle)) { match = false; break; }
-				}
-				if (!match) continue;
+			};
 
-				// Row fits — fill pointers. If outPointers is null or the row
-				// would overflow maxRows, we still count it so the caller can
-				// resize and retry (matches Scene_QueryEntities's grow protocol).
-				if (outPointers && rowIndex < maxRows) {
-					void** rowBase = outPointers + (static_cast<size_t>(rowIndex) * poolCount);
-					for (size_t i = 0; i < writeCount; ++i) {
-						rowBase[i] = writePools[i].Storage->value(handle);
+			// Driver packed array — random-accessible by index.
+			// entt::sparse_set::data() and std::vector::data() both return contiguous
+			// pointers into the dense entity list.
+			const EntityHandle* drivePacked = driver->Storage
+				? driver->Storage->data()
+				: driver->DynStorage->Entities().data();
+
+			// Parallel dispatch decision. Below the threshold or with a single
+			// worker, dispatch + atomic overhead dominates the work — stay serial.
+			// ParallelFor inline-runs when worker pool isn't ready, so this is just
+			// the perf tipping-point gate.
+			//
+			// Path A (bitmap) vs Path B (chunked-claim): both handle filtered queries.
+			// Path A calls matchesAllFilters once per entity and records the result in
+			// a stack-resident bitmap; Path B calls it twice (count sweep + fill sweep).
+			// Bitmap wins when chunks fit on the stack — true for the vast majority of
+			// workloads. The gate is the EXPECTED chunk size from ComputeAutoGrainSize
+			// (ParallelFor.cpp:7-22 — rangeLength / (workerCount * 4)). If that fits in
+			// kMaxStackBitmap entities, Path A fires; otherwise Path B.
+			constexpr size_t kParallelThreshold = 1024;
+			constexpr size_t kMaxStackBitmap = 8192;  // one bool per chunk entity, stack-allocated
+			const int workerCount = JobSystem::GetWorkerCount();
+			const bool tryParallel = driverSize >= kParallelThreshold && workerCount > 1;
+			const size_t targetChunks = static_cast<size_t>(workerCount) * 4;
+			const size_t expectedChunkSize = (targetChunks > 0)
+				? (driverSize + targetChunks - 1) / targetChunks
+				: driverSize;
+			const bool useBitmap = tryParallel && expectedChunkSize <= kMaxStackBitmap;
+
+			if (useBitmap) {
+				// Path A — bitmap-assisted single-sweep. Each chunk:
+				//   1. One sweep: matchesAllFilters per entity → write bool into
+				//      stack bitmap. Track localCount.
+				//   2. fetch_add(localCount) claims a contiguous output region.
+				//   3. Second sweep: read bitmap (free, no filter recompute) and
+				//      fillRow only matched entities at the claimed offsets.
+				// Saves one matchesAllFilters call per entity vs Path B, which is
+				// usually the dominant per-entity cost in the snapshot. Bitmap is
+				// a fixed 8KB stack array — sized for any chunk auto-grain produces
+				// on workloads up to ~workerCount × 32k entities (~256k entities on
+				// an 8-worker system).
+				INDEX_PROFILE_SCOPE("Scene.OpenQueryView.Snapshot.ParallelBitmap");
+				std::atomic<int> writeCursor{ 0 };
+				ParallelFor(0, driverSize, [&](size_t lo, size_t hi) {
+					const size_t chunkLen = hi - lo;
+					// Defensive: if ComputeAutoGrainSize produces a larger chunk
+					// than expected (e.g. heuristic change), fall back to two-sweep
+					// inline rather than stack-overflow. Shouldn't fire today.
+					if (chunkLen > kMaxStackBitmap) {
+						int lc = 0;
+						for (size_t i = lo; i < hi; ++i) {
+							if (matchesAllFilters(drivePacked[i])) ++lc;
+						}
+						if (lc == 0) return;
+						const int ms = writeCursor.fetch_add(lc, std::memory_order_relaxed);
+						if (!outPointers) return;
+						int mi = ms;
+						for (size_t i = lo; i < hi; ++i) {
+							const EntityHandle h = drivePacked[i];
+							if (!matchesAllFilters(h)) continue;
+							if (mi < maxRows) {
+								fillRow(outPointers + static_cast<size_t>(mi) * poolCount, h);
+							}
+							++mi;
+						}
+						return;
 					}
-					for (size_t i = 0; i < roCount; ++i) {
-						rowBase[writeCount + i] = roPools[i].Storage->value(handle);
+					// Sweep 1: filter into bitmap, count matches.
+					bool matches[kMaxStackBitmap];
+					int localCount = 0;
+					for (size_t i = lo; i < hi; ++i) {
+						const bool m = matchesAllFilters(drivePacked[i]);
+						matches[i - lo] = m;
+						localCount += static_cast<int>(m);
 					}
-				}
-				rowIndex++;
+					if (localCount == 0) return;
+					// Claim a contiguous output region (always — needed for total count).
+					const int myStart = writeCursor.fetch_add(localCount, std::memory_order_relaxed);
+					if (!outPointers) return;  // count-only call: skip the write sweep.
+					// Sweep 2: write only matched rows using the bitmap. No filter recompute.
+					int myIdx = myStart;
+					for (size_t i = lo; i < hi; ++i) {
+						if (!matches[i - lo]) continue;
+						if (myIdx < maxRows) {
+							fillRow(outPointers + static_cast<size_t>(myIdx) * poolCount, drivePacked[i]);
+						}
+						++myIdx;
+					}
+				});
+				return writeCursor.load(std::memory_order_relaxed);
 			}
 
+			if (tryParallel) {
+				// Path B — chunked-claim, 2-sweep. Fallback for queries whose
+				// auto-grain chunks would overflow the kMaxStackBitmap budget
+				// (rare: requires workloads with worker-count × 32k+ entities).
+				// Each chunk: sweep 1 counts matches, single fetch_add claims a
+				// contiguous output region, sweep 2 fills rows at the claimed
+				// offsets — same 2-sweep shape as before. Atomic fires once per
+				// chunk (~4×workerCount total) keeping contention negligible.
+				INDEX_PROFILE_SCOPE("Scene.OpenQueryView.Snapshot.ParallelChunked");
+				std::atomic<int> writeCursor{ 0 };
+				ParallelFor(0, driverSize, [&](size_t lo, size_t hi) {
+					int localCount = 0;
+					for (size_t i = lo; i < hi; ++i) {
+						if (matchesAllFilters(drivePacked[i])) ++localCount;
+					}
+					if (localCount == 0) return;
+					const int myStart = writeCursor.fetch_add(localCount, std::memory_order_relaxed);
+					if (!outPointers) return;
+					int myIdx = myStart;
+					for (size_t i = lo; i < hi; ++i) {
+						const EntityHandle h = drivePacked[i];
+						if (!matchesAllFilters(h)) continue;
+						if (myIdx < maxRows) {
+							fillRow(outPointers + static_cast<size_t>(myIdx) * poolCount, h);
+						}
+						++myIdx;
+					}
+				});
+				return writeCursor.load(std::memory_order_relaxed);
+			}
+
+			// Serial fallback — small queries, or job system unavailable.
+			INDEX_PROFILE_SCOPE("Scene.OpenQueryView.Snapshot.Serial");
+			int rowIndex = 0;
+			for (size_t i = 0; i < driverSize; ++i) {
+				const EntityHandle h = drivePacked[i];
+				if (!matchesAllFilters(h)) continue;
+				if (outPointers && rowIndex < maxRows) {
+					fillRow(outPointers + static_cast<size_t>(rowIndex) * poolCount, h);
+				}
+				++rowIndex;
+			}
 			return rowIndex;
 		} IDX_BINDING_CATCH(0);
 	}

@@ -327,6 +327,28 @@ CopyIndexEngineDll = '{COPYFILE} "' ..
 -- No per-project codegen artifact gets shipped alongside consumer exes.
 CopyIndexGameComponentsDll = "" -- retained as a no-op so any leftover postbuild reference stays harmless
 
+-- Copy Index-ScriptCore.dll next to consumer exes that load it at runtime
+-- (Editor + Runtime). ScriptSystem.cpp:188-194 first checks
+-- <exe-dir>/Index-ScriptCore.dll (packaged layout) and falls back to
+-- <exe-dir>/../Index-ScriptCore/Index-ScriptCore.dll (dev layout). Without
+-- this copy a zipped Editor or Runtime folder breaks scripting because the
+-- sibling Index-ScriptCore/ folder is no longer present.
+CopyScriptCoreDll = '{COPYFILE} "' ..
+    path.join(ROOT_DIR, "bin/" .. outputdir, "Index-ScriptCore", "Index-ScriptCore.dll") ..
+    '" "%{cfg.targetdir}/Index-ScriptCore.dll"'
+
+-- Materialize a self-contained EngineSDK/ folder next to the Launcher exe
+-- so the zipped Launcher can build new projects' NativeScripts (which
+-- generate a CMakeLists.txt that hard-references ${INDEX_DIR}/Index-Engine/
+-- src and ${INDEX_DIR}/External/... — see BuildNativeScriptCMakeLists in
+-- Index-Engine/src/Project/IndexProject.cpp). ResolveEngineRoot() picks up
+-- the bundled SDK ahead of the dev-layout fallbacks. The script is a thin
+-- batch wrapper around robocopy so the lua stays free of per-folder copy
+-- spam; see scripts/CopyEngineSdk.bat for the actual copy list.
+CopyEngineSdk = 'call "' .. path.join(ROOT_DIR, "scripts/CopyEngineSdk.bat") ..
+    '" "%{cfg.targetdir}/EngineSDK" "' .. ROOT_DIR ..
+    '" "' .. path.join(ROOT_DIR, "bin/" .. outputdir) .. '"'
+
 -- GLFW and Glad are SharedLibs so all consumers (engine.dll + consumer .exes) share
 -- one copy of their global state. Each consumer ships the DLLs alongside its binary.
 CopyGlfwDll = '{COPYFILE} "' ..

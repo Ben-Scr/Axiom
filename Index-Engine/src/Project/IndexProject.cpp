@@ -95,9 +95,17 @@ namespace Index {
 
 		std::filesystem::path ResolveEngineRoot() {
 			const auto exeDir = std::filesystem::path(Path::ExecutableDir());
+			// Dev-layout walks come first so that a developer running the
+			// launcher out of bin/<cfg>-<plat>/Index-Launcher/ keeps using the
+			// real source tree at ../../.. — its EngineSDK sibling is a
+			// build-output artifact, not the source of truth, and using it
+			// would break the engine-solution regen flow (no premake5.lua).
+			// EngineSDK/ is the fallback for a zipped distribution where the
+			// source tree is no longer reachable from the exe.
 			const std::vector<std::filesystem::path> candidates = {
 				exeDir / ".." / ".." / "..",
-				exeDir / ".."
+				exeDir / "..",
+				exeDir / "EngineSDK"
 			};
 
 			for (const auto& candidate : candidates) {
@@ -190,6 +198,12 @@ namespace Index {
 					directories.push_back(key);
 				}
 			};
+
+			// Packaged-SDK layout drops Index-ScriptCore.dll flat under
+			// EngineSDK/Index-ScriptCore/ (no per-config bin tree). Check it
+			// first; FindScriptCoreArtifact falls through to the dev candidates
+			// below when the flat copy isn't present.
+			appendUnique(engineRoot / "Index-ScriptCore");
 
 			const std::string platformDirectory = GetNativeBuildPlatformDirectory();
 			const auto preferredConfigurations = GetPreferredBuildConfigurations();
@@ -1673,14 +1687,23 @@ public class GameScript : EntityScript
 		}
 
 #if defined(_WIN32)
-		const std::filesystem::path candidate = engineRoot / "vendor" / "bin" / "premake5.exe";
+		const char* const exeName = "premake5.exe";
 #else
-		const std::filesystem::path candidate = engineRoot / "vendor" / "bin" / "premake5";
+		const char* const exeName = "premake5";
 #endif
 
-		std::error_code ec;
-		if (std::filesystem::exists(candidate, ec) && !ec) {
-			return candidate.generic_string();
+		// Dev layout vendors premake under vendor/bin/. Packaged SDK ships it
+		// flat at the SDK root because vendor/ is not redistributed.
+		const std::vector<std::filesystem::path> candidates = {
+			engineRoot / "vendor" / "bin" / exeName,
+			engineRoot / exeName,
+		};
+
+		for (const auto& candidate : candidates) {
+			std::error_code ec;
+			if (std::filesystem::exists(candidate, ec) && !ec) {
+				return candidate.generic_string();
+			}
 		}
 		return {};
 	}
@@ -1688,16 +1711,30 @@ public class GameScript : EntityScript
 	IndexProject::RegenerateResult IndexProject::RegenerateSolutionForProject(const std::string& projectRootDir) {
 		RegenerateResult result;
 
-		const std::string premakePath = GetPremakePath();
-		if (premakePath.empty()) {
-			result.Output = "premake5 binary not found under <engine-root>/vendor/bin/. The engine solution cannot be regenerated automatically; the existing one will be used as-is.";
+		const std::string engineRoot = GetEngineRootDir();
+		if (engineRoot.empty()) {
+			result.Output = "Could not resolve engine root directory; skipping solution regeneration.";
 			IDX_WARN_TAG("IndexProject", "{}", result.Output);
 			return result;
 		}
 
-		const std::string engineRoot = GetEngineRootDir();
-		if (engineRoot.empty()) {
-			result.Output = "Could not resolve engine root directory; skipping solution regeneration.";
+		// Packaged-SDK distributions ship headers + Index-Engine.lib but no
+		// premake5.lua, because regenerating the engine solution requires the
+		// full engine source tree. Treat this as a successful no-op rather
+		// than an error — the user's project still builds via its own
+		// generated CMakeLists.txt against the bundled SDK.
+		std::error_code premakeLuaEc;
+		const std::filesystem::path premakeLua = std::filesystem::path(engineRoot) / "premake5.lua";
+		if (!std::filesystem::exists(premakeLua, premakeLuaEc) || premakeLuaEc) {
+			result.Succeeded = true;
+			result.Output = "Engine solution regeneration skipped: running against a packaged SDK (no premake5.lua at engine root).";
+			IDX_INFO_TAG("IndexProject", "{}", result.Output);
+			return result;
+		}
+
+		const std::string premakePath = GetPremakePath();
+		if (premakePath.empty()) {
+			result.Output = "premake5 binary not found under <engine-root>/vendor/bin/. The engine solution cannot be regenerated automatically; the existing one will be used as-is.";
 			IDX_WARN_TAG("IndexProject", "{}", result.Output);
 			return result;
 		}

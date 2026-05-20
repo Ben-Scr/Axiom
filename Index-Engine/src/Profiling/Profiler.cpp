@@ -138,6 +138,7 @@ namespace Index {
 			"Batches",
 			"Triangles",
 			"Vertices",
+			"Rendered Sprites",
 
 			// Memory category
 			"Total Memory",
@@ -162,6 +163,17 @@ namespace Index {
 			"Renderer2D.End",
 			"GuiRenderer.End",
 			"GizmoRenderer.End",
+			// Renderer2D per-stage breakdown — bracket the four phases of
+			// RenderSceneWithVP so 100k-sprite scenes attribute frame cost to
+			// Collect (ECS walk + cull) vs. Sort (key-sort + permute) vs.
+			// Upload (queue.WriteBuffer for instance + uniform buffers) vs.
+			// Submit (BeginRenderPass + per-texture-run DrawIndexed loop).
+			// Without these, "Rendering" is a single number and optimisation
+			// is blind to which stage actually dominates.
+			"Renderer2D.Collect",
+			"Renderer2D.Sort",
+			"Renderer2D.Upload",
+			"Renderer2D.Submit",
 			"Layer.OnUpdate",
 			"Layer.OnPreRender",
 			"Layer.OnPostRender",

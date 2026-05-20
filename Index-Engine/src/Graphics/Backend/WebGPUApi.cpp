@@ -98,6 +98,31 @@ namespace Index {
 		wgpu::Surface       g_Surface;
 		wgpu::TextureFormat g_SurfaceFormat = wgpu::TextureFormat::Undefined;
 
+		// Whether the active adapter advertised TimestampQuery at adapter
+		// time AND we successfully enabled it on the device. GpuTimer reads
+		// this to decide whether to allocate wgpu::QuerySet objects vs. stay
+		// dormant (panel "GPU" module renders "N/A"). Falsified on Metal /
+		// some Vulkan drivers; truthful on Windows D3D12.
+		bool g_HasTimestampQuery = false;
+
+		// Whether the active adapter advertised the Dawn-experimental
+		// bindless / binding-array feature AND we successfully enabled it
+		// on the device. Renderer2D reads this through
+		// WebGPUBackend::HasBindlessTextures() to decide whether to take
+		// a single-DrawIndexed-with-texture-array path (Phase 5 of the
+		// 100k-sprite plan) or fall back to the N-DrawIndexed-per-
+		// texture-run path (today's implementation).
+		//
+		// The gate is currently always false: baseline WebGPU has no
+		// portable bindless feature, and Dawn's experimental flag set
+		// changes between releases. Wiring the bindless render path
+		// behind this gate keeps the integration surface ready — when
+		// Dawn settles on a stable feature name (likely
+		// `wgpu::FeatureName::BindlessTextureArrays` or similar), the
+		// only change here will be requesting that feature alongside
+		// TimestampQuery in RequestDeviceSync.
+		bool g_HasBindlessTextures = false;
+
 		// ── Per-frame transient state ───────────────────────────────────────
 		// The encoder + surface view are lazy-created on first use this frame
 		// (Clear / SetClearColor / future draws) and torn down by Present().
@@ -331,6 +356,23 @@ namespace Index {
 
 		bool RequestDeviceSync() {
 			wgpu::DeviceDescriptor desc{};
+			// Opt into TimestampQuery if the adapter advertises it. With the
+			// feature on, render passes can attach a
+			// wgpu::RenderPassTimestampWrites that writes GPU-time samples
+			// into a wgpu::QuerySet at beginning-/end-of-pass. GpuTimer
+			// owns the QuerySet + resolve + readback buffers and pushes
+			// the ms delta into the "GPU" profiler module each frame; without
+			// this feature the panel's GPU row stays at "N/A", but the
+			// engine still runs (rest of the code paths are gated on
+			// WebGPUBackend::HasTimestampQuery()).
+			static wgpu::FeatureName s_RequestedFeatures[1] = {};
+			uint32_t requestedFeatureCount = 0;
+			if (g_Adapter && g_Adapter.HasFeature(wgpu::FeatureName::TimestampQuery)) {
+				s_RequestedFeatures[requestedFeatureCount++] = wgpu::FeatureName::TimestampQuery;
+			}
+			desc.requiredFeatureCount = requestedFeatureCount;
+			desc.requiredFeatures     = requestedFeatureCount > 0 ? s_RequestedFeatures : nullptr;
+
 			// Surface-the-uncaptured-error-callback so validation failures
 			// land in the engine log instead of vanishing. Dawn calls this
 			// for any wgpu validation error that isn't tied to a specific
@@ -384,6 +426,7 @@ namespace Index {
 			}
 			g_Device = std::move(ctx.Device);
 			g_Queue  = g_Device.GetQueue();
+			g_HasTimestampQuery = (requestedFeatureCount > 0);
 			return true;
 		}
 
@@ -589,6 +632,8 @@ namespace Index {
 		wgpu::Device GetDevice() { return g_Device; }
 		wgpu::Queue  GetQueue()  { return g_Queue; }
 		wgpu::TextureFormat GetSurfaceFormat() { return g_SurfaceFormat; }
+		bool HasTimestampQuery() { return g_HasTimestampQuery; }
+		bool HasBindlessTextures() { return g_HasBindlessTextures; }
 		// Returns true once Init has completed successfully — resource
 		// constructors check this before touching wgpu objects so a
 		// pre-engine-init Texture2D / Framebuffer (e.g. one constructed

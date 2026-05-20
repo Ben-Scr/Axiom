@@ -31,7 +31,13 @@ project "Index-Launcher"
     -- `#includes` the engine header which exports the API via
     -- INDEX_API.
 
-    postbuildcommands { CopyIndexAssets, CopyIndexEngineDll, CopyGlfwDll, CopyGladDll }
+    -- CopyEngineSdk materializes a bundled EngineSDK/ next to the launcher
+    -- exe so a zipped distribution works without the source tree. The SDK
+    -- bundles Index-ScriptCore.dll, so we depend on the C# project to
+    -- ensure it exists before our postbuild runs.
+    dependson { "Index-ScriptCore" }
+
+    postbuildcommands { CopyIndexAssets, CopyIndexEngineDll, CopyGlfwDll, CopyGladDll, CopyEngineSdk }
     if IndexProfiler.Enabled then postbuildcommands { CopyTracyDll } end
 
     filter "system:windows"

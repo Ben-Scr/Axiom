@@ -52,7 +52,11 @@ project "Index-Editor"
     pchheader "pch.hpp"
     pchsource "src/EditorPch.cpp"
     forceincludes { "pch.hpp" }
-    postbuildcommands { CopyIndexAssets, CopyIndexEngineDll, CopyGlfwDll, CopyGladDll }
+    -- ScriptSystem loads Index-ScriptCore.dll at runtime. The packaged-layout
+    -- branch (ScriptSystem.cpp:194) finds it next to the editor exe; the
+    -- copy lets a zipped Editor folder work standalone.
+    dependson { "Index-ScriptCore" }
+    postbuildcommands { CopyIndexAssets, CopyIndexEngineDll, CopyScriptCoreDll, CopyGlfwDll, CopyGladDll }
     if IndexProfiler.Enabled then postbuildcommands { CopyTracyDll } end
 
     filter "system:windows"

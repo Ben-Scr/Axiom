@@ -104,12 +104,12 @@ namespace Index {
 		void RenderBuildPanel();
 		void RenderBuildProfilesPanel();
 		void RenderProjectSettingsPanel();
-		void RenderSettings_Display(IndexProject& project, bool& changed);
-		void RenderSettings_Graphics(IndexProject& project, bool& changed);
-		void RenderSettings_Branding(IndexProject& project, bool& changed);
-		void RenderSettings_Build(IndexProject& project, bool& changed);
-		void RenderSettings_Editor(IndexProject& project, bool& changed);
-		void RenderSettings_Systems(IndexProject& project, bool& changed, bool& outGlobalSystemsChanged);
+		void RenderSettings_Display(IndexProject& project, bool& changed, const std::string& filterLower);
+		void RenderSettings_Graphics(IndexProject& project, bool& changed, const std::string& filterLower);
+		void RenderSettings_Branding(IndexProject& project, bool& changed, const std::string& filterLower);
+		void RenderSettings_Build(IndexProject& project, bool& changed, const std::string& filterLower);
+		void RenderSettings_Editor(IndexProject& project, bool& changed, const std::string& filterLower);
+		void RenderSettings_Systems(IndexProject& project, bool& changed, bool& outGlobalSystemsChanged, const std::string& filterLower);
 		// Splash preview overlay. Drawn on top of the dockspace with an
 		// ImGui foreground draw list so the editor stays interactive
 		// underneath; the preview self-completes after FadeIn +
@@ -454,6 +454,7 @@ namespace Index {
 		char m_ComponentSearchBuffer[128]{};
 		char m_SystemSearchBuffer[128]{};
 		char m_GlobalSystemSearchBuffer[128]{};
+		char m_ProjectSettingsSearchBuffer[256]{};
 		std::string m_SelectedAssetPath;
 		std::string m_ComponentClipboardJson;
 		std::string m_EntityClipboardJson;
@@ -484,9 +485,13 @@ namespace Index {
 		std::vector<std::string> m_BuildSceneList;
 		int m_DraggedSceneIndex = -1;
 		bool m_ShowProjectSettings = false;
+	public:
 		// Side-tab nav state for the unified Project Settings window.
 		// Selection persists across panel close/open within a session;
 		// not serialized — opening the panel after restart lands on Display.
+		// Public so the file-local k_SettingsIndex table in
+		// ImGuiEditorLayerPanels.cpp can reference it; the member that
+		// stores the active selection stays private below.
 		enum class SettingsCategory : uint8_t {
 			Display = 0,
 			Graphics,
@@ -495,6 +500,7 @@ namespace Index {
 			Editor,
 			Systems,
 		};
+	private:
 		SettingsCategory m_SelectedSettingsCategory = SettingsCategory::Display;
 		bool m_ShowEditorPreferences = false;
 		EditorPreferencesPanel m_EditorPreferencesPanel;

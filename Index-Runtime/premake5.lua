@@ -46,10 +46,15 @@ project "Index-Runtime"
     -- See WriteIndexEntityBitsConfigHeader() in the root premake5.lua.
     includedirs { IndexEntityBitsConfigIncludeDir }
 
+    -- ScriptSystem loads Index-ScriptCore.dll at runtime. The packaged-layout
+    -- branch (ScriptSystem.cpp:194) finds it next to the runtime exe; the
+    -- copy lets a zipped Runtime folder work standalone.
+    dependson { "Index-ScriptCore" }
     postbuildcommands
     {
         CopyIndexAssets,
         CopyIndexEngineDll,
+        CopyScriptCoreDll,
         CopyGlfwDll,
         CopyGladDll
     }

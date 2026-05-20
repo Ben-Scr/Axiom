@@ -50,6 +50,24 @@ namespace Index::WebGPUBackend {
 	wgpu::TextureFormat GetSurfaceFormat();
 	bool                IsInitialized();
 
+	// True when the adapter advertised TimestampQuery AND the device was
+	// created with it enabled. GpuTimer keys off this — false means the
+	// "GPU" profiler module stays at "N/A". Common on Metal / older
+	// Vulkan drivers; true on modern D3D12 / Vulkan adapters.
+	bool                HasTimestampQuery();
+
+	// True when the adapter advertised a portable bindless / binding-array
+	// feature AND the device was created with it enabled. Renderer2D
+	// queries this to decide between the per-texture-run draw loop (one
+	// DrawIndexed per unique texture, today's path) and a future
+	// one-DrawIndexed-per-frame path with per-instance texture indices
+	// sampled from a bounded texture array. Currently always false —
+	// baseline WebGPU has no stable bindless feature; Dawn's experimental
+	// flags churn between releases. The hook lives here so the renderer
+	// has a single runtime-detection surface to react to once the feature
+	// stabilises.
+	bool                HasBindlessTextures();
+
 	// ── Texture2D pool (defined in Graphics/Texture2D_WebGPU.cpp) ────────────
 
 	// Each loaded Texture2D registers its wgpu::Texture + a sampled

@@ -15,6 +15,8 @@ namespace Index::Serialization { class IArchive; }
 
 namespace Index {
 
+	class DynamicComponentStorage;
+
 	struct ComponentInfo {
 		std::string displayName;
 		std::string serializedName;
@@ -92,6 +94,18 @@ namespace Index {
 		// the registry. The native side already does this for typed views; this field
 		// extends the same O(component count) iteration to the by-name script bindings.
 		entt::id_type storageHash = 0;
+
+		// Non-null for components registered via RegisterDynamic (i.e., user-authored
+		// C# native components like UserData). Dynamic components live outside EnTT's
+		// typed storage — `registry.storage(storageHash)` returns nullptr for them —
+		// so the IJobQuery dispatcher in ScriptBindings.cpp uses this raw pointer for
+		// O(1) Contains/Get instead of routing through the std::function callbacks,
+		// which closes the ~8x perf gap vs. EnTT-backed components observed on a
+		// 40k-entity (NativeTransform2D, UserData) IJobQuery. Lifetime is owned by
+		// ComponentRegistry::m_dynamicStorages and stays valid until
+		// UnregisterAllDynamic on assembly unload (which also drops the owning
+		// ComponentInfo, so the pointer can never dangle).
+		DynamicComponentStorage* dynamicStorage = nullptr;
 
 		// memcpy-from-bytes emplacer. ECB playback writes a raw component payload into
 		// the entity's storage in one call — no per-property P/Invoke, no JSON, no
