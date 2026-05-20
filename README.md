@@ -1,5 +1,5 @@
 # Index
-Index is a lightweight C++20 2D game engine focused on performance.
+Index is a lightweight C++20 2D game engine mainly focused on performance and modularity.
 
 ## Preview
 
