@@ -21,7 +21,12 @@ project "Index-Sandbox"
     }
 
     links {
-        "Index-ScriptCore"
+        "Index-ScriptCore",
+        -- Engine packages the Sandbox preset opts into. Removing entries here
+        -- is the same as not installing the package — `Index.Hardware.Cpu`
+        -- etc. simply won't resolve. Per the engine's "no mandatory
+        -- dependencies" rule, every entry below is removable.
+        "Pkg.Index.Hardware",
     }
 
     filter "system:windows"

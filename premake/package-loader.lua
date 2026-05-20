@@ -34,6 +34,11 @@
 --                          csharp may additionally declare:
 --                              pinvoke_dll       string identifying the package's own native lib
 --                              allow_unsafe      true to enable `clr "Unsafe"` for fixed-pin pinvoke
+--                              nuget             list of "PackageId:Version" strings — emitted as
+--                                                <PackageReference> entries in the generated csproj.
+--                                                Use sparingly; matches the engine's "no mandatory
+--                                                dependencies" rule (the package opts in, the user
+--                                                opts into the package).
 --   dependencies  table    optional list of other package names
 
 local PackageSystem = {}
@@ -149,6 +154,20 @@ local function ValidateManifest(manifest, manifestPath)
         if not (manifest.layers.native or manifest.layers.native_standalone) then
             PackageError("Package '" .. manifest.name ..
                 "' declares 'pinvoke_dll' on csharp layer but has no native (native / native_standalone) layer to bridge to.")
+        end
+    end
+
+    if manifest.layers.csharp and manifest.layers.csharp.nuget ~= nil then
+        if type(manifest.layers.csharp.nuget) ~= "table" then
+            PackageError("Package '" .. manifest.name ..
+                "' csharp layer has invalid 'nuget' field; expected a list of \"PackageId:Version\" strings.")
+        end
+        for _, ref in ipairs(manifest.layers.csharp.nuget) do
+            if type(ref) ~= "string" or not ref:find(":", 1, true) then
+                PackageError("Package '" .. manifest.name ..
+                    "' csharp layer has invalid nuget entry '" .. tostring(ref) ..
+                    "'. Each entry must be a \"PackageId:Version\" string.")
+            end
         end
     end
 
@@ -393,6 +412,15 @@ local function RegisterCSharpProject(manifest)
         }
 
         files(ResolvePaths(manifest.PackageDir, layer.sources))
+
+        -- Optional NuGet PackageReferences. Premake5's `nuget` directive emits
+        -- the corresponding <PackageReference> entries on `dotnet restore`. The
+        -- package opts into the dependency; consumers of the package transit-
+        -- ively pick it up via the generated assembly. Keep this list short —
+        -- adding NuGet refs widens the engine's runtime surface.
+        if layer.nuget and #layer.nuget > 0 then
+            nuget(layer.nuget)
+        end
 
         -- Index-ScriptCore is the default reference for every csharp
         -- package: it provides the managed `Component`, `Entity`, `Texture`,

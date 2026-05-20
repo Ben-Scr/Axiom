@@ -74,5 +74,9 @@
       <Project>{C857B56B-B450-D4BD-DD82-B942C9DAB3C9}</Project>
       <Name>Index-ScriptCore</Name>
     </ProjectReference>
+    <ProjectReference Include="..\premake\generated\Pkg.Index.Hardware\Pkg.Index.Hardware.csproj">
+      <Project>{09BD8BA5-F5A0-4CFB-5E01-474E4A04377D}</Project>
+      <Name>Pkg.Index.Hardware</Name>
+    </ProjectReference>
   </ItemGroup>
 </Project>
