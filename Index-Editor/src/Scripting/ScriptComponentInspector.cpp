@@ -70,6 +70,43 @@ namespace Index {
 			return value;
 		}
 
+		// Shared renderer for every "open the script" inspector button — managed
+		// components, EntityScripts, :IComponent structs, GameSystems. Looks up
+		// the matching project script entry, displays its filename (e.g.
+		// `Test.cs`) instead of the synthesized class label so the user reads
+		// exactly what's on disk, and wires the double-click → external editor
+		// jump. Falls back to `fallbackLabel` (typically the class name) when
+		// discovery can't find a file — script was renamed / deleted / never
+		// written — so the button still shows something identifiable instead
+		// of going blank.
+		template <typename Predicate>
+		void DrawOpenScriptButton(const std::string& className, Predicate predicate,
+			const std::string& fallbackLabel) {
+			std::filesystem::path scriptPath;
+			std::vector<EditorScriptDiscovery::ScriptEntry> entries;
+			EditorScriptDiscovery::CollectProjectScriptEntries(entries);
+			for (const auto& entry : entries) {
+				if (entry.ClassName == className && predicate(entry)) {
+					scriptPath = entry.Path;
+					break;
+				}
+			}
+			const std::string buttonText = scriptPath.empty()
+				? fallbackLabel
+				: scriptPath.filename().string();
+
+			ImGuiUtils::DrawInspectorValue("Script", [&buttonText, &scriptPath](const char* id) {
+				ImGui::Button((buttonText + id).c_str(),
+					ImVec2(ImGui::GetContentRegionAvail().x, 0.0f));
+				if (ImGui::IsItemHovered()) {
+					ImGui::SetTooltip("Double-click to open script");
+					if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && !scriptPath.empty()) {
+						ExternalEditor::OpenFile(scriptPath.string());
+					}
+				}
+			});
+		}
+
 		PropertyType ResolveScriptFieldType(const EditorFieldRecord& rec) {
 			if (rec.TypeTag.rfind("component:", 0) == 0) return PropertyType::ComponentRef;
 			if (rec.TypeTag == "entity") return PropertyType::EntityRef;
@@ -687,6 +724,16 @@ namespace Index {
 			if (removeRequested) removeManagedComponentIndex = i;
 
 			if (open) {
+				// Mirror the EntityScript / :IComponent open-on-double-click
+				// affordance so every user-authored component has the same
+				// one-click jump to source. Always managed here — this branch
+				// only renders `:Component`-derived classes.
+				DrawOpenScriptButton(className,
+					[](const EditorScriptDiscovery::ScriptEntry& e) {
+						return e.Type == ScriptType::Managed;
+					},
+					className);
+
 				if (ScriptEngine::IsInitialized()) {
 					RenderFieldsForManagedComponent(scriptComp, className, i, propagationSpan, multiEditEnabled);
 				}
@@ -700,8 +747,26 @@ namespace Index {
 
 		for (size_t i = 0; i < scriptComp.Scripts.size(); i++) {
 			auto& instance = scriptComp.Scripts[i];
-			std::string label = instance.GetClassName().empty() ? "Script" : instance.GetClassName();
-			if (instance.GetType() == ScriptType::Native) label += " (Native)";
+			// The Scripts vector currently holds two kinds of managed entries
+			// that need visually distinct labels:
+			//   1. C# `EntityScript`             → "(C# Script)"
+			//   2. C# `:IComponent` struct       → "(C# Native Component)"
+			// Disambiguated by asking the ComponentRegistry whether a *dynamic*
+			// ComponentInfo claims the same serialized name —
+			// DynamicComponentRegistrar registers every `:IComponent` at
+			// user-assembly load with `isDynamic=true`, and EntityScripts are
+			// never registered there.
+			std::string label;
+			if (instance.GetClassName().empty()) {
+				label = "Script";
+			}
+			else {
+				const ComponentInfo* dynamicInfo = SceneManager::Get().GetComponentRegistry()
+					.FindBySerializedName(instance.GetClassName());
+				const bool isNativeComponent = dynamicInfo && dynamicInfo->isDynamic;
+				label = instance.GetClassName()
+					+ (isNativeComponent ? " (C# Native Component)" : " (C# Script)");
+			}
 
 			ImGui::PushID(static_cast<int>(i));
 
@@ -710,22 +775,12 @@ namespace Index {
 			if (removeRequested) removeIndex = i;
 
 			if (open) {
-				ImGuiUtils::DrawInspectorValue("Script", [&label, &instance](const char* id) {
-					ImGui::Button((label + id).c_str(), ImVec2(ImGui::GetContentRegionAvail().x, 0.0f));
-					if (ImGui::IsItemHovered()) {
-						ImGui::SetTooltip("Double-click to open script");
-						if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
-							std::vector<EditorScriptDiscovery::ScriptEntry> entries;
-							EditorScriptDiscovery::CollectProjectScriptEntries(entries);
-							for (const auto& entry : entries) {
-								if (entry.ClassName == instance.GetClassName() && entry.Type == instance.GetType()) {
-									ExternalEditor::OpenFile(entry.Path.string());
-									break;
-								}
-							}
-						}
-					}
-				});
+				const ScriptType instanceType = instance.GetType();
+				DrawOpenScriptButton(instance.GetClassName(),
+					[instanceType](const EditorScriptDiscovery::ScriptEntry& e) {
+						return e.Type == instanceType;
+					},
+					label);
 
 				if (instance.GetType() != ScriptType::Native && ScriptEngine::IsInitialized()) {
 					RenderScriptFieldsForInstance(scriptComp, instance, i, propagationSpan, multiEditEnabled);
@@ -779,22 +834,11 @@ namespace Index {
 		// game systems. Rendered first and unconditionally so it stays
 		// visible even when the system has no public fields (or the
 		// script engine isn't initialised yet).
-		ImGuiUtils::DrawInspectorValue("Script", [&className](const char* id) {
-			ImGui::Button((className + id).c_str(), ImVec2(ImGui::GetContentRegionAvail().x, 0.0f));
-			if (ImGui::IsItemHovered()) {
-				ImGui::SetTooltip("Double-click to open script");
-				if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
-					std::vector<EditorScriptDiscovery::ScriptEntry> entries;
-					EditorScriptDiscovery::CollectProjectScriptEntries(entries);
-					for (const auto& entry : entries) {
-						if (entry.ClassName == className && entry.IsGameSystem) {
-							ExternalEditor::OpenFile(entry.Path.string());
-							break;
-						}
-					}
-				}
-			}
-		});
+		DrawOpenScriptButton(className,
+			[](const EditorScriptDiscovery::ScriptEntry& e) {
+				return e.IsGameSystem;
+			},
+			className);
 
 		if (!ScriptEngine::IsInitialized()) {
 			ImGui::TextDisabled("Script engine not initialized");

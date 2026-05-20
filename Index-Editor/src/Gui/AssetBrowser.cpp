@@ -1167,7 +1167,7 @@ namespace Index {
 				if (ImGui::MenuItem("Component")) {
 					CreateManagedCSharpComponent(m_CurrentDirectory);
 				}
-				if (ImGui::MenuItem("Component (Native)")) {
+				if (ImGui::MenuItem("Native Component")) {
 					CreateNativeCSharpComponent(m_CurrentDirectory);
 				}
 				if (ImGui::MenuItem("GameSystem")) {

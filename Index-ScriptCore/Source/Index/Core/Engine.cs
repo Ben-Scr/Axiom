@@ -43,6 +43,28 @@ public enum GraphicsApi
     WebGPU
 }
 
+public enum CpuVendor
+{
+    Unknown = 0,
+    Intel,
+    AMD,
+    Apple,
+    ARM,
+    Qualcomm,
+}
+
+public enum GpuVendor
+{
+    Unknown = 0,
+    NVIDIA,
+    AMD,
+    Intel,
+    Apple,
+    Qualcomm,
+    ARM,
+    Microsoft,
+}
+
 /// <summary>
 /// Engine-level identity and graphics-capability info.
 /// Read-only; values are determined at process start.
@@ -66,7 +88,7 @@ public static class Engine
         => (BuildConfiguration)InternalCalls.Engine_GetBuildConfiguration();
 
     /// <summary>Current operating system.</summary>
-    public static Index.Platform Platform => ParsePlatform(PlatformName);
+    public static Platform Platform => ParsePlatform(PlatformName);
     public static string PlatformName => InternalCalls.Engine_GetPlatform();
 
     /// <summary>
@@ -75,9 +97,18 @@ public static class Engine
     public static Index.GraphicsApi GraphicsApi => ParseGraphicsApi(GraphicsApiName);
     public static string GraphicsApiName => InternalCalls.Engine_GetGraphicsApi();
 
-    /// <summary>GPU vendor name, e.g. "NVIDIA", "AMD", "Intel".</summary>
-    public static string GpuVendor => InternalCalls.Engine_GetGpuVendor();
-    public static string CpuVendor => QueryCpuVendor();
+    /// <summary>GPU vendor enum. Use <see cref="GpuVendorName"/> for the raw vendor label.</summary>
+    public static GpuVendor GpuVendor => ParseGpuVendor(GpuVendorName);
+
+    /// <summary>Raw GPU vendor label as reported by the graphics driver, e.g. "NVIDIA", "AMD", "Intel".</summary>
+    public static string GpuVendorName => InternalCalls.Engine_GetGpuVendor();
+
+    /// <summary>CPU vendor enum. Use <see cref="CpuVendorName"/> for the raw vendor string.</summary>
+    public static CpuVendor CpuVendor => ParseCpuVendor(CpuVendorName);
+
+    /// <summary>Raw CPU vendor string from CPUID (e.g. "GenuineIntel", "AuthenticAMD"),
+    /// or the process architecture name on non-x86 platforms.</summary>
+    public static string CpuVendorName => QueryCpuVendor();
 
     /// <summary>Active renderer backend name, e.g. "Vulkan", "Direct3D12", "Metal".</summary>
     public static string GpuRenderer => InternalCalls.Engine_GetGpuRenderer();
@@ -107,6 +138,38 @@ public static class Engine
         if (value.Contains("OpenGL", StringComparison.OrdinalIgnoreCase)) return Index.GraphicsApi.OpenGL;
         if (value.Contains("WebGPU", StringComparison.OrdinalIgnoreCase)) return Index.GraphicsApi.WebGPU;
         return Index.GraphicsApi.Unknown;
+    }
+
+    private static Index.GpuVendor ParseGpuVendor(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return Index.GpuVendor.Unknown;
+        if (value.Contains("NVIDIA", StringComparison.OrdinalIgnoreCase)) return Index.GpuVendor.NVIDIA;
+        if (value.Contains("AMD", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("ATI", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("Advanced Micro Devices", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("Radeon", StringComparison.OrdinalIgnoreCase)) return Index.GpuVendor.AMD;
+        if (value.Contains("Intel", StringComparison.OrdinalIgnoreCase)) return Index.GpuVendor.Intel;
+        if (value.Contains("Apple", StringComparison.OrdinalIgnoreCase)) return Index.GpuVendor.Apple;
+        if (value.Contains("Qualcomm", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("Adreno", StringComparison.OrdinalIgnoreCase)) return Index.GpuVendor.Qualcomm;
+        if (value.Contains("ARM", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("Mali", StringComparison.OrdinalIgnoreCase)) return Index.GpuVendor.ARM;
+        if (value.Contains("Microsoft", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("WARP", StringComparison.OrdinalIgnoreCase)) return Index.GpuVendor.Microsoft;
+        return Index.GpuVendor.Unknown;
+    }
+
+    private static Index.CpuVendor ParseCpuVendor(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return Index.CpuVendor.Unknown;
+        if (value.Equals("GenuineIntel", StringComparison.Ordinal)
+            || value.Contains("Intel", StringComparison.OrdinalIgnoreCase)) return Index.CpuVendor.Intel;
+        if (value.Equals("AuthenticAMD", StringComparison.Ordinal)
+            || value.Contains("AMD", StringComparison.OrdinalIgnoreCase)) return Index.CpuVendor.AMD;
+        if (value.Contains("Apple", StringComparison.OrdinalIgnoreCase)) return Index.CpuVendor.Apple;
+        if (value.Contains("Qualcomm", StringComparison.OrdinalIgnoreCase)) return Index.CpuVendor.Qualcomm;
+        if (value.Contains("ARM", StringComparison.OrdinalIgnoreCase)) return Index.CpuVendor.ARM;
+        return Index.CpuVendor.Unknown;
     }
 
     private static string QueryCpuVendor()

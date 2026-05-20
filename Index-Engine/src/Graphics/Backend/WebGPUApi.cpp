@@ -908,9 +908,11 @@ namespace Index {
 		const uint32_t uh = static_cast<uint32_t>(height);
 		if (uw == g_BackbufferWidth && uh == g_BackbufferHeight) return;
 
+#ifdef IDX_DEBUG
 		IDX_CORE_INFO_TAG("WebGPUApi",
 			"OnWindowResize: {}x{} -> {}x{} (surface.Configure)",
 			g_BackbufferWidth, g_BackbufferHeight, uw, uh);
+#endif
 
 		// Any in-flight surface texture is now invalid — Dawn detects the
 		// stale view at submit time but explicit cleanup avoids the
