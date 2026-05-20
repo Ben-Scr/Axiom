@@ -21,7 +21,7 @@ namespace Index {
 		// spin-up; subsequent project switches replace the watcher.
 		PrefabTemplateCache& cache = PrefabTemplateCache::Get();
 		cache.InvalidateAll();
-#if defined(INDEX_EDITOR)
+#if defined(INDEX_WITH_EDITOR)
 		if (IndexProject* live = s_CurrentProject.get(); live != nullptr && !live->AssetsDirectory.empty()) {
 			cache.InitializeForProject(live->AssetsDirectory);
 		}

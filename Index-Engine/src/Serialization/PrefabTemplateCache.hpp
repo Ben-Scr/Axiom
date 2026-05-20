@@ -3,6 +3,13 @@
 #include "Core/Export.hpp"
 #include "Scene/EntityHandle.hpp"
 
+#if defined(INDEX_WITH_EDITOR)
+// Full include (not forward decl): the std::unique_ptr<FileWatcher> member
+// below requires a complete type at every TU that instantiates the cache's
+// implicit destructor.
+#include "Serialization/FileWatcher.hpp"
+#endif
+
 #include <cstdint>
 #include <memory>
 #include <shared_mutex>
@@ -14,7 +21,6 @@
 namespace Index {
 
 	class Scene;
-	class FileWatcher;
 
 	// One-time-baked prefab representation. The first slow-path hydrate of
 	// a prefab populates this struct by walking the live entity tree and
@@ -118,7 +124,7 @@ namespace Index {
 		// Used by the upcoming editor-side "prefab spawn perf" view.
 		std::size_t Size() const;
 
-#if defined(INDEX_EDITOR)
+#if defined(INDEX_WITH_EDITOR)
 		// Wires a FileWatcher rooted at `assetsRoot` matching `*.prefab`
 		// and pointing every hit at InvalidateAll(). Safe to call
 		// multiple times — subsequent calls replace the previous watcher.
@@ -137,7 +143,7 @@ namespace Index {
 		mutable std::shared_mutex m_Mutex;
 		std::unordered_map<uint64_t, std::unique_ptr<PrefabTemplate>> m_Templates;
 
-#if defined(INDEX_EDITOR)
+#if defined(INDEX_WITH_EDITOR)
 		std::unique_ptr<FileWatcher> m_Watcher;
 #endif
 	};

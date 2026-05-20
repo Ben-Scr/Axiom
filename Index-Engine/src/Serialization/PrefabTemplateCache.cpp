@@ -10,7 +10,7 @@
 #include "Scene/ComponentRegistry.hpp"
 #include "Core/Application.hpp"
 
-#if defined(INDEX_EDITOR)
+#if defined(INDEX_WITH_EDITOR)
 #include "Serialization/FileWatcher.hpp"
 #endif
 
@@ -70,7 +70,7 @@ namespace Index {
 	}
 
 	PrefabTemplateCache::~PrefabTemplateCache() {
-#if defined(INDEX_EDITOR)
+#if defined(INDEX_WITH_EDITOR)
 		// FileWatcher destructor joins its worker thread; release it
 		// explicitly so the dependency order is obvious even if static
 		// destruction runs in an unexpected order.
@@ -307,7 +307,7 @@ namespace Index {
 		return m_Templates.size();
 	}
 
-#if defined(INDEX_EDITOR)
+#if defined(INDEX_WITH_EDITOR)
 	void PrefabTemplateCache::InitializeForProject(const std::string& assetsRoot)
 	{
 		if (assetsRoot.empty()) {

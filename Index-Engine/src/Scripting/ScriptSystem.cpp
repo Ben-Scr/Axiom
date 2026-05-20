@@ -895,6 +895,23 @@ namespace Index {
 			return it != scripts.end() ? &(*it) : nullptr;
 		}
 
+		// Re-resolve a native ScriptInstance after a user callback that may
+		// have reallocated ScriptComponent::Scripts. Keyed on the native
+		// pointer the caller already held — the pointer is the canonical
+		// identity for native instances (the C++ object is stable as long
+		// as nothing destroyed it, which we check separately via Unbind).
+		ScriptInstance* FindNativeScriptInstance(Scene& scene, EntityHandle entity, NativeScript* nativePtr)
+		{
+			if (nativePtr == nullptr || !scene.IsValid(entity) || !scene.HasComponent<ScriptComponent>(entity)) {
+				return nullptr;
+			}
+
+			auto& scripts = scene.GetComponent<ScriptComponent>(entity).Scripts;
+			auto it = std::find_if(scripts.begin(), scripts.end(),
+				[nativePtr](const ScriptInstance& instance) { return instance.GetNativePtr() == nativePtr; });
+			return it != scripts.end() ? &(*it) : nullptr;
+		}
+
 		// Drain ScriptComponent::PendingFieldValues entries that match this
 		// instance's class prefix and feed each through ScriptEngine's
 		// SetScriptField callback. Must run AFTER the managed instance has a
@@ -974,9 +991,16 @@ namespace Index {
 								}
 							}
 							if (instance.HasManagedInstance()) {
+								// Capture the handle BEFORE the apply/invoke pair so a
+								// re-entrant SetScriptField (managed property setter)
+								// or InvokeAwake that reallocates Scripts doesn't leave
+								// us dereferencing a dangling `instance` reference for
+								// the GetGCHandle read. InvokeAwake is the last touch
+								// in this lambda; no further reads of `instance` follow.
+								const uint32_t awakeHandle = instance.GetGCHandle();
 								// Apply BEFORE InvokeAwake so OnAwake sees fields.
 								ApplyPendingFieldValues(scriptComp, instance);
-								ScriptEngine::InvokeAwake(instance.GetGCHandle());
+								ScriptEngine::InvokeAwake(awakeHandle);
 							}
 							return true;
 						});
@@ -1177,8 +1201,12 @@ namespace Index {
 							// without ever touching PendingFieldValues, so by the
 							// time Update ran the entry condition was false and
 							// the loop was skipped.
+							// Capture handle before the apply/invoke pair: a re-
+							// entrant SetScriptField or InvokeAwake that calls
+							// AddScript would realloc Scripts and dangle `instance`.
+							const uint32_t awakeHandle = instance.GetGCHandle();
 							ApplyPendingFieldValues(scriptComp, instance);
-							ScriptEngine::InvokeAwake(instance.GetGCHandle());
+							ScriptEngine::InvokeAwake(awakeHandle);
 						}
 						return true;
 					});
@@ -1799,100 +1827,121 @@ namespace Index {
 		for (EntityHandle entity : entities)
 		{
 			ForEachScriptOnEntitySafe(scene, entity,
-				[&, entity](ScriptComponent& scriptComp, ScriptInstance& instance, size_t) -> bool {
-					if (instance.GetClassName().empty()) return true;
+				[&, entity](ScriptComponent& scriptCompRef, ScriptInstance& instanceRef, size_t) -> bool {
+					// Use pointers so we can rebind after every user-code invoke
+					// that might reallocate ScriptComponent::Scripts. The old code
+					// held a `ScriptInstance&` straight from the helper, which
+					// dangles the moment a managed Awake/OnEnable/Start (or a
+					// native Start/Update) calls back into the engine and
+					// AddScript()s on the same entity. The existing
+					// FindManagedScriptInstance checks documented this hazard but
+					// only verified existence — they didn't re-bind the reference,
+					// so subsequent reads still touched freed memory.
+					ScriptInstance* instance = &instanceRef;
+					ScriptComponent* scriptComp = &scriptCompRef;
+					(void)scriptComp;
 
-					if (!instance.IsBound())
-						instance.Bind(entity);
+					if (instance->GetClassName().empty()) return true;
 
-					if (!instance.HasAnyInstance())
+					if (!instance->IsBound())
+						instance->Bind(entity);
+
+					if (!instance->HasAnyInstance())
 					{
-						const ScriptType scriptType = instance.GetType();
+						const ScriptType scriptType = instance->GetType();
 						const bool canUseManaged = scriptType == ScriptType::Managed || scriptType == ScriptType::Unknown;
 						const bool canUseNative = scriptType == ScriptType::Native || scriptType == ScriptType::Unknown;
 
-						if (canUseManaged && managedRuntimeReady && ScriptEngine::ClassExists(instance.GetClassName()))
+						if (canUseManaged && managedRuntimeReady && ScriptEngine::ClassExists(instance->GetClassName()))
 						{
 							uint32_t handle = ScriptEngine::CreateScriptInstance(
-								instance.GetClassName(), entity);
+								instance->GetClassName(), entity);
 							if (handle != 0)
-								instance.SetGCHandle(handle);
+								instance->SetGCHandle(handle);
 						}
-						if (!instance.HasAnyInstance()
+						if (!instance->HasAnyInstance()
 							&& canUseNative
 							&& !IsTaskRunning(m_NativeRebuildTask)
 							&& m_NativeHost.IsLoaded())
 						{
 							NativeScript* native = m_NativeHost.CreateInstance(
-								instance.GetClassName(), entity, &scene);
+								instance->GetClassName(), entity, &scene);
 							if (native)
-								instance.SetNativePtr(native);
+								instance->SetNativePtr(native);
 						}
 
-						if (!instance.HasAnyInstance())
+						if (!instance->HasAnyInstance())
 							return true;
 
-						ApplyPendingFieldValues(scriptComp, instance);
-						if (instance.GetType() == ScriptType::Managed && instance.HasManagedInstance()) {
-							ScriptEngine::InvokeAwake(instance.GetGCHandle());
+						ApplyPendingFieldValues(*scriptComp, *instance);
+						if (instance->GetType() == ScriptType::Managed && instance->HasManagedInstance()) {
+							const uint32_t awakeHandle = instance->GetGCHandle();
+							ScriptEngine::InvokeAwake(awakeHandle);
+							// Rebind: user Awake may have AddScript'd, reallocating Scripts.
+							instance = FindManagedScriptInstance(scene, entity, awakeHandle);
+							if (!instance) return true;
 						}
 					}
 
-					if (instance.GetType() == ScriptType::Managed)
+					if (instance->GetType() == ScriptType::Managed)
 					{
-						if (!managedRuntimeReady || !instance.HasManagedInstance()) {
+						if (!managedRuntimeReady || !instance->HasManagedInstance()) {
 							return true;
 						}
 
-						const uint32_t handle = instance.GetGCHandle();
-						if (!instance.HasEnabled())
+						const uint32_t handle = instance->GetGCHandle();
+						if (!instance->HasEnabled())
 						{
-							instance.MarkEnabled();
+							instance->MarkEnabled();
 							ScriptEngine::InvokeOnEnable(handle);
-							if (!FindManagedScriptInstance(scene, entity, handle)) {
-								return true;
-							}
+							instance = FindManagedScriptInstance(scene, entity, handle);
+							if (!instance) return true;
 						}
 
-						if (!instance.HasStarted())
+						if (!instance->HasStarted())
 						{
-							instance.MarkStarted();
+							instance->MarkStarted();
 							ScriptEngine::InvokeStart(handle);
-							if (!FindManagedScriptInstance(scene, entity, handle)) {
-								return true;
-							}
+							instance = FindManagedScriptInstance(scene, entity, handle);
+							if (!instance) return true;
 						}
 						ScriptEngine::InvokeUpdate(handle);
+						// `instance` not used after this point; no rebind needed.
 					}
-					else if (instance.GetType() == ScriptType::Native)
+					else if (instance->GetType() == ScriptType::Native)
 					{
-						if (IsTaskRunning(m_NativeRebuildTask) || !instance.HasNativeInstance()) {
+						if (IsTaskRunning(m_NativeRebuildTask) || !instance->HasNativeInstance()) {
 							return true;
 						}
 
-						NativeScript* nativeInstance = instance.GetNativePtr();
+						NativeScript* nativeInstance = instance->GetNativePtr();
 						if (!nativeInstance) {
-							instance.Unbind();
+							instance->Unbind();
 							return true;
 						}
 
-						if (!instance.HasStarted())
+						if (!instance->HasStarted())
 						{
-							if (!TryInvokeNativeScript(instance, "Start", [nativeInstance]() {
+							if (!TryInvokeNativeScript(*instance, "Start", [nativeInstance]() {
 								nativeInstance->Start();
 							})) {
 								m_NativeHost.DestroyInstance(nativeInstance);
-								instance.Unbind();
+								// Rebind before Unbind — user Start may have realloc'd Scripts.
+								instance = FindNativeScriptInstance(scene, entity, nativeInstance);
+								if (instance) instance->Unbind();
 								return true;
 							}
-							instance.MarkStarted();
+							instance = FindNativeScriptInstance(scene, entity, nativeInstance);
+							if (!instance) return true;
+							instance->MarkStarted();
 						}
 
-						if (!TryInvokeNativeScript(instance, "Update", [nativeInstance, dt]() {
+						if (!TryInvokeNativeScript(*instance, "Update", [nativeInstance, dt]() {
 							nativeInstance->Update(dt);
 						})) {
 							m_NativeHost.DestroyInstance(nativeInstance);
-							instance.Unbind();
+							instance = FindNativeScriptInstance(scene, entity, nativeInstance);
+							if (instance) instance->Unbind();
 							return true;
 						}
 					}

@@ -168,7 +168,12 @@ namespace Index {
 		// Add System button in the scene-systems inspector, not on a prefab.
 		if (ImGui::BeginDragDropTarget()) {
 			if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ASSET_BROWSER_ITEM")) {
-				std::string droppedPath(static_cast<const char*>(payload->Data), static_cast<std::size_t>(payload->DataSize));
+				// 1-arg constructor — the asset-browser source sends a
+				// null-terminated path with `size() + 1` bytes; the
+				// (data, DataSize) form embeds the trailing `\0` and breaks
+				// `IsCSharpScriptExtension(".cs\0") == ".cs"` inside
+				// CollectScriptFile, silently dropping every script entry.
+				std::string droppedPath(static_cast<const char*>(payload->Data));
 				std::vector<EditorScriptDiscovery::ScriptEntry> droppedScripts;
 				EditorScriptDiscovery::CollectScriptFile(std::filesystem::path(droppedPath), droppedScripts);
 				for (const auto& scriptEntry : droppedScripts) {

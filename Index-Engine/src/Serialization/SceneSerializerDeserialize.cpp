@@ -1782,10 +1782,19 @@ namespace Index {
 				: scene.AddComponent<PolygonCollider2DComponent>(entity);
 
 			if (const Value* pointsArr = componentValue.FindMember("points"); pointsArr && pointsArr->IsArray()) {
-				std::vector<Vec2> points;
+				// Mirror the full-entity polygon path: cap at Box2D's max polygon
+				// vertices so a corrupt/hostile JSON points array can't force a
+				// multi-GB reserve before the first element is read.
+				constexpr std::size_t k_MaxPolygonVertices = 8;
 				const auto& arr = pointsArr->GetArray();
-				points.reserve(arr.size());
-				for (const Value& pt : arr) {
+				if (arr.size() > k_MaxPolygonVertices) {
+					IDX_CORE_WARN_TAG("Serialization", "Polygon collider point count {} exceeds max {}; truncating", arr.size(), k_MaxPolygonVertices);
+				}
+				const std::size_t take = arr.size() < k_MaxPolygonVertices ? arr.size() : k_MaxPolygonVertices;
+				std::vector<Vec2> points;
+				points.reserve(take);
+				for (std::size_t i = 0; i < take; ++i) {
+					const Value& pt = arr[i];
 					points.push_back(Vec2{
 						GetFloatMember(pt, "x", 0.0f),
 						GetFloatMember(pt, "y", 0.0f)

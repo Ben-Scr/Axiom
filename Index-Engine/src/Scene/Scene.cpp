@@ -1568,9 +1568,15 @@ namespace Index {
 		}
 		else {
 			circleCollider.Destroy();
-			// Body ownership invariant (mirror): zero a stale rigidbody mirror.
-			if (registry.all_of<Rigidbody2DComponent>(entity)) {
-				registry.get<Rigidbody2DComponent>(entity).m_BodyId = b2_nullBodyId;
+		}
+		// Body ownership invariant (mirror): zero a stale rigidbody mirror. Mirrors the
+		// Box variant — must run regardless of which branch above ran, because the with-
+		// Rigidbody2D path can still observe a stale b2BodyId if the rigidbody itself was
+		// torn down earlier in the same teardown cascade.
+		if (registry.all_of<Rigidbody2DComponent>(entity)) {
+			auto& rb = registry.get<Rigidbody2DComponent>(entity);
+			if (!b2Body_IsValid(rb.m_BodyId)) {
+				rb.m_BodyId = b2_nullBodyId;
 			}
 		}
 	}
@@ -1608,9 +1614,13 @@ namespace Index {
 		}
 		else {
 			polygonCollider.Destroy();
-			// Body ownership invariant (mirror): zero a stale rigidbody mirror.
-			if (registry.all_of<Rigidbody2DComponent>(entity)) {
-				registry.get<Rigidbody2DComponent>(entity).m_BodyId = b2_nullBodyId;
+		}
+		// Body ownership invariant (mirror): see Circle/Box variants — must run
+		// regardless of branch.
+		if (registry.all_of<Rigidbody2DComponent>(entity)) {
+			auto& rb = registry.get<Rigidbody2DComponent>(entity);
+			if (!b2Body_IsValid(rb.m_BodyId)) {
+				rb.m_BodyId = b2_nullBodyId;
 			}
 		}
 	}

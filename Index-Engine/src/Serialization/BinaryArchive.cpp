@@ -133,7 +133,10 @@ namespace Index::Serialization {
 	}
 
 	bool BinaryArchive::RawReadBytes(void* dst, std::size_t size) {
-		if (m_ReadCursor + size > m_ReadSize) return false;
+		// Overflow-safe bound check: comparing as `cursor + size > readSize`
+		// wraps when `size` (originating from an attacker-controlled varint)
+		// is near SIZE_MAX, letting the check pass before memcpy reads OOB.
+		if (m_ReadCursor > m_ReadSize || size > m_ReadSize - m_ReadCursor) return false;
 		std::memcpy(dst, m_ReadData + m_ReadCursor, size);
 		m_ReadCursor += size;
 		return true;
@@ -142,15 +145,20 @@ namespace Index::Serialization {
 	bool BinaryArchive::RawReadString(std::string& out) {
 		std::uint64_t len;
 		if (!RawReadVarint(len)) return false;
-		if (m_ReadCursor + len > m_ReadSize) return false;
-		out.assign(reinterpret_cast<const char*>(m_ReadData + m_ReadCursor),
-			static_cast<std::size_t>(len));
-		m_ReadCursor += static_cast<std::size_t>(len);
+		// Overflow-safe bound: see RawReadBytes. `len` is a 64-bit varint from
+		// the buffer; cast to size_t for the comparison after the subtraction.
+		if (m_ReadCursor > m_ReadSize) return false;
+		const std::size_t remaining = m_ReadSize - m_ReadCursor;
+		if (len > static_cast<std::uint64_t>(remaining)) return false;
+		const std::size_t lenSz = static_cast<std::size_t>(len);
+		out.assign(reinterpret_cast<const char*>(m_ReadData + m_ReadCursor), lenSz);
+		m_ReadCursor += lenSz;
 		return true;
 	}
 
 	bool BinaryArchive::RawSkipBytes(std::size_t size) {
-		if (m_ReadCursor + size > m_ReadSize) return false;
+		// Overflow-safe bound: see RawReadBytes.
+		if (m_ReadCursor > m_ReadSize || size > m_ReadSize - m_ReadCursor) return false;
 		m_ReadCursor += size;
 		return true;
 	}
@@ -229,7 +237,9 @@ namespace Index::Serialization {
 
 	bool BinaryArchive::SkipFieldValue(TypeTag tag, std::size_t& cursor) const {
 		auto require = [&](std::size_t n) {
-			if (cursor + n > m_ReadSize) return false;
+			// Overflow-safe bound check: see RawReadBytes — varint-derived `n`
+			// near SIZE_MAX would wrap `cursor + n` and let the check pass.
+			if (cursor > m_ReadSize || n > m_ReadSize - cursor) return false;
 			cursor += n;
 			return true;
 		};
@@ -436,7 +446,13 @@ namespace Index::Serialization {
 			std::size_t cursor = e->payloadStart;
 			std::uint64_t len;
 			if (!ReadULEB128(m_ReadData, m_ReadSize, cursor, len)) return;
-			if (cursor + len > e->payloadStart + e->payloadLen) return;
+			// Overflow-safe bound: the prior `cursor + len > payloadStart + payloadLen`
+			// could wrap both sides on adversarial varint length. Recompute the
+			// remaining bytes within this field's payload and compare directly.
+			const std::size_t payloadEnd = e->payloadStart + e->payloadLen;
+			if (cursor > payloadEnd) return;
+			const std::size_t remaining = payloadEnd - cursor;
+			if (len > static_cast<std::uint64_t>(remaining)) return;
 			v.assign(reinterpret_cast<const char*>(m_ReadData + cursor),
 				static_cast<std::size_t>(len));
 		}

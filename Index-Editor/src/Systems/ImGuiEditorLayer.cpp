@@ -3181,7 +3181,13 @@ namespace Index {
 							}
 						}
 						if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ASSET_BROWSER_ITEM")) {
-							std::string droppedPath(static_cast<const char*>(payload->Data), static_cast<std::size_t>(payload->DataSize));
+							// 1-arg constructor reads up to the null terminator — the
+							// asset-browser source intentionally appends `\0` and sends
+							// `size() + 1` bytes so this works. The 2-arg
+							// (data, DataSize) form silently embeds the trailing null
+							// in the string and breaks every downstream `==` against
+							// a literal extension like ".cs" / ".prefab".
+							std::string droppedPath(static_cast<const char*>(payload->Data));
 							std::string ext = std::filesystem::path(droppedPath).extension().string();
 							std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
 							if (ext == ".prefab") {
@@ -3190,6 +3196,36 @@ namespace Index {
 									EnsureEditorUniqueEntityNames(scene, { loaded });
 								}
 								m_EntityOrder.clear(); m_EntityOrderDirty = true;
+							}
+							else {
+								// Mirror the Add Component button drop: a .cs (managed
+								// component / EntityScript / native-component .cs) or
+								// .cpp (NativeScript) dropped onto an entity row attaches
+								// it to THAT entity only — not the full selection — so
+								// the gesture lines up with the row the user dropped on.
+								// CollectScriptFile no-ops for non-script extensions, so
+								// the same code naturally ignores audio / fonts / etc.
+								// `droppedPath` already constructed above with the
+								// 1-arg form, so the null terminator is correctly
+								// stripped before reaching CollectScriptFile.
+								std::vector<EditorScriptDiscovery::ScriptEntry> droppedScripts;
+								EditorScriptDiscovery::CollectScriptFile(std::filesystem::path(droppedPath), droppedScripts);
+								bool scriptAttached = false;
+								for (const auto& scriptEntry : droppedScripts) {
+									if (scriptEntry.IsGameSystem || scriptEntry.IsGlobalSystem) {
+										continue;
+									}
+									if (scriptEntry.IsManagedComponent) {
+										scriptAttached |= AttachManagedComponentToEntity(entity, scene, scriptEntry);
+									}
+									else {
+										scriptAttached |= AttachScriptToEntity(entity, scene, scriptEntry);
+									}
+								}
+								// Invalidate the inspector cache so the new
+								// component shows up immediately if the dropped-on
+								// entity happens to be selected.
+								if (scriptAttached) ++m_SelectionVersion;
 							}
 						}
 						ImGui::EndDragDropTarget();
@@ -3329,7 +3365,9 @@ namespace Index {
 						}
 					}
 					if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ASSET_BROWSER_ITEM")) {
-						std::string droppedPath(static_cast<const char*>(payload->Data), static_cast<std::size_t>(payload->DataSize));
+						// See the comment on the entity-row drop above for why this
+						// is the 1-arg constructor.
+						std::string droppedPath(static_cast<const char*>(payload->Data));
 						std::string ext = std::filesystem::path(droppedPath).extension().string();
 						std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
 						if (ext == ".scene") {
@@ -3392,7 +3430,10 @@ namespace Index {
 
 		auto acceptDroppedGameSystems = [&]() {
 			if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ASSET_BROWSER_ITEM")) {
-				std::string droppedPath(static_cast<const char*>(payload->Data), static_cast<std::size_t>(payload->DataSize));
+				// 1-arg form: see entity-row drop comment. The 2-arg form embeds
+				// the trailing `\0` and CollectScriptFile silently emits nothing
+				// because `IsCSharpScriptExtension(".cs\0")` is false.
+				std::string droppedPath(static_cast<const char*>(payload->Data));
 				std::vector<EditorScriptDiscovery::ScriptEntry> droppedScripts;
 				EditorScriptDiscovery::CollectScriptFile(std::filesystem::path(droppedPath), droppedScripts);
 				for (const auto& scriptEntry : droppedScripts) {
@@ -4115,31 +4156,19 @@ namespace Index {
 			m_ComponentSearchBuffer[0] = '\0';
 		}
 
-		// Categorized + searchable Add Component popup. Shared with the
-		// asset-side prefab inspector so the UX matches whether the user
-		// is editing a regular entity or a `.prefab` directly. The helper
-		// hides components present on every selected entity, applies adds
-		// to every entity missing the component, and runs conflict checks
-		// against the selection so invariant-violating combinations are
-		// disabled with a tooltip explaining why.
-		bool addComponentChanged = false;
-		RenderAddComponentPopup("AddComponentPopup", scene, entitySpan,
-			m_ComponentSearchBuffer, sizeof(m_ComponentSearchBuffer),
-			&addComponentChanged);
-		if (addComponentChanged) {
-			// New component(s) were just added to one or more selected entities
-			// — invalidate the inspector cache so the next frame rebuilds the
-			// common-component intersection and surfaces the new section.
-			++m_SelectionVersion;
-		}
-
-		// Drag-drop target: accept script files dropped onto the Inspector panel
+		// Drag-drop target on the Add Component button itself — accept .cs
+		// script files dropped from the asset browser and attach them to
+		// every selected entity. MUST sit immediately after the button so
+		// ImGui's global LastItemData still points at the button; placing
+		// it after RenderAddComponentPopup binds to whatever the popup
+		// rendered last instead, and the drop silently no-ops.
+		bool scriptDroppedSomething = false;
 		if (ImGui::BeginDragDropTarget()) {
 			if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ASSET_BROWSER_ITEM")) {
-				std::string droppedPath(static_cast<const char*>(payload->Data), static_cast<std::size_t>(payload->DataSize));
+				// 1-arg form: see entity-row drop comment above.
+				std::string droppedPath(static_cast<const char*>(payload->Data));
 				std::vector<EditorScriptDiscovery::ScriptEntry> droppedScripts;
 				EditorScriptDiscovery::CollectScriptFile(std::filesystem::path(droppedPath), droppedScripts);
-				bool scriptDroppedSomething = false;
 				for (const auto& scriptEntry : droppedScripts) {
 					if (scriptEntry.IsGameSystem || scriptEntry.IsGlobalSystem) {
 						continue;
@@ -4153,9 +4182,26 @@ namespace Index {
 						}
 					}
 				}
-				if (scriptDroppedSomething) ++m_SelectionVersion;
 			}
 			ImGui::EndDragDropTarget();
+		}
+
+		// Categorized + searchable Add Component popup. Shared with the
+		// asset-side prefab inspector so the UX matches whether the user
+		// is editing a regular entity or a `.prefab` directly. The helper
+		// hides components present on every selected entity, applies adds
+		// to every entity missing the component, and runs conflict checks
+		// against the selection so invariant-violating combinations are
+		// disabled with a tooltip explaining why.
+		bool addComponentChanged = false;
+		RenderAddComponentPopup("AddComponentPopup", scene, entitySpan,
+			m_ComponentSearchBuffer, sizeof(m_ComponentSearchBuffer),
+			&addComponentChanged);
+		if (addComponentChanged || scriptDroppedSomething) {
+			// New component(s) were just added to one or more selected entities
+			// — invalidate the inspector cache so the next frame rebuilds the
+			// common-component intersection and surfaces the new section.
+			++m_SelectionVersion;
 		}
 
 		// Mark the scene dirty only when ImGui reports a real value change on

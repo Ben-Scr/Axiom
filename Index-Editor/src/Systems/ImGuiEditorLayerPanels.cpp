@@ -1556,7 +1556,11 @@ namespace Index {
 
 				if (ImGui::BeginDragDropTarget()) {
 					if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ASSET_BROWSER_ITEM")) {
-						std::string droppedPath(static_cast<const char*>(payload->Data), static_cast<std::size_t>(payload->DataSize));
+						// 1-arg constructor — the asset-browser source sends a
+						// null-terminated path with `size() + 1` bytes; the
+						// (data, DataSize) form embeds the trailing `\0` and
+						// breaks the literal extension comparison below.
+						std::string droppedPath(static_cast<const char*>(payload->Data));
 						if (std::filesystem::path(droppedPath).extension() == ".scene") {
 							std::string sceneName = std::filesystem::path(droppedPath).stem().string();
 							auto it = std::find(m_BuildSceneList.begin(), m_BuildSceneList.end(), sceneName);
