@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "_comment": "URLs point at GitHub Releases of the Index repo. Until a release is published with these assets, the bundled copies (de.json, ja.json, NotoSansCJK-Regular.ttc) keep the launcher functional. To go fully download-on-demand, upload the three asset files to a tagged release and delete the bundled copies (the launcher will then fetch them on first selection).",
+  "_comment": "URLs point at GitHub Releases of the Index repo. The CJK font is download-on-demand: when a user first selects a CJK language, LanguageDownloader fetches it from the URL below and stores it under %LocalAppData%/Index/Fonts/NotoSansCJK/. Language JSONs (de.json, ja.json) stay bundled in this folder so the launcher works offline; the URLs here are the update path only.",
   "languages": [
     {
       "code": "de",
