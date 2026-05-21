@@ -28,9 +28,58 @@
 #ifdef IDX_PLATFORM_WINDOWS
 #include <shellapi.h>
 #include <shobjidl.h>
+#include <windows.h>
+#else
+#include <climits>
+#include <unistd.h>
 #endif
 
 namespace Index {
+
+	// Resolves this process's own executable path so we can relaunch
+	// ourselves after the CJK font download finishes. A restart is
+	// the only way to get the merged CJK glyphs into the ImGui font
+	// atlas — the launcher's ImGui context doesn't carry
+	// ImGuiBackendFlags_RendererHasTextures (see comment in
+	// Index-Engine/src/Gui/ImGuiFonts.hpp), so the atlas is baked
+	// statically at startup and can't grow at runtime.
+	static std::string ResolveOwnExecutablePath() {
+#ifdef IDX_PLATFORM_WINDOWS
+		std::vector<wchar_t> buf(MAX_PATH);
+		for (;;) {
+			DWORD copied = GetModuleFileNameW(nullptr, buf.data(), static_cast<DWORD>(buf.size()));
+			if (copied == 0) return {};
+			if (copied < buf.size()) break;
+			buf.resize(buf.size() * 2);
+			if (buf.size() > 65536) return {};
+		}
+		return std::filesystem::path(buf.data()).string();
+#else
+		char buf[PATH_MAX]{};
+		ssize_t len = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+		if (len <= 0) return {};
+		buf[len] = '\0';
+		return std::string(buf);
+#endif
+	}
+
+	// Spawns a new instance of the current binary and then quits the
+	// running one. Used by the CJK-font restart prompt.
+	static void RestartLauncherProcess() {
+		const std::string exePath = ResolveOwnExecutablePath();
+		if (exePath.empty()) {
+			IDX_CORE_WARN_TAG("Launcher",
+				"Cannot relaunch: failed to resolve own executable path.");
+			return;
+		}
+		if (!Process::LaunchDetached({ exePath })) {
+			IDX_CORE_WARN_TAG("Launcher",
+				"Cannot relaunch: LaunchDetached failed for '{}'.", exePath);
+			return;
+		}
+		IDX_CORE_INFO_TAG("Launcher", "Relaunching '{}'.", exePath);
+		Application::Quit();
+	}
 
 	// ── Relative Time Formatting ────────────────────────────────────
 
@@ -1618,6 +1667,9 @@ namespace Index {
 			else if (download->RestartRequired) {
 				ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.35f, 1.0f), "%s",
 					IDX_TR("launcher.settings.language.restart_required").c_str());
+				if (ImGui::Button(IDX_TR("launcher.settings.language.restart_now").c_str())) {
+					RestartLauncherProcess();
+				}
 			}
 			else {
 				const std::string msg = Localization::Format("launcher.settings.language.downloading", download->Code);

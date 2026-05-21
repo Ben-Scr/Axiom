@@ -65,6 +65,7 @@
     "launcher.settings.language.downloading": "Downloading {0}…",
     "launcher.settings.language.download_failed": "Download failed: {0}",
     "launcher.settings.language.restart_required": "Restart the launcher to render CJK characters.",
+    "launcher.settings.language.restart_now": "Restart now",
     "launcher.settings.browse": "Browse...",
     "launcher.settings.save": "Save",
     "launcher.settings.cancel": "Cancel",

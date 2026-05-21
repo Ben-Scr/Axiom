@@ -65,6 +65,7 @@
     "launcher.settings.language.downloading": "Lade {0}…",
     "launcher.settings.language.download_failed": "Download fehlgeschlagen: {0}",
     "launcher.settings.language.restart_required": "Starten Sie den Launcher neu, um CJK-Zeichen anzuzeigen.",
+    "launcher.settings.language.restart_now": "Jetzt neu starten",
     "launcher.settings.browse": "Durchsuchen...",
     "launcher.settings.save": "Speichern",
     "launcher.settings.cancel": "Abbrechen",

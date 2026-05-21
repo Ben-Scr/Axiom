@@ -65,6 +65,7 @@
     "launcher.settings.language.downloading": "{0} をダウンロード中…",
     "launcher.settings.language.download_failed": "ダウンロードに失敗しました: {0}",
     "launcher.settings.language.restart_required": "CJK文字を表示するにはランチャーを再起動してください。",
+    "launcher.settings.language.restart_now": "今すぐ再起動",
     "launcher.settings.browse": "参照...",
     "launcher.settings.save": "保存",
     "launcher.settings.cancel": "キャンセル",
