@@ -6,16 +6,16 @@
       "code": "de",
       "displayName": "Deutsch",
       "url": "https://github.com/Ben-Scr/Index/releases/download/v1/lang-de.json",
-      "sha256": "508cb4e8ea27015c48510b93a7f280baa9786645180722c7352d373aa4330093",
-      "sizeBytes": 3632,
+      "sha256": "eb52447f074f7d8662da496d4dd423327e078177bb42664d9248cfcac0f039b1",
+      "sizeBytes": 3965,
       "requiresCjkFont": false
     },
     {
       "code": "ja",
       "displayName": "Japanese (日本語)",
       "url": "https://github.com/Ben-Scr/Index/releases/download/v1/lang-ja.json",
-      "sha256": "69ac29029719618e2066199621436090c948768f716e4a39b664329a1f09b809",
-      "sizeBytes": 3926,
+      "sha256": "7e65f7710bc5ca6e8fcca5f6e2318554a79ce5ada7779a6a32a723de4b91a9df",
+      "sizeBytes": 4321,
       "requiresCjkFont": true
     }
   ],

@@ -128,8 +128,8 @@ public class PrefabSpawnJobSample : GameSystem
         {
             throw new InvalidOperationException("last spawned root is invalid after playback");
         }
-        ref NativeTransform2D firstTr = ref firstRoot.GetRef<NativeTransform2D>();
-        ref NativeTransform2D lastTr  = ref lastRoot.GetRef<NativeTransform2D>();
+        ref NativeTransform2D firstTr = ref firstRoot.GetNativeComponent<NativeTransform2D>();
+        ref NativeTransform2D lastTr  = ref lastRoot.GetNativeComponent<NativeTransform2D>();
         if (System.Runtime.CompilerServices.Unsafe.IsNullRef(ref firstTr) ||
             System.Runtime.CompilerServices.Unsafe.IsNullRef(ref lastTr))
         {

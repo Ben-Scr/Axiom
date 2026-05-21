@@ -606,6 +606,14 @@ namespace Index {
 					}
 					float scroll = m_IsEditorViewHovered ? input.ScrollValue() : 0.0f;
 
+					// Any user-initiated camera input cancels an in-flight focus
+					// lerp; otherwise next frame's UpdateEditorCameraFocus would
+					// pull the camera right back to the focus target.
+					if (m_EditorCameraFocusActive
+						&& (scroll != 0.0f || mouseDelta.x != 0.0f || mouseDelta.y != 0.0f)) {
+						m_EditorCameraFocusActive = false;
+					}
+
 					m_EditorCamera.Update(dt, m_IsEditorViewHovered, mouseDelta, scroll);
 				}
 

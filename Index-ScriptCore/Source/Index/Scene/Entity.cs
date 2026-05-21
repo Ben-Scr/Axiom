@@ -544,7 +544,7 @@ public class Entity : IEquatable<Entity>
     //
     // The returned ref is valid only until the next structural change to the
     // same component pool (Add/Remove/Destroy on any T). Refetch each frame.
-    public unsafe ref T GetRef<T>() where T : unmanaged, IComponent
+    public unsafe ref T GetNativeComponent<T>() where T : unmanaged, IComponent
     {
         void* p = InternalCalls.Entity_GetComponentPtr(ID, ComponentTypes<T>.NativeName);
         if (p == null) return ref Unsafe.NullRef<T>();

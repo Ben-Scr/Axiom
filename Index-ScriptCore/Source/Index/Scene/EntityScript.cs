@@ -1,6 +1,7 @@
 using System;
 using System.Threading;
 using System.Threading.Tasks;
+using Index.Components;
 using Index.Coroutines;
 
 namespace Index;
@@ -48,9 +49,18 @@ public abstract class EntityScript : Component
     protected T? AddComponent<T>() where T : Component, new() => Entity.AddComponent<T>();
     protected bool RemoveComponent<T>() where T : Component, new() => Entity.RemoveComponent<T>();
 
+    protected bool AddNativeComponent<T>() where T : unmanaged, IComponent => Entity.AddNativeComponent<T>();
+    protected unsafe ref T GetNativeComponent<T>() where T : unmanaged, IComponent => ref Entity.GetNativeComponent<T>();
+
+
     protected Entity Create(string? name = null) => Entity.Create(name);
     protected Entity Create(Entity source) => Entity.Create(source);
     protected Entity Instantiate(Entity prefabOrSource) => Entity.Instantiate(prefabOrSource);
+
+    protected void Print(object? obj)
+    {
+        Log.Info(obj?.ToString() ?? "null");
+    }
 
     /// <summary>
     /// Cancellation token tied to this script's lifetime. Cancelled
@@ -119,6 +129,7 @@ public abstract class EntityScript : Component
         try { cts.Cancel(); }
         finally { cts.Dispose(); }
     }
+
 
     public virtual void OnAwake() { }
     public virtual void OnStart() { }

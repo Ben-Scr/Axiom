@@ -36,7 +36,13 @@ jobs:
           if (-not $msbuild) {
             throw 'MSBuild.exe not found via vswhere.'
           }
-          & $msbuild "Index.sln" /m /t:Index-Engine /p:Configuration=Release /p:Platform=x64
+          # Build the .vcxproj directly. Using `Index.sln /t:Index-Engine` is
+          # broken with MSBuild 16.10+: the solution metaproj forwards the
+          # `Index-Engine` target name to every dependency project (Tracy, GLFW,
+          # Box2D, ...), which fails with MSB4057 because those projects only
+          # define the standard `Build` target. ProjectReference entries in the
+          # .vcxproj already cover the dependency graph.
+          & $msbuild "Index-Engine\Index-Engine.vcxproj" /m /p:Configuration=Release /p:Platform=x64
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
           }
@@ -97,6 +103,18 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y xorg-dev libglu1-mesa-dev xvfb
+
+      - name: Install Premake
+        run: |
+          # vendor/bin/ only contains premake5.exe (Windows) in the repo.
+          # Fetch the matching Linux binary so Setup.sh can find it via the
+          # vendored path the same way the Windows job does.
+          PREMAKE_VERSION="5.0.0-beta5"
+          URL="https://github.com/premake/premake-core/releases/download/v${PREMAKE_VERSION}/premake-${PREMAKE_VERSION}-linux.tar.gz"
+          mkdir -p vendor/bin
+          curl -fsSL "$URL" | tar -xz -C vendor/bin premake5
+          chmod +x vendor/bin/premake5
+          vendor/bin/premake5 --version
 
       - name: Generate Core Makefiles
         run: |

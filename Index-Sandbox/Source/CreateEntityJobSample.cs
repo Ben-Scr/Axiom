@@ -134,7 +134,7 @@ public class CreateEntityJobSample : GameSystem
         for (int i = 0; i < created; i++)
         {
             Entity spawned = ecb.GetCreatedEntity(i);
-            ref NativeTransform2D tr = ref spawned.GetRef<NativeTransform2D>();
+            ref NativeTransform2D tr = ref spawned.GetNativeComponent<NativeTransform2D>();
             if (Unsafe_IsNullRef(ref tr))
                 throw new InvalidOperationException($"entity #{i} has no NativeTransform2D component after playback");
 
@@ -208,13 +208,13 @@ public class CreateEntityJobSample : GameSystem
         // Spot-check the first and last entity since this path
         // preserves recording order 1:1 with creation order.
         Entity first = ecb.GetCreatedEntity(0);
-        ref NativeTransform2D firstTr = ref first.GetRef<NativeTransform2D>();
+        ref NativeTransform2D firstTr = ref first.GetNativeComponent<NativeTransform2D>();
         if (Unsafe_IsNullRef(ref firstTr) || !Approx(firstTr.LocalPosition.X, 0f))
             throw new InvalidOperationException(
                 $"single-thread: entity 0 LocalPosition.X = {(Unsafe_IsNullRef(ref firstTr) ? "null" : firstTr.LocalPosition.X.ToString())}, expected 0");
 
         Entity last = ecb.GetCreatedEntity(n - 1);
-        ref NativeTransform2D lastTr = ref last.GetRef<NativeTransform2D>();
+        ref NativeTransform2D lastTr = ref last.GetNativeComponent<NativeTransform2D>();
         if (Unsafe_IsNullRef(ref lastTr) || !Approx(lastTr.LocalPosition.X, n - 1))
             throw new InvalidOperationException(
                 $"single-thread: entity {n - 1} LocalPosition.X = {(Unsafe_IsNullRef(ref lastTr) ? "null" : lastTr.LocalPosition.X.ToString())}, expected {n - 1}");

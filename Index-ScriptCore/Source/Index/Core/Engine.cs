@@ -94,7 +94,7 @@ public static class Engine
     /// <summary>
     /// Active graphics backend enum. Use GraphicsApiName for the raw backend label.
     /// </summary>
-    public static Index.GraphicsApi GraphicsApi => ParseGraphicsApi(GraphicsApiName);
+    public static GraphicsApi GraphicsApi => ParseGraphicsApi(GraphicsApiName);
     public static string GraphicsApiName => InternalCalls.Engine_GetGraphicsApi();
 
     /// <summary>GPU vendor enum. Use <see cref="GpuVendorName"/> for the raw vendor label.</summary>
