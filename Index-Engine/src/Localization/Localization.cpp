@@ -364,6 +364,42 @@ namespace Index::Localization {
 			IDX_CORE_INFO_TAG("Localization", "Language switched to '{}'.", code);
 		}
 
+		// Kicks off a font-only download when the chosen language is already
+		// installed locally (e.g. its .json ships in the bundled IndexAssets)
+		// but the merged CJK font isn't on disk yet. Without this, picking a
+		// CJK language whose JSON is bundled would never trigger the font
+		// fetch — the download path in RequestLanguageDownload() only runs
+		// for languages with Status == Available. No-op when there is no
+		// CJK requirement, the font already exists at the user-dir path,
+		// the manifest has no CJK entry, or another download is in flight.
+		// Sets restartRequired so the UI knows the ImGui atlas has already
+		// been baked without the glyph ranges and needs a relaunch.
+		void EnsureCjkFontForInstalledLanguage(const std::string& code) {
+			State& s = S();
+
+			auto it = s.Manifest.find(code);
+			if (it == s.Manifest.end()) return;
+			if (!it->second.RequiresCjkFont) return;
+			if (!s.CjkFontEntry) return;
+			if (s.Downloader.IsRunning()) return;
+
+			const std::filesystem::path fontTarget = UserCjkFontPath();
+			std::error_code ec;
+			if (std::filesystem::exists(fontTarget, ec)) return;
+
+			std::vector<DownloadItem> items;
+			items.push_back(DownloadItem{
+				s.CjkFontEntry->Url,
+				fontTarget,
+				s.CjkFontEntry->Sha256,
+				s.CjkFontEntry->SizeBytes,
+			});
+
+			s.Downloader.Start(code, std::move(items), /*restartRequired*/ true);
+			IDX_CORE_INFO_TAG("Localization",
+				"Started CJK font download for '{}' (language already installed).", code);
+		}
+
 		LanguageInfo* FindLanguage(const std::string& code) {
 			State& s = S();
 			for (auto& info : s.AvailableLanguages) {
@@ -428,6 +464,8 @@ namespace Index::Localization {
 			WriteLanguagePreference(s.CurrentLanguage);
 		}
 
+		EnsureCjkFontForInstalledLanguage(s.CurrentLanguage);
+
 		IDX_CORE_INFO_TAG("Localization",
 			"Initialized with language '{}' ({} available, {} in manifest).",
 			s.CurrentLanguage, s.AvailableLanguages.size(), s.Manifest.size());
@@ -475,6 +513,7 @@ namespace Index::Localization {
 		if (info->Status == LanguageStatus::Installed) {
 			SwapActiveTable(codeStr);
 			WriteLanguagePreference(codeStr);
+			EnsureCjkFontForInstalledLanguage(codeStr);
 			return;
 		}
 
