@@ -1046,19 +1046,12 @@ namespace Index {
 		// counter persist across no-render frames matches the same
 		// "sticky last value" pattern m_RenderLoopDuration uses below.
 		m_RenderLoopDuration = 0.0f;
-
-#ifdef INDEX_PROFILER_ENABLED
-		// Promote any readback slot whose Copy was encoded last frame to
-		// MapAsync-pending now that the prior Submit has completed.
-		// Deferring the MapAsync to here (rather than issuing it inside
-		// ResolveCurrentFrame) prevents the "used in submit while mapped"
-		// validation error: encoding the Copy + immediately issuing
-		// MapAsync would have the buffer in Pending state when the
-		// frame's Submit fires, dropping the whole command buffer.
-		if (m_GpuTimer) {
-			m_GpuTimer->OnFrameStart();
-		}
-#endif
+		// Note: GpuTimer::OnFrameStart() (deferred MapAsync) does NOT
+		// belong here in the editor flow — Layer.OnPreRender (which
+		// invokes the editor's RenderSceneIntoFBO → RenderSceneWithVP →
+		// ResolveCurrentFrame) runs BEFORE Renderer2D::BeginFrame. Issuing
+		// MapAsync here would race against the same frame's Submit and
+		// validation-fail. The hook now lives in OnAfterPresent() instead.
 		// Bind-group cache is persistent across frames now — entries are
 		// evicted by the TextureManager DestroyListener registered in
 		// Initialize() whenever the underlying texture is unloaded or
@@ -1111,6 +1104,22 @@ namespace Index {
 		// lacks TimestampQuery — module stays at the default 0.0.
 		if (m_GpuTimer) {
 			m_GpuTimer->PollAndPublish();
+		}
+#endif
+	}
+
+	void Renderer2D::OnAfterPresent() {
+#ifdef INDEX_PROFILER_ENABLED
+		// Issue deferred MapAsync calls for slots whose Copy just got
+		// submitted. Calling MapAsync any earlier (BeginFrame, EndFrame,
+		// or inline in ResolveCurrentFrame) puts the buffer into Pending
+		// state while the frame's Submit still holds a CopyBufferToBuffer
+		// referencing it — Dawn rejects the whole command buffer and no
+		// draws reach the GPU. By the time this hook runs, Submit (in
+		// WebGPUBackend::Present, via Window::SwapBuffers) has completed,
+		// so MapAsync transitions the buffer safely.
+		if (m_GpuTimer) {
+			m_GpuTimer->OnFrameStart();
 		}
 #endif
 	}

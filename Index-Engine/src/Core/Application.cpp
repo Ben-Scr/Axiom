@@ -877,6 +877,16 @@ namespace Index {
 			INDEX_PROFILE_SCOPE("SwapBuffers");
 			m_Window->SwapBuffers();
 		}
+
+		// Post-Submit hook. SwapBuffers triggers WebGPUBackend::Present,
+		// which runs Queue::Submit. By the time control returns here, the
+		// command buffer for this frame has been consumed by Dawn and the
+		// GPU work is in flight. This is the safe place to issue any
+		// MapAsync calls that would otherwise have raced against Submit
+		// (e.g. GpuTimer's deferred readback maps).
+		if (Renderer2D* r2d = GetRenderer2D()) {
+			INDEX_TRY_CATCH_LOG(r2d->OnAfterPresent());
+		}
 	}
 
 	void Application::RenderOnceForRefresh() {

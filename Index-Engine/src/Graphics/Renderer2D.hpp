@@ -36,6 +36,16 @@ namespace Index {
 		void BeginFrame() override;
 		void EndFrame() override;
 		void Shutdown() override;
+
+		// Called once per Application frame, AFTER SwapBuffers (i.e. after
+		// the WebGPU Submit). The GpuTimer uses this to issue MapAsync on
+		// readbacks whose Copy was encoded in the just-finished frame —
+		// doing the MapAsync earlier (in BeginFrame, EndFrame, or inline
+		// in ResolveCurrentFrame) would race against the Submit and Dawn
+		// validates "used in submit while mapped", invalidating the
+		// command buffer and dropping every draw on the floor. Safe to
+		// call when GpuTimer is unavailable.
+		void OnAfterPresent();
 		static void ClearSceneCache(const Scene* scene);
 		void SetEnabled(bool enabled) { m_IsEnabled = enabled; }
 		bool IsEnabled() const { return m_IsEnabled; }
